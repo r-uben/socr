@@ -730,6 +730,15 @@ NATIVE_CELL_CHECK_VERIFIED_KIND = "native_cell_check_verified"
 NATIVE_CELL_CHECK_CONTRADICTED_KIND = "native_cell_check_contradicted"
 NATIVE_CELL_CHECK_AMBIGUOUS_KIND = "native_cell_check_ambiguous"
 NATIVE_CELL_CHECK_SKIPPED_KIND = "native_cell_check_skipped"
+#: #1267: the focused row-binding check (``tables.row_binding_check``): does each shipped row's
+#: label sit on the page's text-layer line that prints its values?  One event per table, only for
+#: a non-BOUND outcome (a BOUND table is recorded in the sidecar's ``row_binding`` field alone).
+#: Not advisory: unlike the per-cell kinds these are not gated by ``native_cell_gating``.
+TABLE_ROW_BINDING_CONTRADICTED_KIND = "table_row_binding_contradicted"
+TABLE_ROW_BINDING_UNVERIFIABLE_KIND = "table_row_binding_unverifiable"
+ROW_BINDING_EVENT_KINDS: frozenset[str] = frozenset(
+    {TABLE_ROW_BINDING_CONTRADICTED_KIND, TABLE_ROW_BINDING_UNVERIFIABLE_KIND}
+)
 
 #: All audit-event kinds this module defines, for callers that want to
 #: sanity-check membership without importing each constant by name.
@@ -764,6 +773,11 @@ REASON_NATIVE_CONTRADICTION = "native_contradiction"
 #: bytes are gone too. ``data["contradicted_tables"]`` names the cause and
 #: ``data["prior_terminal"]`` what the ladder had said about it.
 REASON_SIBLING_OF_CONTRADICTED = "sibling_of_contradicted"
+#: #1267 (owner ruling 2026-11-05): ``data["reason"]`` of a ``table_ladder_withheld`` event whose
+#: table was withheld because the labels of its rows do not bind to the values on the page's text layer
+#: (``tables.row_binding_check``). ``data["rows"]`` carries the per-row evidence and
+#: ``data["withheld_markdown"]`` the unshipped table. Read by the metadata note and the CLI line.
+REASON_ROW_BINDING_CONTRADICTION = "row_binding_contradiction"
 
 #: GH-581: the closed set of causes a ``table_ladder_unverified`` event's
 #: ``data["cause"]`` may carry. Every UNVERIFIED terminal has exactly one --

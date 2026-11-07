@@ -56,6 +56,7 @@ from socr.core.marks import (
     UNACCEPTED_OUTPUT_MARK_RE,
     UNVERIFIED_TABLE_MARK,
     UNVERIFIED_TABLE_MARK_RE,
+    row_binding_unverifiable_table_mark,
     Check,
     CheckResult,
     is_canonical_mark,
@@ -2351,6 +2352,10 @@ CREDENTIAL_BLOCKING_EVENT_KINDS: frozenset[str] = frozenset(
         # completed". Nothing retires it today, so it blocks; when an explicit
         # applicable resolution exists, retire it there rather than exempting the kind.
         "table_crop_repair_unverifiable",
+        # #1267: row labels proven not to bind to the page's text-layer values; a stand-in
+        # credential must not say every table was accepted over it.
+        "table_row_binding_contradicted",
+        "table_row_binding_unverifiable",
         "native_table_verifier_warn",
         "native_table_verifier_hard_fail",
         "table_value_drift_unadjudicated",
@@ -6570,20 +6575,54 @@ def _apply_unverified_table_mark(output: PageOutput, p) -> PageOutput:
     if kind == "disputed":
         mark = disputed_table_mark(mark_values, getattr(p, "d3_floor_png_ref", ""))
         mark_re = DISPUTED_TABLE_MARK_RE
+    _row_binding_unverifiable = (
+        {int(i) for i in (getattr(p, "row_binding_unverifiable_tables", None) or [])}
+        if kind != "disputed"
+        else set()
+    )
     unverified = (
         kind in ("disputed", "unverified")
         or getattr(p, "table_ladder_disposition", None) is FailureMode.TABLE_UNVERIFIED
         or output.failure_mode is FailureMode.TABLE_UNVERIFIED
         or (scanned and bool(output.table_unverifiable))
+        or bool(_row_binding_unverifiable)
     )
     if not unverified or not output.text or is_page_failed_marker(output.text):
         return output
     lines = output.text.splitlines(keepends=True)
     changed = False
+    # #1267: a table whose row binding the text layer could not settle says so in its own mark.
+    # Ordinals index the checked text's tables; a page with a withheld table takes the floor and
+    # reaches this point with no table left to mark.
+    from socr.tables.reconcile import find_table_blocks as _find_blocks
+
+    _blocks = _find_blocks(output.text)
+    _ordinals = list(range(int(getattr(p, "row_binding_table_count", 0) or 0)))
+    _mapped = len(_ordinals) == len(_blocks)
+    if not _mapped:
+        _ordinals = list(range(len(_blocks)))
+    _md_index = {b.start: _ordinals[k] for k, b in enumerate(_blocks)}
+    # Merge gate (Fable P2): when the row-binding check alone made the page unverified, a table it
+    # BOUND carries no mark.  Fail closed: any table whose ordinal cannot be placed is marked.
+    # Round 2 (Fable P2): a table the ladder never witnessed (``table_ladder_incomplete``, set
+    # later by the completeness backfill) makes the page unverified for its own reason.
+    _only_listed = (
+        kind != "disputed"
+        and _mapped
+        and bool(getattr(p, "row_binding_mark_only", False))
+        and not getattr(p, "table_ladder_incomplete", False)
+    )
     for start in reversed(_table_start_lines(output.text, lines)):
         if start >= 2 and mark_re.match(lines[start - 2]) and not lines[start - 1].strip():
             continue
-        insert = [mark + "\n", "\n"]
+        _k = _md_index.get(start)
+        if _k in _row_binding_unverifiable:
+            _mark = row_binding_unverifiable_table_mark(_k + 1)
+        elif _only_listed and _k is not None:
+            continue
+        else:
+            _mark = mark
+        insert = [_mark + "\n", "\n"]
         if start > 0 and lines[start - 1].strip():
             insert.insert(0, "\n")
         lines[start:start] = insert

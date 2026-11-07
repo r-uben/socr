@@ -98,6 +98,8 @@ EXPECTED_RESUME_KINDS = frozenset(
         "native_cell_check_contradicted",
         "native_cell_check_skipped",
         "native_cell_check_verified",
+        "table_row_binding_contradicted",
+        "table_row_binding_unverifiable",
         "blank_page",
         # PR #1160: counted by the run summary, emitted by steps a resumed page skips.
         "provider_empty_response",
@@ -145,4 +147,5 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # named -- a page naming more figures than it shipped crops -- stopped being a distinct
     # behaviour when every page the lane acts on became MARKED (Argon P0-1).
     # 65 with #1225's unshipped_figure_chart_skeleton.
-    assert len(EXPECTED_RESUME_KINDS) == 65
+    # 67 with #1267's two row-binding kinds.
+    assert len(EXPECTED_RESUME_KINDS) == 67

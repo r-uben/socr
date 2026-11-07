@@ -122,12 +122,15 @@ from socr.judge.table_verdict import (
     NATIVE_CELL_CHECK_CONTRADICTED_KIND,
     NATIVE_CELL_CHECK_SKIPPED_KIND,
     NATIVE_CELL_CHECK_VERIFIED_KIND,
+    ROW_BINDING_EVENT_KINDS,
     RUNG_KIND_CELL_ADJUDICATOR,
     RUNG_KIND_GEMINI,
     RUNG_KIND_OLLAMA,
     TABLE_BINDING_ADJUDICATED_KIND,
     TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
     TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+    TABLE_ROW_BINDING_CONTRADICTED_KIND,
+    TABLE_ROW_BINDING_UNVERIFIABLE_KIND,
     TABLE_SPACER_ROWS_DROPPED_KIND,
     TABLE_WRAPPED_LABEL_MERGED_KIND,
     rung_kind,
@@ -346,7 +349,9 @@ _ESCALATION_LAYER_GRADED_KINDS: frozenset[str] = frozenset(
 _LAYER_CAUSED_LADDER_KINDS: dict[str, tuple[str, frozenset[str]]] = {
     "table_ladder_withheld": (
         "reason",
-        frozenset({"native_contradiction", "sibling_of_contradicted"}),
+        # #1267 merge gate (Fable P2): a row-binding withhold is the text layer's verdict too;
+        # on a page whose layer may no longer serve as evidence it is re-read, not replayed.
+        frozenset({"native_contradiction", "sibling_of_contradicted", "row_binding_contradiction"}),
     ),
     "table_ladder_unverified": ("cause", frozenset({"binding_contradiction", "abstained"})),
     # #1205 round 5 (Argon P1). The one RESOLVING kind here, and the only one whose
@@ -519,6 +524,13 @@ _RESUME_REPLAYED: dict[str, str] = {
     NATIVE_CELL_CHECK_SKIPPED_KIND: (
         "default-on native per-cell binding: geometry skip on a resumed page"
     ),
+    TABLE_ROW_BINDING_CONTRADICTED_KIND: (
+        "#1267: row labels proven not to bind to the page's text-layer values; emitted by "
+        "_run_row_binding_check, which a resumed page skips, and in TABLE_DISTRUST_KINDS"
+    ),
+    TABLE_ROW_BINDING_UNVERIFIABLE_KIND: (
+        "#1267: row binding the text layer could not settle; same emission seam and trust listing"
+    ),
     VISUAL_VALUES_NOT_TRANSCRIBED_KIND: (
         "GH-519 / GH-563: the chart lane's debt is a standing property of the page; "
         "the document note and CLI summary read this event"
@@ -625,6 +637,28 @@ def _native_contradiction_withheld_pages(state: "DocumentState") -> dict[int, li
             c.get("kind", "") for c in data.get("contradictions", ()) if c.get("kind")
         )
     return {n: sorted(kinds) for n, kinds in found.items()}
+
+
+def _row_binding_withheld_pages(state: "DocumentState") -> dict[int, list[str]]:
+    """Pages with a table withheld because its row labels do not bind to the page's values (#1267).
+
+    ``{page: table ids}``, read from the ``table_ladder_withheld`` events whose
+    ``data["reason"]`` is ``row_binding_contradiction``: the record that survives a resume, so
+    the metadata note and the CLI line name the same pages the sidecars do.
+    """
+    from socr.judge.table_verdict import (
+        REASON_ROW_BINDING_CONTRADICTION,
+        TABLE_LADDER_WITHHELD_KIND,
+    )
+
+    found: dict[int, list[str]] = {}
+    for event in state.events:
+        if getattr(event, "kind", "") != TABLE_LADDER_WITHHELD_KIND:
+            continue
+        data = event.data or {}
+        if data.get("reason") == REASON_ROW_BINDING_CONTRADICTION:
+            found.setdefault(event.page_num, []).append(str(data.get("table_id", "")))
+    return found
 
 
 class _PageStageClock:
@@ -4358,6 +4392,39 @@ class UnifiedPipeline:
         )
 
     @staticmethod
+    def row_binding_event_kinds() -> frozenset[str]:
+        """Audit kinds emitted by ``_run_row_binding_check`` (#1267)."""
+        return ROW_BINDING_EVENT_KINDS
+
+    @staticmethod
+    def rollback_row_binding_page_state(state: DocumentState, page_num: int, ps: PageState) -> None:
+        """Drop row-binding events, sidecar entries and marked tables for one page."""
+        from socr.judge.table_verdict import (
+            REASON_ROW_BINDING_CONTRADICTION,
+            TABLE_LADDER_WITHHELD_KIND,
+        )
+
+        kinds = ROW_BINDING_EVENT_KINDS
+
+        def _ours(e) -> bool:
+            if e.page_num != page_num:
+                return False
+            if e.kind in kinds:
+                return True
+            return (
+                e.kind == TABLE_LADDER_WITHHELD_KIND
+                and (e.data or {}).get("reason") == REASON_ROW_BINDING_CONTRADICTION
+            )
+
+        state.events = [e for e in state.events if not _ours(e)]
+        _prefix = f"p{page_num}-t"
+        ps.row_binding = {k: v for k, v in ps.row_binding.items() if not k.startswith(_prefix)}
+        ps.row_binding_contradicted_tables = []
+        ps.row_binding_unverifiable_tables = []
+        ps.row_binding_table_count = 0
+        ps.row_binding_mark_only = False
+
+    @staticmethod
     def rollback_native_cell_page_state(
         state: DocumentState,
         page_num: int,
@@ -7559,8 +7626,18 @@ class UnifiedPipeline:
         # the PDF's own text layer contradicts it. Named apart, because "the readers
         # rejected it and a blind transcription disagreed" would be false for it.
         contradicted = _native_contradiction_withheld_pages(state)
+        bound_wrong = _row_binding_withheld_pages(state)
+        withheld_row_binding = [n for n in withheld if n in bound_wrong and n not in contradicted]
         withheld_contradicted = [n for n in withheld if n in contradicted]
-        withheld = [n for n in withheld if n not in contradicted]
+        withheld = [n for n in withheld if n not in contradicted and n not in withheld_row_binding]
+        if withheld_row_binding:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in withheld_row_binding)}: "
+                f"{FailureMode.TABLE_WITHHELD.value} (the table's row labels do not bind to the "
+                "values on the page's text layer: "
+                + "; ".join(f"p{n} {'/'.join(bound_wrong[n])}" for n in withheld_row_binding)
+                + "; the table's content was WITHHELD, not shipped)"
+            )
         if withheld_contradicted:
             parts.append(
                 f"page(s) {', '.join(str(n) for n in withheld_contradicted)}: "
@@ -9403,6 +9480,234 @@ class UnifiedPipeline:
 
         if worst is not None:
             self._apply_native_cell_check_demotion(ps, bo, worst)
+
+    def _apply_row_binding_policy(
+        self, ps: PageState, bo: PageOutput, *, contradicted: bool, unverifiable: bool
+    ) -> None:
+        """What a row-binding outcome does to the page.  The ONE place the policy lives (#1267).
+
+        Owner ruling 2026-11-05.  CONTRADICTED: the page is WITHHELD through the existing machinery
+        (disposition ``TABLE_WITHHELD``; ``manifest._apply_ladder_disposition_guard`` ships
+        ``withheld_table_floor_text``, so no table on the page ships: #1266's accepted B1 cost).
+        UNVERIFIABLE: MARKED, exactly like
+        ``_apply_native_cell_check_demotion`` but not gated by ``native_cell_gating``:
+        TABLE_UNVERIFIED unless already REJECTED/WITHHELD, SUCCESS to WARNING, failure mode
+        TABLE_UNVERIFIED if empty, and the unverified mark (written by the finalizer seam,
+        ``manifest._apply_unverified_table_mark``).  Never CHECKED.
+
+        Merge gate (Fable P2): ``row_binding_mark_only`` records that nothing else had made the
+        page unverified, so the finalizer marks only the unverifiable tables and leaves the bound
+        siblings unmarked.  ``unchecked_table_kind`` is still set: it carries the page-level
+        "page unchecked" line, which without it is replaced by the generic canonical line whose
+        reason ("the table ladder ran out of witnesses") is not what happened here.
+        """
+        if unverifiable:
+            ps.row_binding_mark_only = not (
+                ps.unchecked_table_kind
+                or ps.table_ladder_disposition is FailureMode.TABLE_UNVERIFIED
+                or bo.failure_mode is FailureMode.TABLE_UNVERIFIED
+            )
+        if contradicted:
+            ps.table_ladder_disposition = FailureMode.TABLE_WITHHELD
+        if not unverifiable:
+            return
+        if ps.table_ladder_disposition not in (
+            FailureMode.TABLE_REJECTED,
+            FailureMode.TABLE_WITHHELD,
+        ):
+            ps.table_ladder_disposition = FailureMode.TABLE_UNVERIFIED
+        if bo.status == PageStatus.SUCCESS:
+            bo.status = PageStatus.WARNING
+        if not bo.failure_mode:
+            bo.failure_mode = FailureMode.TABLE_UNVERIFIED
+        ps.unchecked_table_kind = "unverified"
+
+    def _run_row_binding_check(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        bo: PageOutput,
+        shipped: PageOutput | None = None,
+    ) -> bool:
+        """#1267: does each shipped row's label sit on the text-layer line that prints its values?
+
+        *shipped* is the finalized output whose table text ships (default: *bo*); the verdict
+        describes exactly that text.  Returns True when the page's state was changed (a table
+        withheld or the page marked).
+
+        Model output with table blocks, not a native/chart/failed candidate, on an admissible layer
+        of a born-digital page or of a page refused for spacing alone that
+        ``BornDigitalDetector.refused_layer_can_judge`` admits.  Words are rotated into the
+        reading frame inside ``tables.row_binding_check``.  Records ``ps.row_binding`` for every
+        table and one audit event per NON-BOUND table; the page policy is
+        ``_apply_row_binding_policy``.  A failure of the check itself is recorded as an
+        unverifiable event with the error, never swallowed.
+        """
+        # Merge gate (Fable P2): cleared before every guard, so no earlier verdict outlives a
+        # call that returns without checking.
+        self.rollback_row_binding_page_state(state, page_num, ps)
+        out = shipped if shipped is not None else bo
+        if out is None or not out.text or out.engine == "chart_asset" or is_failed_candidate(out):
+            return False
+        if self.config.native_only:
+            return False
+        if (out.engine or "") == "native":
+            return False
+        if not layer_is_admissible_evidence(ps):
+            return False
+        from socr.core.audit_log import AuditEvent
+        from socr.core.born_digital import BornDigitalDetector
+        from socr.tables.reconcile import find_table_blocks
+        from socr.tables.row_binding_check import (
+            RowVerdict,
+            TableOutcome,
+            check_page_row_binding,
+        )
+
+        blocks = find_table_blocks(out.text)
+        if not blocks:
+            return False
+        _out_lines = out.text.splitlines()
+
+        def _record(table_index: int, outcome: str, rows: list[dict], error: str = "") -> None:
+            table_id = f"p{page_num}-t{table_index}"
+            counts: dict[str, int] = {}
+            for r in rows:
+                counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+            payload = {
+                "table_id": table_id,
+                "table_index": table_index,
+                "outcome": outcome,
+                "counts": counts,
+                "rows": rows,
+            }
+            if error:
+                payload["error"] = error
+            if outcome == TableOutcome.CONTRADICTED.value:
+                # The model's table is withheld, not lost: it stays in the sidecar, unshipped,
+                # beside the evidence, for the re-read that follows.
+                _b = blocks[table_index]
+                payload["withheld_markdown"] = "\n".join(_out_lines[_b.start : _b.end + 1])
+            ps.row_binding[table_id] = payload
+            if outcome == TableOutcome.BOUND.value:
+                return
+            kind = (
+                TABLE_ROW_BINDING_CONTRADICTED_KIND
+                if outcome == TableOutcome.CONTRADICTED.value
+                else TABLE_ROW_BINDING_UNVERIFIABLE_KIND
+            )
+            detail = (
+                f"table {table_id}: row labels do not bind to the page's text-layer values "
+                f"({', '.join(f'{n} {v}' for v, n in sorted(counts.items()))})"
+                if kind == TABLE_ROW_BINDING_CONTRADICTED_KIND
+                else f"table {table_id}: row binding unverifiable on the text layer"
+                + (f" ({error})" if error else "")
+            )
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=kind,
+                    engine=out.engine or "",
+                    detail=detail,
+                    data=payload,
+                )
+            )
+            if kind == TABLE_ROW_BINDING_CONTRADICTED_KIND:
+                ps.row_binding_contradicted_tables.append(table_index)
+                from socr.judge.table_verdict import (
+                    REASON_ROW_BINDING_CONTRADICTION,
+                    TABLE_LADDER_WITHHELD_KIND,
+                )
+
+                state.events.append(
+                    AuditEvent(
+                        page_num=page_num,
+                        kind=TABLE_LADDER_WITHHELD_KIND,
+                        engine=out.engine or "",
+                        detail=(
+                            f"table {table_id} WITHHELD: its row labels do not bind to the values "
+                            "on the page's text layer "
+                            f"({', '.join(f'{n} {v}' for v, n in sorted(counts.items()))}) "
+                            "-- no table bytes ship for this table"
+                        ),
+                        data={
+                            "table_id": table_id,
+                            "reason": REASON_ROW_BINDING_CONTRADICTION,
+                            "rows": rows,
+                            "withheld_markdown": payload["withheld_markdown"],
+                            "rung_trail": [],
+                            "witness_scope": "none",
+                        },
+                    )
+                )
+            else:
+                ps.row_binding_unverifiable_tables.append(table_index)
+
+        worst = TableOutcome.BOUND.value
+        try:
+            from socr.core.pdf import open_pdf
+            from socr.tables.locate import locate_tables
+
+            with open_pdf(state.handle.path) as doc:
+                if page_num < 1 or page_num > doc.page_count or doc[page_num - 1] is None:
+                    raise LookupError("pdf_page_unavailable")
+                page = doc[page_num - 1]
+                # The classifier also refuses real layers as excessively spaced (9 of the 35
+                # convicted held-out pages). Every other refusal doubts the layer's characters.
+                if not getattr(ps, "is_born_digital", False) and not (
+                    getattr(ps, "refused_for_spacing_alone", False)
+                    and BornDigitalDetector().refused_layer_can_judge(page)
+                ):
+                    return False
+                ps.row_binding_table_count = len(blocks)
+                regions = [tuple(b.bbox) for b in locate_tables(page)] or None
+                results, _rotation = check_page_row_binding(page, out.text, regions)
+            for idx, result in enumerate(results):
+                rows = [
+                    {
+                        "md_line": e.line_index,
+                        "verdict": e.verdict.value,
+                        "reason": e.reason,
+                        "shipped_label": e.shipped_label,
+                        "native_label": e.native_label,
+                        "values": list(e.values),
+                        "native_line": e.native_line,
+                    }
+                    for e in result.rows
+                    if e.verdict is not RowVerdict.BOUND
+                ]
+                _record(idx, result.outcome.value, rows)
+                if result.outcome is TableOutcome.CONTRADICTED:
+                    worst = TableOutcome.CONTRADICTED.value
+                elif (
+                    result.outcome is TableOutcome.UNVERIFIABLE
+                    and worst != TableOutcome.CONTRADICTED.value
+                ):
+                    worst = TableOutcome.UNVERIFIABLE.value
+        except Exception as exc:
+            logger.warning(
+                "row binding check failed on p%d (%s: %s)", page_num, type(exc).__name__, exc
+            )
+            self.rollback_row_binding_page_state(state, page_num, ps)
+            ps.row_binding_table_count = len(blocks)
+            for idx, _block in enumerate(blocks):
+                _record(
+                    idx,
+                    TableOutcome.UNVERIFIABLE.value,
+                    [],
+                    error=f"check_error:{type(exc).__name__}",
+                )
+            worst = TableOutcome.UNVERIFIABLE.value
+        if worst == TableOutcome.BOUND.value:
+            return False
+        self._apply_row_binding_policy(
+            ps,
+            bo,
+            contradicted=bool(ps.row_binding_contradicted_tables),
+            unverifiable=bool(ps.row_binding_unverifiable_tables),
+        )
+        return True
 
     def _binding_contradiction_for_witness(self, state: DocumentState, page_num: int, witness):
         """The E1 clamp's question, unchanged: is there a genuine contradiction?
@@ -12723,6 +13028,30 @@ class UnifiedPipeline:
                         _record = finalized_page_record(
                             state, page_num, _whole_doc_page_texts(state)
                         )
+                        # #1267: the row-binding check judges the table text that SHIPS, so it
+                        # runs here, on the finalized record, after every step that can change
+                        # a page's table (reread, crop patch + re-judge, escalation, ladder gate,
+                        # both withhold gates, the finalize guards). A demotion changes what the
+                        # record says, so the record is taken once more in that case only.
+                        if self._run_row_binding_check(state, page_num, ps, bo, _record.output):
+                            # A withheld table ships the failure marker and a link to the page
+                            # picture, rendered exactly as the ladder withhold renders it
+                            # (marker only if the render fails, as there).
+                            if (
+                                ps.row_binding_contradicted_tables
+                                and not getattr(ps, "d3_floor_png_ref", "")
+                                and _chart_figures_dir is not None
+                            ):
+                                ps.d3_floor_png_ref = self._render_d3_floor_png(
+                                    state.handle.path,
+                                    page_num,
+                                    _chart_figures_dir,
+                                    stem="failed_table",
+                                    label="Failed table page",
+                                )
+                            _record = finalized_page_record(
+                                state, page_num, _whole_doc_page_texts(state)
+                            )
 
                         # Strip any leading ## Page N marker so the provisional fragment
                         # body matches what assemble would produce (modulo
@@ -16738,6 +17067,20 @@ class UnifiedPipeline:
         }
         # #1050: sparse like unchecked_table_kind. Absent when the check is off
         # or has not run, so P6 sidecar bytes stay identical on those pages.
+        # #1267: sparse, like the fields around it, so a page the check did not run on keeps its bytes.
+        if ps is not None and getattr(ps, "row_binding", None):
+            payload["row_binding"] = dict(ps.row_binding)
+            if ps.row_binding_contradicted_tables:
+                payload["row_binding_contradicted_tables"] = list(
+                    ps.row_binding_contradicted_tables
+                )
+            if ps.row_binding_unverifiable_tables:
+                payload["row_binding_unverifiable_tables"] = list(
+                    ps.row_binding_unverifiable_tables
+                )
+            payload["row_binding_table_count"] = ps.row_binding_table_count
+            if ps.row_binding_mark_only:
+                payload["row_binding_mark_only"] = True
         _coverage = (getattr(ps, "text_coverage_verdict", "") or "") if ps else ""
         if _coverage:
             payload["text_coverage"] = _coverage
@@ -18362,6 +18705,21 @@ class UnifiedPipeline:
             # it. This only refuses to ACT on it now.
             if isinstance(restored_native_cell, dict) and layer_is_admissible_evidence(ps):
                 ps.native_cell_binding = dict(restored_native_cell)
+            # #1267: the row-binding record is restored under the same abstention as the per-cell
+            # one (a suspect layer may neither supply nor keep a binding verdict).
+            restored_row_binding = meta.get("row_binding")
+            if isinstance(restored_row_binding, dict) and layer_is_admissible_evidence(ps):
+                ps.row_binding = dict(restored_row_binding)
+                _marked = meta.get("row_binding_contradicted_tables")
+                ps.row_binding_contradicted_tables = (
+                    [int(i) for i in _marked] if isinstance(_marked, list) else []
+                )
+                ps.row_binding_table_count = int(meta.get("row_binding_table_count") or 0)
+                ps.row_binding_mark_only = bool(meta.get("row_binding_mark_only"))
+                _unv = meta.get("row_binding_unverifiable_tables")
+                ps.row_binding_unverifiable_tables = (
+                    [int(i) for i in _unv] if isinstance(_unv, list) else []
+                )
             # #1205 round 2 (Argon P1-4): same guard as the resume gate's own call, for
             # the same reason -- see there.
             if layer_is_admissible_evidence(ps):
@@ -18414,6 +18772,7 @@ class UnifiedPipeline:
                 # blocks its credential. Its companion RESOLVED event goes with it: on
                 # such a page neither the doubt nor its clearance is the layer's to give.
                 restore_kinds = restore_kinds - self.native_cell_check_event_kinds()
+                restore_kinds = restore_kinds - self.row_binding_event_kinds()
                 restore_kinds = restore_kinds - {
                     TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
                     TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
@@ -20734,10 +21093,29 @@ class UnifiedPipeline:
                         if getattr(state.pages.get(n), "table_judge_retry_pending", False)
                     ]
                     _contradicted = _native_contradiction_withheld_pages(state)
+                    _row_bound = _row_binding_withheld_pages(state)
+                    _withheld_by_binding = [
+                        n
+                        for n in table_withheld_pages
+                        if n in _row_bound and n not in _contradicted
+                    ]
                     _withheld_by_ladder = [
-                        n for n in table_withheld_pages if n not in _contradicted
+                        n
+                        for n in table_withheld_pages
+                        if n not in _contradicted and n not in _withheld_by_binding
                     ]
                     _withheld_by_text = [n for n in table_withheld_pages if n in _contradicted]
+                    if _withheld_by_binding:
+                        console.print(
+                            f"  [red]{len(_withheld_by_binding)} table page(s) WITHHELD — "
+                            f"TABLE_WITHHELD (the table's row labels do not bind to the values "
+                            f"on the page's text layer; the table's content was NOT shipped, see "
+                            f"the page image): "
+                            + ", ".join(
+                                f"p{n} ({'/'.join(_row_bound[n])})" for n in _withheld_by_binding
+                            )
+                            + "[/red]"
+                        )
                     if _withheld_by_text:
                         console.print(
                             f"  [red]{len(_withheld_by_text)} table page(s) WITHHELD — "

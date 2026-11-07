@@ -746,6 +746,9 @@ def _run_chart_detection_case(tmp_path: Path, *, fail_detector: bool):
         patch("socr.pipeline.orchestrator.route_page", return_value=routed_decision),
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
         patch.object(pipeline, "_run_native_cell_binding_check"),
+        # #1267: scope narrowed. This test pins the chart-detection-failure status; the fixture's
+        # text layer does not print the model table, so the row-binding check would also mark it.
+        patch.object(pipeline, "_run_row_binding_check", return_value=False),
     ):
         pipeline._phase_agentic(state, tmp_path)
         out_dir = tmp_path / "out"

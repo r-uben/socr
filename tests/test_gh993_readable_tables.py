@@ -65,6 +65,9 @@ def _run(tmp_path: Path, result, *, quiet: bool = True):
     # every page and nothing could be "verified". It is a trust event like any other,
     # so a flagged-page case is covered separately on ``count_page_tables``.
     pipeline._surface_table_scoring = lambda *args, **kwargs: None
+    # #1267: scope narrowed. The fixture's text layer does not print the model's values, so the
+    # row-binding check would mark every table UNVERIFIABLE and hide the ladder counts under test.
+    pipeline._run_row_binding_check = lambda *args, **kwargs: False
     out = tmp_path / "out"
     _process(pipeline, pdf, out, [_QueueRung([result])])
     return out / "doc"

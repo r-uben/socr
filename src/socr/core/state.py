@@ -115,6 +115,9 @@ class PageState:
     #: recoverable when the two differ.
     native_text_raw: str | None = None
     needs_ocr_enhancement: bool = False  # native layer has a known deficiency
+    #: #1267: see ``PageAssessment.refused_for_spacing_alone``. Runtime only: the check that reads
+    #: it does not run again on a restored page.
+    refused_for_spacing_alone: bool = False
     has_tables: bool = False  # page contains table-like structures
     has_figures: bool = False  # page contains embedded raster images
     has_equations: bool = False  # page contains math/equations
@@ -624,6 +627,21 @@ class PageState:
     #: Default-on per-cell native binding outcomes by ``table_id`` (see
     #: ``tables.native_cell_check`` and ``native_cell_check_*`` audit events).
     native_cell_binding: dict = field(default_factory=dict)
+    #: #1267: per-``table_id`` outcome of the focused row-binding check
+    #: (``tables.row_binding_check``), BOUND tables included; restored from the sidecar.
+    row_binding: dict = field(default_factory=dict)
+    #: #1267: 0-based indices of the page's tables whose row labels were PROVEN not to bind;
+    #: those tables are WITHHELD (owner ruling 2026-11-05). Persisted.
+    row_binding_contradicted_tables: list = field(default_factory=list)
+    #: #1267: how many markdown tables the checked text held (the ordinals above index them).
+    row_binding_table_count: int = 0
+    #: #1267: tables whose row binding the text layer could not settle (the mark says so, and
+    #: does not claim a contradiction). Persisted.
+    row_binding_unverifiable_tables: list = field(default_factory=list)
+    #: #1267 merge gate: the page is unverified ONLY because of the row-binding check, so the
+    #: unverified mark goes on ``row_binding_unverifiable_tables`` alone, not on bound siblings.
+    #: Persisted.
+    row_binding_mark_only: bool = False
     #: P1 retry latch: transient external state absent from the run fingerprint.
     #: Set when at least one table on this page reached an UNVERIFIED terminal
     #: caused by an unavailable table judge rung (transport failure, missing
@@ -923,6 +941,7 @@ class DocumentState:
                 ps.native_paragraphs = tuple(getattr(pa, "native_paragraphs", ()) or ())
                 ps.load_error = getattr(pa, "load_error", "") or ""
                 ps.is_born_digital = pa.is_born_digital
+                ps.refused_for_spacing_alone = getattr(pa, "refused_for_spacing_alone", False)
                 ps.has_tables = pa.has_tables
                 ps.has_figures = pa.has_figures
                 ps.has_equations = pa.has_equations

@@ -28,6 +28,8 @@ from socr.judge.table_verdict import (
     TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
     TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
     TABLE_LADDER_UNVERIFIED_KIND,
+    TABLE_ROW_BINDING_CONTRADICTED_KIND,
+    TABLE_ROW_BINDING_UNVERIFIABLE_KIND,
 )
 from socr.tables.ditto import DITTO_UNRESOLVED_KIND
 from socr.tables.reconcile import PATCH_ELIGIBLE_NOTE
@@ -257,6 +259,13 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # content -- see NON_RESOLVABLE_DISTRUST_KINDS below for why a later
         # ladder acceptance does not clear this one.
         TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+        # #1267: row labels PROVEN not to bind to the values on the page's own text layer.
+        # Not advisory: ``native_cell_gating`` does not apply to it.  The companion
+        # ``table_row_binding_unverifiable`` is listed too: unwitnessed means MARKED, never
+        # CHECKED, so a page whose binding the layer could not settle is untrusted until the
+        # owner rules otherwise (``UnifiedPipeline._apply_row_binding_policy``).
+        TABLE_ROW_BINDING_CONTRADICTED_KIND,
+        TABLE_ROW_BINDING_UNVERIFIABLE_KIND,
         # #625: a shipped table column carries a ditto mark (owner ruling,
         # option 3: keep the mark verbatim, surface it). Not a digit-wrong
         # doubt -- the same "shipped, not a failure" shape as
@@ -291,6 +300,12 @@ NON_RESOLVABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         "native_cell_check_contradicted",
         "native_cell_check_ambiguous",
         "native_cell_check_skipped",
+        # #1267: a PROVEN row-binding contradiction.  The judge ladder reads values, not which
+        # label they sit under (the canary shipped 'faithful'), so a later ladder acceptance
+        # says nothing about it and must not clear it; same for the unverifiable kind (an
+        # acceptance does not check labels either).
+        TABLE_ROW_BINDING_CONTRADICTED_KIND,
+        TABLE_ROW_BINDING_UNVERIFIABLE_KIND,
     }
 )
 

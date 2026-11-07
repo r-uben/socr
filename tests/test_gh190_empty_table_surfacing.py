@@ -449,6 +449,10 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
             "_available_engines_for_agentic",
             return_value=[PROFILE_QWEN_LOCAL],
         ),
+        # #1267 round 5 (R2): the row-binding check judges every table row, the header included, and
+        # this fixture's text layer does not print the table, so it would mark the page. This test
+        # pins empty-table surfacing at every level, not row binding (tests/test_gh1267_*).
+        patch.object(pipeline_empty, "_run_row_binding_check", return_value=False),
         patch(
             "socr.pipeline.orchestrator.route_page",
             side_effect=_make_route_fn(EMPTY_TABLE_FIXTURE),
@@ -472,6 +476,10 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
             "_available_engines_for_agentic",
             return_value=[PROFILE_QWEN_LOCAL],
         ),
+        # #1267 round 5 (R2): the row-binding check judges every table row, the header included, and
+        # this fixture's text layer does not print the table, so it would mark the page. This test
+        # pins empty-table surfacing at every level, not row binding (tests/test_gh1267_*).
+        patch.object(pipeline_pop, "_run_row_binding_check", return_value=False),
         patch(
             "socr.pipeline.orchestrator.route_page",
             side_effect=_make_route_fn(PAIRED_POPULATED_TABLE_FIXTURE),

@@ -114,6 +114,9 @@ def _run(root: Path, *, mode: str):
             patch.object(pipeline, "_surface_table_scoring", side_effect=_score),
             patch.object(pipeline, "_run_engine_on_pages", side_effect=_engine),
             patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            # #1267: scope narrowed. The fixture's text layer does not print the model's values,
+            # so the row-binding check would mark the page too; this file pins the escalation latch.
+            patch.object(pipeline, "_run_row_binding_check", return_value=False),
             patch("socr.pipeline.orchestrator.route_page", side_effect=_route_fn),
             patch(
                 "socr.pipeline.agentic.HeuristicPageJudge.assess",
@@ -221,6 +224,9 @@ def _run_with_native_cell_gating(root: Path, *, mode: str):
             patch.object(pipeline, "_surface_table_scoring", side_effect=_score),
             patch.object(pipeline, "_run_engine_on_pages", side_effect=_engine),
             patch.object(pipeline, "_resolve_judge_model", return_value=""),
+            # #1267: scope narrowed. The fixture's text layer does not print the model's values,
+            # so the row-binding check would mark the page too; this file pins the escalation latch.
+            patch.object(pipeline, "_run_row_binding_check", return_value=False),
             patch("socr.pipeline.orchestrator.route_page", side_effect=_route_fn),
             patch(
                 "socr.pipeline.agentic.HeuristicPageJudge.assess",
