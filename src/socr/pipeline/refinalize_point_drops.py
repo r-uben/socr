@@ -87,14 +87,10 @@ def _text_layer_mark_re(page_num: int) -> re.Pattern[str]:
 def without_text_layer_marks(text: str, page_num: int) -> str:
     """*text* without its ``text_layer_numbers`` / ``text_layer_drops`` page marks (the leading
     banner block only; every other banner stays, in its place)."""
-    from socr.core.manifest import _split_page_top_banners, _with_page_top_banners
+    from socr.core.manifest import without_page_top_banners
 
-    banners, body = _split_page_top_banners(text)
     rx = _text_layer_mark_re(page_num)
-    kept = [b for b in banners if not rx.match(b.strip())]
-    if len(kept) == len(banners):
-        return text
-    return _with_page_top_banners(body, kept)
+    return without_page_top_banners(text, lambda banner: bool(rx.match(banner)))
 
 
 def _page_state_for(sidecar: dict, pa):
