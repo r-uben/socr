@@ -149,7 +149,17 @@ def test_without_the_repair_the_rows_have_no_line_and_with_it_they_are_bound():
 
 
 def test_the_repaired_cell_is_the_pdfs_own_string():
-    for stem, rows in sorted(_expected().items()):
-        for r in rows:
-            assert r["new"].lstrip("-").startswith(".") or "." in r["new"], r
-            assert "-0." not in r["new"] and not r["new"].startswith("0."), r
+    """Run the code: every cell it writes is a word the PDF itself prints, character for
+    character, and never a zero-padded form the model would have used."""
+    seen = 0
+    for stem in sorted(_expected()):
+        doc, page, _text, new, repaired, _refused, _regions = _page_repairs(stem)
+        printed = {w[4] for w in page.get_text("words")}
+        for _i, reps in repaired:
+            for r in reps:
+                assert r.new in printed, (stem, r.new)
+                assert r.new in new, (stem, r.new)
+                assert not r.new.lstrip("-+").startswith("0."), (stem, r.new)
+                seen += 1
+        doc.close()
+    assert seen > 0

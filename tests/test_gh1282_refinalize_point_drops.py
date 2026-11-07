@@ -9,12 +9,14 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
 
 pytest.importorskip("fitz")
 
+from test_gh1267_row_binding_check import md  # noqa: E402
 from test_gh1267_row_binding_pipeline import (  # noqa: E402
     _assembled,
     _events,
@@ -54,12 +56,21 @@ def _doc_meta(out: Path) -> dict:
     return docs[0]
 
 
-def _runs(tmp_path, rows, rotation):
+def _runs(tmp_path, rows, rotation, native=NATIVE, markdown=None):
     """``(on, off, pdf_dir)``: the live run with the step, and the run without it."""
-    _, _, _, on, pdf = _run(tmp_path, rows, rotation, check_runs=True, out_name="on", native=NATIVE)
+    _, _, _, on, pdf = _run(
+        tmp_path, rows, rotation, check_runs=True, out_name="on", native=native, markdown=markdown
+    )
     with patch.object(UnifiedPipeline, "_repair_dropped_points", _noop):
         _, _, _, off, _ = _run(
-            tmp_path, rows, rotation, check_runs=True, out_name="off", pdf=pdf, native=NATIVE
+            tmp_path,
+            rows,
+            rotation,
+            check_runs=True,
+            out_name="off",
+            pdf=pdf,
+            native=native,
+            markdown=markdown,
         )
     return on, off, pdf.parent
 
@@ -129,18 +140,82 @@ def test_apply_twice_changes_nothing_the_second_time(tmp_path, rotation, capsys)
     assert "0  pages repaired" in out
 
 
+# Fable's two-table case: t0 has the dropped point, t1 a label slip (`Imxorts`)
+TWO_NATIVE = [
+    *NATIVE[:3],
+    ("Wages", ["5.1", "5.2", "5.3"]),
+    ("Prices", ["6.1", "6.2", "6.3"]),
+]
+TWO_MARKDOWN = (
+    md([NATIVE[0], ("Net exports", ["-7", "1.5", "2.5"]), NATIVE[2]])
+    + "\nProse between the tables.\n\n"
+    + md([("Wages", ["5.1", "5.2", "5.3"]), ("Pricex", ["6.1", "6.2", "6.3"])])
+)
+
+
+def _live_bytes(out: Path) -> dict:
+    """What a reader and a resume see: fragment, document, sidecar (timings aside), events."""
+    sidecar = {k: v for k, v in _sidecar(out).items() if k != "timings_s"}
+    audit = json.loads(next(out.rglob("audit_log.json")).read_text())
+    return {
+        "fragment": _fragment(out),
+        "document": _assembled(out),
+        "sidecar": sidecar,
+        "events": audit["events"],
+    }
+
+
 @pytest.mark.parametrize("rotation", [0, 90])
-def test_a_page_whose_table_outcome_would_change_is_left_alone_and_counted(
+@pytest.mark.parametrize("case", ["dropped", "slipped", "two_tables"])
+def test_offline_bytes_equal_live_bytes(tmp_path, rotation, case, capsys):
+    """Ruling 3: the step enabled (live) and the step-off run plus the tool give the same
+    fragment, document, sidecar and events -- including a table that binds completely after the
+    repair (DROPPED: it stays recorded UNVERIFIABLE, no mark lifts) and Fable's two-table page."""
+    kw = {
+        "dropped": dict(rows=DROPPED),
+        "slipped": dict(rows=SLIPPED),
+        "two_tables": dict(rows=None, native=TWO_NATIVE, markdown=TWO_MARKDOWN),
+    }[case]
+    on, off, pdf_dir = _runs(tmp_path, kw.pop("rows"), rotation, **kw)
+    assert _fragment(off) != _fragment(on)
+    out = _tool(off, pdf_dir, "--apply", capsys=capsys)
+    assert "1  pages repaired" in out
+    live, offline = _live_bytes(on), _live_bytes(off)
+    for key in live:
+        assert offline[key] == live[key], key
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_a_page_the_tool_leaves_alone_is_named_in_the_output_and_the_log(
     tmp_path, rotation, capsys
 ):
-    """DROPPED repairs to a fully BOUND table: its unverified mark and status would follow, which
-    a run decides.  The tool refuses it; the live run with the step does change the page."""
-    on, off, pdf_dir = _runs(tmp_path, DROPPED, rotation)
+    """The one branch that still declines a proposed repair: it would leave the page with no
+    clause at all (a lifted mark).  The page is NAMED, with the document, in the output and in the
+    log, and nothing else is written.  The branch is reached with a published verdict that carries
+    only the text-layer clauses, which the repair recomputes away."""
+    from socr.core.marks import Check
+    from socr.core.verdict import PageVerdict
+
+    _, off, pdf_dir = _runs(tmp_path, SLIPPED, rotation)
+    real = PageVerdict.from_dict.__func__
+
+    def only_text_layer(cls, data):
+        v = real(cls, data)
+        text = (Check.TEXT_LAYER_NUMBERS, Check.TEXT_LAYER_DROPS)
+        return replace(v, clauses=tuple(c for c in v.clauses if c.check in text))
+
     before = _tree(off)
-    out = _tool(off, pdf_dir, "--apply", capsys=capsys)
-    assert _tree(off) == before
-    assert "row-binding outcome would change" in out
-    assert _fragment(off) != _fragment(on)  # the difference the refusal is about
+    with patch.object(PageVerdict, "from_dict", classmethod(only_text_layer)):
+        out = _tool(off, pdf_dir, "--apply", capsys=capsys)
+    doc = next(off.rglob("pages")).parent.name
+    assert f"{doc} p1 left alone" in out and "lifted mark" in out
+    assert "0  pages repaired" in out
+    log = json.loads(next(off.rglob(tool.LOG_NAME)).read_text())
+    assert list(log["left_alone"]) == ["1"] and "lifted mark" in log["left_alone"]["1"]
+    after = _tree(off)
+    assert {k for k in after if after[k] != before.get(k)} == {
+        str(next(off.rglob(tool.LOG_NAME)).relative_to(off))
+    }
 
 
 @pytest.mark.parametrize("rotation", [0, 90])

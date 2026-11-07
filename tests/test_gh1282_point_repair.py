@@ -83,8 +83,8 @@ def test_baseline_repairs_the_dropped_point():
 
 
 def test_two_drops_on_one_line_both_repaired():
-    words = page(GDP, ("Net exports", ["-.7", "1.2", "-.4"]))
-    _, reps, refs = run(words, md(GDP, ("Net exports", ["-7", "1.2", "-4"])))
+    words = page(GDP, ("Net exports", ["-.7", "1.2", "-.4", "5.5"]))
+    _, reps, refs = run(words, md(GDP, ("Net exports", ["-7", "1.2", "-4", "5.5"])))
     assert [(r.old, r.new) for r in reps] == [("-7", "-.7"), ("-4", "-.4")], (reps, refs)
 
 
@@ -314,3 +314,53 @@ def test_condition_6_the_gate_refuses_when_a_bound_row_would_be_lost(monkeypatch
     new, reps2, refs2 = run(words, shipped)
     assert reps2 == [] and new == shipped
     assert refs2[0].why == (rbc.REFUSE_NOT_BOUND,)
+
+
+# ---------------------------------------------------------------------------
+# Review of #1282 (Fable): whole-page condition 1, the agreeing floor, affixes
+# ---------------------------------------------------------------------------
+
+
+def test_condition_1_looks_at_the_whole_page_not_the_tables_box():
+    """Case B: the block's box misses the row's own line (`Real GDP 2.5 1.0 7`, y=40) and holds
+    another table's line with the same label and a point-drop difference (y=0).  The model's row is
+    RIGHT; with the box alone it would become `.7`.  An exact line anywhere on the page forbids it."""
+    words = page(
+        ("Real GDP", ["2.5", "1.0", ".7"]),
+        ("Imports", ["1.1", "1.2", "1.3"]),
+        ("Real GDP", ["2.5", "1.0", "7"]),
+        ("Imports", ["3.1", "3.2", "3.3"]),
+    )
+    shipped = md(("Real GDP", ["2.5", "1.0", "7"]), ("Imports", ["3.1", "3.2", "3.3"]))
+    box_of_the_first_table = (0.0, -5.0, 400.0, 35.0)
+    new, reps, refs = propose_point_repairs(words, box_of_the_first_table, shipped)
+    assert reps == [] and new == shipped, (reps, refs)
+    # the difference: with the row's own line gone from the page, the same box DOES repair it
+    gone = page(("Real GDP", ["2.5", "1.0", ".7"]), ("Imports", ["1.1", "1.2", "1.3"]))
+    _, reps2, _ = propose_point_repairs(
+        gone,
+        box_of_the_first_table,
+        md(("Real GDP", ["2.5", "1.0", "7"]), ("Imports", ["1.1", "1.2", "1.3"])),
+    )
+    assert [(r.old, r.new) for r in reps2] == [("7", ".7")]
+
+
+def test_a_two_value_row_with_one_agreeing_value_is_refused():
+    """Case A: `-7 | 1.5` against `-.7 | 1.5` has one agreeing value; two are required."""
+    words = page(("Real GDP", ["1.0", "2.0"]), ("Net exports", ["-.7", "1.5"]))
+    shipped = md(("Real GDP", ["1.0", "2.0"]), ("Net exports", ["-7", "1.5"]))
+    new, reps, refs = run(words, shipped)
+    assert reps == [] and new == shipped and refs[0].why == (REFUSE_NO_AGREEING,), (reps, refs)
+    assert rbc.MIN_AGREEING_VALUES == 2
+
+
+def test_a_native_token_with_an_affix_the_shipped_cell_lacks_is_refused():
+    """Case E: the page prints `-.7%`, the model shipped `-7`."""
+    words = page(GDP, ("Rate", ["1.0", "-.7%", "3.0", "4.0"]))
+    shipped = md(GDP, ("Rate", ["1.0", "-7", "3.0", "4.0"]))
+    new, reps, refs = run(words, shipped)
+    assert reps == [] and new == shipped, (reps, refs)
+    assert refs and refs[0].why == (rbc.REFUSE_AFFIX,), refs
+    # the difference: the same affix on BOTH sides is a plain point repair
+    new2, reps2, _ = run(words, md(GDP, ("Rate", ["1.0", "-7%", "3.0", "4.0"])))
+    assert [(r.old, r.new) for r in reps2] == [("-7%", "-.7%")], reps2
