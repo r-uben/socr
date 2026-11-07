@@ -449,40 +449,62 @@ def test_a_page_the_classifier_refuses_is_still_withheld_when_its_layer_convicts
     assert len(_events(on, WITHHELD_KIND)) == 1 and _events(off, WITHHELD_KIND) == []
 
 
-def _prior_ocr_scan(path: Path) -> Path:
-    """A real early refusal: an invisible earlier OCR layer, labels swapped, under a page-sized raster
-    with an alpha channel, and enough one-letter noise to fail the classifier's word-length test."""
+@pytest.mark.parametrize("render_mode, can_judge", [(0, True), (3, False)])
+def test_a_refused_page_with_no_image_judges_only_on_visible_text(render_mode, can_judge):
     doc = fitz.open()
     page = doc.new_page(width=WIDTH, height=HEIGHT)
-    raster = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 200, 260), True)
+    for i, (label, values) in enumerate(GROUP):
+        y = V0 + i * LINE_PITCH
+        line = " ".join([label, *values])
+        page.insert_text(
+            (LABEL_U, y), line, fontsize=FONT, fontname="helv", render_mode=render_mode
+        )
+    assert not page.get_image_info()
+    assert BornDigitalDetector().refused_layer_can_judge(page) is can_judge
+    doc.close()
+
+
+def _prior_ocr_scan(path: Path, coverage: float, render_mode: int, alpha: bool) -> Path:
+    """A real early refusal: an earlier OCR layer, labels swapped, with a raster over *coverage* of
+    the page, and enough one-letter noise to fail the classifier's word-length test."""
+    doc = fitz.open()
+    page = doc.new_page(width=WIDTH, height=HEIGHT)
+    raster = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 200, 260), alpha)
     raster.clear_with(255)
-    page.insert_image(page.rect, pixmap=raster)
+    margin_x, margin_y = (1 - coverage) / 2 * WIDTH, (1 - coverage) / 2 * HEIGHT
+    box = fitz.Rect(margin_x, margin_y, WIDTH - margin_x, HEIGHT - margin_y)
     swapped = [(GROUP[1][0], GROUP[0][1]), (GROUP[0][0], GROUP[1][1]), *GROUP[2:]]
+    mode = {"fontsize": FONT, "fontname": "helv", "render_mode": render_mode}
     for i, (label, values) in enumerate(swapped):
         y = V0 + i * LINE_PITCH
-        page.insert_text((LABEL_U, y), label, fontsize=FONT, fontname="helv", render_mode=3)
+        page.insert_text((LABEL_U, y), label, **mode)
         for k, value in enumerate(values):
-            page.insert_text(
-                (VALUE_U0 + k * VALUE_STEP, y), value, fontsize=FONT, fontname="helv", render_mode=3
-            )
-    page.insert_text((40, 600), " ".join("x" * 120), fontsize=6, fontname="helv", render_mode=3)
+            page.insert_text((VALUE_U0 + k * VALUE_STEP, y), value, **mode)
+    page.insert_text((40, 600), " ".join("x" * 120), **{**mode, "fontsize": 6})
+    page.insert_image(box, pixmap=raster)
     doc.save(path)
     doc.close()
     return path
 
 
-def test_an_earlier_ocr_layer_on_a_refused_page_never_judges_a_correct_reading(tmp_path):
-    """Merge gate round 10 (both reviewers). The invisible-text route runs only on the born-digital
-    path, so a refused page does not carry its finding, and this layer convicted a correct table."""
-    pdf = _prior_ocr_scan(tmp_path / "prior_ocr.pdf")
+@pytest.mark.parametrize(
+    "coverage, render_mode, alpha",
+    [(1.0, 3, True), (0.85, 3, True), (0.5, 3, True), (0.85, 0, False)],
+    ids=["invisible-full", "invisible-inset", "invisible-half", "visible-under-inset"],
+)
+def test_an_earlier_ocr_layer_on_a_refused_page_never_judges_a_correct_reading(
+    tmp_path, coverage, render_mode, alpha
+):
+    """Merge gate rounds 10-11 (both reviewers). The classifier's prior-OCR findings miss these
+    layers once it has refused the page, and each of them convicted a correct table."""
+    pdf = _prior_ocr_scan(tmp_path / "prior_ocr.pdf", coverage, render_mode, alpha)
     detector = BornDigitalDetector()
     with fitz.open(pdf) as doc:
         assessment = detector._assess_page(doc[0], 1)
-        # the premises: a real refusal that leaves both prior-OCR findings unset
+        # the premises: a real refusal that leaves the findings the admissibility test reads unset
         assert assessment.is_born_digital is False
         assert assessment.invisible_text_over_raster is False
         assert assessment.prior_ocr_layer is False
-        assert detector._has_invisible_text_over_raster(doc[0]) is True
     kw = dict(rows=GROUP, rotation=0, pdf=pdf)
     _, res_on, _, on, _ = _run(tmp_path, check_runs=True, out_name="on", **kw)
     _, res_off, _, off, _ = _run(tmp_path, check_runs=False, out_name="off", **kw)

@@ -1347,8 +1347,12 @@ def test_symbol_only_cells_are_judged_not_skipped(header, extra):
     were skipped and the table came out BOUND with units the layer does not print."""
     from socr.tables.row_binding_check import check_row_binding
 
-    words = _set_line(100, ["Exports", "1.1", "1.2", "1.3"]) + _set_line(
-        114, ["Imports", "2.1", "2.2", "2.3"]
+    # The layer prints the stubs alone, so without this rule a labelled row binds as valueless.
+    words = (
+        _set_line(86, ["Item"])
+        + _set_line(100, ["Exports", "1.1", "1.2", "1.3"])
+        + _set_line(114, ["Imports", "2.1", "2.2", "2.3"])
+        + _set_line(128, ["Units"])
     )
     rows = [("Exports", ["1.1", "1.2", "1.3"]), ("Imports", ["2.1", "2.2", "2.3"])]
     assert check_row_binding(words, None, md(rows)).outcome is TableOutcome.BOUND

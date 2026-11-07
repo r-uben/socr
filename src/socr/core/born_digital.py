@@ -5127,18 +5127,24 @@ class BornDigitalDetector:
         """#1267: may a page this classifier refused have its layer used to judge a reading?
 
         The classifier also refuses real layers: dense number tables read as excessive spacing.
-        Two of its answers are not available after a refusal, so they are asked here. Its own
-        minimums tell a real layer from a stamp, and #961's invisible-text route runs only on the
-        born-digital path, so an earlier OCR layer under a non-opaque raster is not flagged on a
-        refused page. Fails closed: an unreadable page cannot judge.
+        Its prior-OCR findings are incomplete after a refusal, and each of them can miss a layer
+        over an inset or non-opaque raster, so this does not ask them. An earlier OCR run needs a
+        scan to read, so a refused page judges only when it holds no image at all and its text is
+        mostly visible. Its own minimums tell a real layer from a stamp. Fails closed: an unreadable
+        page cannot judge.
         """
+        from socr.tables.source_evidence import text_layer_invisible_char_counts
+
         try:
             text, _zw, _spaces = clean_native_text(page.get_text("text"))
             if len(text) < self.MIN_CHARS_FOR_TEXT_LAYER:
                 return False
             if len(text.split()) < self.MIN_WORDS_PER_PAGE:
                 return False
-            return not self._has_invisible_text_over_raster(page)
+            if page.get_image_info():
+                return False
+            invisible, total = text_layer_invisible_char_counts(page)
+            return invisible * 2 <= total
         except Exception:
             logger.warning("#1267: refused-layer scan failed", exc_info=True)
             return False
