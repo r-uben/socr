@@ -9568,7 +9568,6 @@ class UnifiedPipeline:
         blocks = find_table_blocks(out.text)
         if not blocks:
             return False
-        ps.row_binding_table_count = len(blocks)
         _out_lines = out.text.splitlines()
 
         def _record(table_index: int, outcome: str, rows: list[dict], error: str = "") -> None:
@@ -9661,6 +9660,7 @@ class UnifiedPipeline:
                     and BornDigitalDetector().refused_layer_can_judge(page)
                 ):
                     return False
+                ps.row_binding_table_count = len(blocks)
                 regions = [tuple(b.bbox) for b in locate_tables(page)] or None
                 results, _rotation = check_page_row_binding(page, out.text, regions)
             for idx, result in enumerate(results):

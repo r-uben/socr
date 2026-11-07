@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from socr.tables.native_verifier import _normalize_binding_numeric_token, is_numeric_token
-from socr.tables.reconcile import _parse_grid, _split_row, find_table_blocks
+from socr.tables.reconcile import _is_separator_row, _parse_grid, _split_row, find_table_blocks
 
 # ---------------------------------------------------------------------------
 # Named constants.  Every one is taken from the frame-1 comparator measurements in
@@ -364,15 +364,23 @@ def _shipped_rows(markdown: str) -> list[_Row]:
         for li in range(block.start, block.end + 1):
             grid = _parse_grid([lines[li]])
             if not grid:
-                # Separator, or an all-empty heading line. A dash-only line ABOVE the real separator
-                # is a heading the parser cannot tell from one (Astra P1, round 12), so it is judged.
+                # The parser reads any dash-only line as a separator, so this keeps only the real
+                # ones out (Astra P1, rounds 12-13): an all-empty line, a strict `---` delimiter
+                # anywhere, the block's own second line, and a leading line with no dash-only line
+                # under it. Any other dash-only line is content and is judged.
                 raw = _split_row(lines[li])
-                if not (
-                    li == block.start
-                    and li < block.end
-                    and any(raw)
-                    and any(_split_row(lines[li + 1]))
-                    and not _parse_grid([lines[li + 1]])
+                if (
+                    not any(raw)
+                    or _is_separator_row(raw)
+                    or li == block.start + 1
+                    or (
+                        li == block.start
+                        and (
+                            li == block.end
+                            or not any(_split_row(lines[li + 1]))
+                            or bool(_parse_grid([lines[li + 1]]))
+                        )
+                    )
                 ):
                     continue
                 grid = [raw]
@@ -897,7 +905,7 @@ def check_row_binding(
         anchors.append(idx.pop() if len(idx) == 1 else None)
     evidence: list[RowEvidence] = []
     for pos, r in enumerate(rows):
-        values = r.cell_texts
+        values = r.cell_texts or r.cells_raw  # the evidence records what shipped, symbols included
         if not r.has_content:
             _symbols = _symbol_cells_only(r)
             if _label_cell_empty(r):

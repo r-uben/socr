@@ -1391,6 +1391,48 @@ def test_a_dash_only_heading_above_the_separator_is_judged(heading):
     )
 
 
+@pytest.mark.parametrize("row", ["|  | - | - | - |", "| - | - | - | - |"])
+def test_a_dash_only_body_row_is_judged(row):
+    """Round 13 (Astra P1): a body row of dashes read as a separator and was never judged."""
+    from socr.tables.row_binding_check import check_row_binding
+
+    words = _set_line(100, ["Exports", "1.1", "1.2", "1.3"])
+    faithful = md([("Exports", ["1.1", "1.2", "1.3"])])
+    assert check_row_binding(words, None, faithful).outcome is TableOutcome.BOUND
+    res = check_row_binding(words, None, faithful + row + "\n")
+    assert res.outcome is TableOutcome.UNVERIFIABLE
+    assert len(res.rows) == 2
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "|---|---|---|---|\n|---|---|---|---|\n| Exports | 1.1 | 1.2 | 1.3 |\n",
+        "|  |  |  |  |\n|---|---|---|---|\n|---|---|---|---|\n| Exports | 1.1 | 1.2 | 1.3 |\n",
+        "|  |  |  |  |\n|-|-|-|-|\n| Exports | 1.1 | 1.2 | 1.3 |\n",
+    ],
+    ids=["doubled-no-heading", "doubled-under-heading", "short-separator"],
+)
+def test_real_separators_are_not_judged_as_content(table):
+    from socr.tables.row_binding_check import check_row_binding
+
+    words = _set_line(100, ["Exports", "1.1", "1.2", "1.3"])
+    assert check_row_binding(words, None, table).outcome is TableOutcome.BOUND
+
+
+def test_emptied_evidence_records_the_symbols_that_shipped():
+    from socr.tables.row_binding_check import check_row_binding
+
+    words = _set_line(100, ["Final", "sales", "4.4", "5.5", "6.6"]) + _set_line(
+        114, ["Exports", "1.1", "1.2", "1.3"]
+    )
+    res = check_row_binding(
+        words, None, md([("Final sales", ["—", "—", "—"]), ("Exports", ["1.1", "1.2", "1.3"])])
+    )
+    emptied = [e for e in res.rows if e.verdict is RowVerdict.EMPTIED]
+    assert emptied and list(emptied[0].values) == ["—", "—", "—"]
+
+
 def _hdr(n: int) -> str:
     return "|" + "  |" * n + "\n|" + "---|" * n + "\n"
 
