@@ -9,7 +9,8 @@ never compare the LABEL with the line the values sit on, and the binder sees a
 rotated page in the wrong frame.
 
 This module is pure: words in the READING frame (``native_first.upright_words_for_page``)
-plus the shipped markdown in, per-row verdicts out.  It is not wired into the pipeline.
+plus the shipped markdown in, per-row verdicts out.  The pipeline calls it at the agentic flush,
+on the finalized record (``UnifiedPipeline._run_row_binding_check``).
 
 Verdicts use positive geometry only.  A row is convicted (DISPLACED / LABEL_LOST /
 EMPTIED) only when the text layer shows a specific contradiction; anything the layer
