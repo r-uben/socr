@@ -25,12 +25,11 @@ per repaired table; the text-layer events kept, shrunk or removed), the document
 text-layer pages, ``metadata.json``'s table counts, and ``refinalized_point_drops.json`` with
 every old and new cell.
 
-A page is LEFT ALONE, and counted, when repairing it would do more than change cells and the
-marks they caused:
-
-* a table's row-binding outcome would change (UNVERIFIABLE to BOUND): the page's unverified mark,
-  disposition and status follow from it, and those are a run's to decide (re-run the page);
-* the page would lose every clause it carries (a lifted mark): #1282 lifts no page-level mark.
+A page is LEFT ALONE, and NAMED in the output and in the log (``left_alone``), when a repair was
+proposed and applying it would lift a mark (the page would lose every clause it carries).  A repair
+lifts no mark: a table with a repaired row is recorded UNVERIFIABLE even when every row now binds,
+because the table ladder judged the unrepaired bytes; this is what the live step records too, so the
+tool's bytes are the live run's bytes.
 
 The document ``status`` is never moved back (a ``partial`` stays ``partial``): a stale ``partial``
 is conservative, and a document can be ``partial`` for reasons this tool cannot see.
@@ -101,12 +100,16 @@ def _page_state_for(sidecar: dict, pa):
     return p
 
 
-def _table_outcomes(results) -> list[str]:
-    return [r.outcome.value for r in results]
-
-
-def repair_page(sidecar: dict, pa, page, event_kinds: frozenset[str], skipped: Counter):
-    """The :class:`_Done` of one page, or ``None`` (with the reason counted in *skipped*)."""
+def repair_page(
+    sidecar: dict,
+    pa,
+    page,
+    event_kinds: frozenset[str],
+    skipped: Counter,
+    named: dict[int, str] | None = None,
+):
+    """The :class:`_Done` of one page, or ``None`` (with the reason counted in *skipped*).  A page
+    for which a repair was PROPOSED and then not applied is also NAMED in *named* (page -> why)."""
     from socr.core.manifest import apply_verdict_marks, is_page_failed_marker
     from socr.core.marks import Check
     from socr.core.result import PageOutput
@@ -125,6 +128,7 @@ def repair_page(sidecar: dict, pa, page, event_kinds: frozenset[str], skipped: C
     from socr.tables.locate import locate_tables
     from socr.tables.row_binding_check import (
         check_page_row_binding,
+        effective_outcome,
         layer_can_judge_tables,
         propose_page_point_repairs,
         row_evidence_dicts,
@@ -147,11 +151,7 @@ def repair_page(sidecar: dict, pa, page, event_kinds: frozenset[str], skipped: C
     if not repaired or new_text == output.text:
         skipped["nothing to repair"] += 1
         return None
-    old_results, _rot = check_page_row_binding(page, output.text, regions)
     new_results, _rot = check_page_row_binding(page, new_text, regions)
-    if _table_outcomes(old_results) != _table_outcomes(new_results):
-        skipped["a table's row-binding outcome would change (re-run the page)"] += 1
-        return None
 
     # The verdict: the two text-layer clauses recomputed on the repaired reading.
     published = PageVerdict.from_dict(sidecar.get("verdict") or {})
@@ -170,7 +170,10 @@ def repair_page(sidecar: dict, pa, page, event_kinds: frozenset[str], skipped: C
     if drops is not None:
         extended = replace(extended, clauses=tuple(in_fresh_run_order((*extended.clauses, drops))))
     if published.clauses and not extended.clauses:
-        skipped["the page would lose every clause (a lifted mark; not #1282's)"] += 1
+        why = "the page would lose every clause it carries (a lifted mark; #1282 lifts none)"
+        skipped[why] += 1
+        if named is not None:
+            named[page_num] = why
         return None
     final, verdict = apply_verdict_marks(output2, p, page_num, published=extended)
 
@@ -220,7 +223,6 @@ def repair_page(sidecar: dict, pa, page, event_kinds: frozenset[str], skipped: C
             cells.extend((table_id, r.label, r.old, r.new) for r in reps)
             repair_events.append(
                 {
-                    "page_num": page_num,
                     "kind": TABLE_POINT_REPAIRED_KIND,
                     "engine": output.engine or "",
                     "detail": (
@@ -232,7 +234,13 @@ def repair_page(sidecar: dict, pa, page, event_kinds: frozenset[str], skipped: C
                 }
             )
         if table_id in records:
-            payload = table_payload(page_num, idx, result.outcome.value, row_evidence_dicts(result))
+            # as the live step records it: a table with a repaired row is never BOUND (no lift)
+            payload = table_payload(
+                page_num,
+                idx,
+                effective_outcome(result.outcome.value, bool(rows_data)),
+                row_evidence_dicts(result),
+            )
             if "withheld_markdown" in records[table_id]:
                 payload["withheld_markdown"] = records[table_id]["withheld_markdown"]
             if rows_data:
@@ -397,6 +405,7 @@ def refinalize_document(
     event_kinds = _page_event_kinds(doc_dir)
     doc_md = md_paths[0].read_text(encoding="utf-8")
     done: list[tuple[Path, _Done]] = []
+    named: dict[int, str] = {}
     with open_pdf(pdf_dir / str(meta.get("key") or ""), repair=True) as pdf:
         for path, sidecar in candidates:
             page_num = int(sidecar["page_num"])
@@ -406,6 +415,7 @@ def refinalize_document(
                 pdf[page_num - 1],
                 event_kinds.get(page_num, frozenset()),
                 skipped,
+                named,
             )
             if d is None:
                 continue
@@ -417,6 +427,10 @@ def refinalize_document(
             doc_md = _swap_once(doc_md, heading + d.old_text, heading + d.output.text, md_paths[0])
             done.append((path, d))
     changes = [replace(d.change, doc=doc_dir.name) for _p, d in done]
+    for page_num, why in sorted(named.items()):
+        skipped[f"{doc_dir.name} p{page_num} left alone: {why}"] += 1
+    if apply and named and not done:
+        _record_left_alone(doc_dir, named)
     if not done or not apply:
         return changes
 
@@ -466,6 +480,8 @@ def refinalize_document(
             ],
             "socr_source_digest": d.sidecar["socr_source_digest"],
         }
+    if named:
+        log["left_alone"] = {str(n): why for n, why in sorted(named.items())}
     _write_json(log_path, log)
     _rewrite_document_audit_log(doc_dir, done)
     for path, d in done:
@@ -477,6 +493,16 @@ def refinalize_document(
     )
     _recount_tables(doc_dir, meta_path, meta)
     return changes
+
+
+def _record_left_alone(doc_dir: Path, named: dict[int, str]) -> None:
+    """The pages a repair was proposed for and not applied, in the document's log."""
+    from socr.pipeline.refinalize_own_text import _read_json, _write_json
+
+    log_path = doc_dir / LOG_NAME
+    log = _read_json(log_path) if log_path.is_file() else {"tool": "socr-refinalize-point-drops"}
+    log["left_alone"] = {str(n): why for n, why in sorted(named.items())}
+    _write_json(log_path, log)
 
 
 def _rewrite_document_audit_log(doc_dir: Path, done: list[tuple[Path, _Done]]) -> None:
@@ -505,7 +531,8 @@ def _rewrite_document_audit_log(doc_dir: Path, done: list[tuple[Path, _Done]]) -
             keep_drops=keep_drops,
             dropped_data=d.dropped_data,
             payloads=d.payloads,
-            repair_events=d.repair_events,
+            # (a document log's events carry their page; a page sidecar's do not)
+            repair_events=[{"page_num": d.page_num, **e} for e in d.repair_events],
         )
     if json.dumps(events) != before:
         counts: dict[str, int] = {}
