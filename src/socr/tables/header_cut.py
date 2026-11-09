@@ -67,10 +67,14 @@ _TRAILING_UNIT_RE = re.compile(r"[%‰]+$")
 #: punctuation such as ``&`` carries no identity of its own.
 _WORD_RE = re.compile(r"\w")
 
+#: A markdown-escaped emphasis character (``Historical\*``): the escape is
+#: notation, so the native word ``Historical*`` is the same token.
+_MD_ESCAPED_EMPHASIS_RE = re.compile(r"\\([*_])")
+
 
 def _fold(tok: str) -> str:
     """Normalise one token for header membership. Never used on the numeric path."""
-    folded = strip_presentation(tok).translate(_HEADER_PUNCT)
+    folded = strip_presentation(_MD_ESCAPED_EMPHASIS_RE.sub(r"\1", tok)).translate(_HEADER_PUNCT)
     return _TRAILING_UNIT_RE.sub("", folded).casefold()
 
 

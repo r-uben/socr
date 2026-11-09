@@ -64,6 +64,7 @@ EXPECTED_RESUME_KINDS = frozenset(
         "table_binding_boundary_resolved",
         "table_binding_boundary_unresolved",
         "table_ditto_unresolved",
+        "table_blank_lines_dropped",  # blank rows/columns dropped before the gate
         "table_furniture_removed",
         # #1144 added this kind. The reason first given here -- "a credentialed page
         # can now SHIP carrying it" -- was WRONG: that credential path was reverted and
@@ -148,4 +149,5 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # behaviour when every page the lane acts on became MARKED (Argon P0-1).
     # 65 with #1225's unshipped_figure_chart_skeleton.
     # 67 with #1267's two row-binding kinds.
-    assert len(EXPECTED_RESUME_KINDS) == 67
+    # 68 with table_blank_lines_dropped (blank rows/columns dropped before the table gate).
+    assert len(EXPECTED_RESUME_KINDS) == 68

@@ -22,7 +22,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from socr.tables.binding import BindingResult, UnboundCell, bind, parse_grid
+from socr.tables.binding import (
+    BindingResult,
+    UnboundCell,
+    bind,
+    model_row_is_header_tier,
+    parse_grid,
+)
 from socr.tables.native_rows import normalize_label
 from socr.tables.native_verifier import label_key
 from socr.tables.native_verifier import (
@@ -475,6 +481,8 @@ def _row_anchor_scan(
         native_row = result.native_rows[native_idx]
         if native_row.is_parent:
             continue
+        if model_row_is_header_tier(native_row, cand_row):
+            continue  # a heading tier: counted ambiguous by bind(), never compared
         stub = cand_row[0].strip() if cand_row else ""
         cmp = _compare_bound_row(
             native_row,
