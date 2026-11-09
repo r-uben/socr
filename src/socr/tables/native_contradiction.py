@@ -639,6 +639,53 @@ def refine_check_region(
 _TRAILING_ROW_BAND_PT = 28.0
 
 
+#: One point of slack at the region's bottom edge, defined once for both uses: a word
+#: whose top is within it of the edge belongs below the edge, and a ruling within it of
+#: the edge IS the edge. It absorbs extraction jitter between a drawn rule and the box
+#: the locator derived from it; it is not a measured property of any page.
+_REGION_EDGE_SLACK_PT = 1.0
+
+
+def _region_closed_by_rule(page, region: tuple[float, float, float, float]) -> bool:
+    """True when a drawn horizontal rule spanning the region sits on its bottom edge."""
+    from socr.tables.locate import _horizontal_rules
+
+    x0, _y0, x1, y1 = region
+    return any(
+        abs(ry - y1) <= _REGION_EDGE_SLACK_PT and rx0 <= x0 + 2 and rx1 >= x1 - 2
+        for ry, rx0, rx1 in _horizontal_rules(page)
+    )
+
+
+def _lane_aligned_numeric_row_below(page, region: tuple[float, float, float, float]) -> bool:
+    """True when a row in the trailing band has numbers and every one sits on a column lane.
+
+    A footnote's years in running text are not lane-aligned; a Total row under a
+    midrule is. Lanes are the region's own (``header_cut._lane_centers``, which already
+    keeps a note's stray numerals from inventing one). A row with no numeric word, or
+    with any numeric word off every lane, is not a table row.
+    """
+    from socr.tables.header_cut import _LANE_SNAP_MULT, _LANE_X_TOL_PT, _lane_centers
+    from socr.tables.header_repair import _all_rows_by_y
+    from socr.tables.native_verifier import is_numeric_token
+
+    x0, y0, x1, y1 = region
+    words = [w for w in page.get_text("words") if not (w[0] < x0 - 2 or w[2] > x1 + 2)]
+    rows_by_y = _all_rows_by_y(words)
+    inside = [y for y in rows_by_y if y0 <= y < y1 - _REGION_EDGE_SLACK_PT]
+    lanes = _lane_centers(rows_by_y, sorted(inside))
+    if not lanes:
+        return False
+    margin = _LANE_X_TOL_PT * _LANE_SNAP_MULT
+    for y, row_words in rows_by_y.items():
+        if not y1 - _REGION_EDGE_SLACK_PT <= y <= y1 + _TRAILING_ROW_BAND_PT:
+            continue
+        numeric = [w for w in row_words if is_numeric_token(w[4])]
+        if numeric and all(any(abs(c - w[0]) <= margin for c in lanes) for w in numeric):
+            return True
+    return False
+
+
 def extend_check_region_for_trailing_words(
     page,
     region: tuple[float, float, float, float],
@@ -650,12 +697,14 @@ def extend_check_region_for_trailing_words(
     from socr.tables.native_verifier import is_numeric_token
 
     x0, y0, x1, y1 = region
+    if _region_closed_by_rule(page, region) and not _lane_aligned_numeric_row_below(page, region):
+        return region  # closed by a bottom rule, nothing table-shaped below it
     max_y = y1
     for w in page.get_text("words"):
         wx0, wy0, wx1, wy1, text = w[0], w[1], w[2], w[3], w[4]
         if wx0 < x0 - 2 or wx1 > x1 + 2:
             continue
-        if wy0 < y1 - 1 or wy0 > y1 + _TRAILING_ROW_BAND_PT:
+        if wy0 < y1 - _REGION_EDGE_SLACK_PT or wy0 > y1 + _TRAILING_ROW_BAND_PT:
             continue
         if is_numeric_token(text):
             max_y = max(max_y, wy1)

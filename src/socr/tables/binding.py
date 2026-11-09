@@ -473,6 +473,35 @@ def _wrapped_label_merge_plan(
     return tuple(merge_at), proven_native_label
 
 
+def _native_label_with_trailing_wrap(native_rows: list, native_idx: int) -> str:
+    """The native row's label joined with a wrapped second printed line, or ``""``.
+
+    The mirror of #624b's merge: there the MODEL splits a label the page prints
+    on one line; here the PAGE prints a label across two baselines (the numbers
+    sit on the first) and the model, correctly, writes one label. The second
+    line is read by ``_native_rows`` as a value-less row directly below the data
+    row. It is taken as the continuation only on the evidence #692 requires of a
+    wrapped label against a nested heading: both lines carry the same
+    unambiguous font signature, and the second starts no further left than the first and no more than one em to
+    the right of it. No font data, a missing bbox or a number on the second
+    line gives ``""`` -- the label then compares as it always did. The caller
+    still requires the joined text to equal the model's label, so this can only
+    remove a contradiction the model's own wording proves false.
+    """
+    if native_idx + 1 >= len(native_rows):
+        return ""
+    this, nxt = native_rows[native_idx], native_rows[native_idx + 1]
+    if this.is_parent or not nxt.is_parent or nxt.multiset or not this.row_path or not nxt.row_path:
+        return ""
+    if this.label_font is None or this.label_font != nxt.label_font:
+        return ""
+    if this.label_bbox is None or nxt.label_bbox is None or this.label_font_size is None:
+        return ""
+    if not 0 <= nxt.label_bbox[0] - this.label_bbox[0] <= this.label_font_size:
+        return ""  # a wrap never starts left of its first line
+    return f"{this.row_path[-1].strip()} {nxt.row_path[-1].strip()}".strip()
+
+
 def _apply_wrapped_label_merges(
     rows: tuple[tuple[str, ...], ...],
     merge_at: tuple[int, ...],
@@ -1514,6 +1543,38 @@ def _candidate_row_multiset(row: tuple[str, ...]) -> Counter:
     return c
 
 
+def model_row_is_header_tier(native_row: _NativeRow, cand_row: tuple[str, ...] | list[str]) -> bool:
+    """A blank-label model row whose cells are column headings over a native year row.
+
+    ``Sep 2017 | Dec 2030`` against the native tokens ``2017 | 2030``: a heading
+    tier the model wrote below an empty header row, not a data row with missing
+    numbers. It is recognised only when every native lane token has, in order,
+    one non-empty model cell whose whitespace tokens hold exactly that number
+    (normalised) plus at least one word, and the model row has no other
+    non-empty cell. Anything else -- a different year, a cell that is only a
+    number, a stray extra cell -- is not a tier and is judged as before.
+
+    Recognising a tier means the row is neither matched nor contradicted: the
+    caller counts it ambiguous, so the table can never be VERIFIED on it.
+    """
+    if native_row.is_parent or not native_row.lane_tokens:
+        return False
+    if cand_row and cand_row[0].strip():
+        return False
+    cells = [c for c in cand_row[1:] if _normalize_cell(c).strip()]
+    natives = [text for _lane, (text, _amb) in sorted(native_row.lane_tokens.items())]
+    if len(cells) != len(natives):
+        return False
+    for cell, native in zip(cells, natives, strict=True):
+        tokens = [t for t in re.split(r"\s+", _normalize_cell(cell).strip()) if t]
+        numeric = [t for t in tokens if is_numeric_token(t)]
+        if len(numeric) != 1 or len(tokens) < 2:
+            return False
+        if _normalize_binding_numeric_token(numeric[0]) != _normalize_binding_numeric_token(native):
+            return False
+    return True
+
+
 def _bind_rows(
     native_rows: list[_NativeRow], grid_rows: tuple[tuple[str, ...], ...]
 ) -> dict[int, int]:
@@ -2342,6 +2403,10 @@ def bind(
         same_presence = bool(candidate_label) == bool(native_label)
         candidate_key = label_key(candidate_label)
         native_key = label_key(native_label)
+        if candidate_key != native_key and cand_idx not in merged_row_proven_label:
+            wrapped = _native_label_with_trailing_wrap(native_rows, native_idx)
+            if wrapped and label_key(wrapped) == candidate_key:
+                native_label, native_key = wrapped, candidate_key
         candidate_unprovable = not candidate_key or label_key_is_bare_symbolic(candidate_key)
         native_unprovable = not native_key or label_key_is_bare_symbolic(native_key)
         if candidate_label and native_label and (candidate_unprovable or native_unprovable):
@@ -2557,6 +2622,11 @@ def bind(
                 header_paths_by_lane,
                 identity_col_to_lane,
             )
+            continue
+
+        if model_row_is_header_tier(native_row, cand_row):
+            # A heading tier is unverified, never matched or contradicted.
+            result.ambiguous_count += len(native_row.lane_tokens)
             continue
 
         for lane in range(lane_count):

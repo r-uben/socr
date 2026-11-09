@@ -49,6 +49,7 @@ from socr.core.result import (
 )
 from socr.judge.judge import JudgeVerdict, PageJudgeCircuitOpenError, is_page_judge_timeout
 from socr.tables.label_canonical import canonicalize_candidate
+from socr.tables.reconcile import TABLE_BLANK_LINES_DROPPED_KIND, drop_blank_table_lines
 
 if TYPE_CHECKING:
     from socr.tables.furniture import DocumentFurniture
@@ -1610,6 +1611,21 @@ class NativeTableVerifierJudge(_UnverifiedTableRejection):
 
             rules = _horizontal_rules(fitz_page) if fitz_page is not None else None
             furniture = self._document_furniture(fitz_page)
+            # Blank rows/columns carry no content but move the header tiers and
+            # every later lane; the shipped table must be the one that is checked.
+            dropped = drop_blank_table_lines(output.text)
+            if dropped.rows or dropped.columns:
+                output.text = dropped.text
+                self._emit_event(
+                    page_num=page_num,
+                    kind=TABLE_BLANK_LINES_DROPPED_KIND,
+                    engine=output.engine or "",
+                    detail=(
+                        f"dropped {dropped.rows} blank row(s) and {dropped.columns} blank "
+                        "column(s) from the model's table before it was checked"
+                    ),
+                    data={"rows_dropped": dropped.rows, "columns_dropped": dropped.columns},
+                )
             vr = verify_native_table(fitz_page, output.text)
             # #1205 round 1 (Argon P0 1.3): ``_maybe_repair_collapsed_headers``
             # rewrites ``output.text`` -- the bytes that ship -- from
