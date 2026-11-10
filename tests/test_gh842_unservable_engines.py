@@ -42,6 +42,13 @@ def hermetic(monkeypatch):
     import socr.engines.qwen as qwen
 
     monkeypatch.setattr(qwen, "cloud_model_available", lambda: False)
+    # CH-12: with qwen-ocr on PATH the GEMMA rung probes the Ollama host (the
+    # GH-984 guard then fails the test); CI has no qwen-ocr. The ladder gating
+    # under test is not about gemma, so stub its host probe.
+    monkeypatch.setattr(
+        "socr.engines.gemma_cloud.GemmaCloudEngine.is_available_for_config",
+        lambda self, config: (False, "CH-12: gemma probe stubbed"),
+    )
 
 
 def _pipeline(**cfg):
