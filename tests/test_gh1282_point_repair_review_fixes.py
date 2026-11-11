@@ -158,7 +158,10 @@ def test_b_three_detached_minus_signs_are_not_rewritten_from_panel_a(rotation):
 def test_b_is_a_named_refusal_of_exactly_the_shared_region(rotation):
     """A correct repair (block 0 prints -.7, the model shipped -7) is refused when two blocks
     share the page, and made when the same block has a box of its own.  Difference only."""
-    page = build_page(F1_NATIVE, rotation)
+    page = build_page(
+        [("Percent change", []), PANEL_A, ("Billions", []), ("Exports", ["1.0", "2.0", "3.0"])],
+        rotation,
+    )
     shipped = (
         block([("Real GDP", ["-7", "2.5", "3.0"])])
         + "\n\nBillions\n\n"
@@ -248,3 +251,240 @@ def test_z_a_row_whose_line_has_a_zero_after_the_point_is_not_repaired(rotation)
     assert reps == [] and cell(new, 0, "Rate", 0) == "7", (reps, refs)
     new2, reps2, _ = case(".7")
     assert cell(new2, 0, "Rate", 0) == ".7", reps2
+
+
+# ---------------------------------------------------------------------------
+# N (findings 2a, 3): a repeated row label, the row's own line not a hit
+# ---------------------------------------------------------------------------
+# Fed tables run `Real GDP / Previous / Final sales / Previous` with no valueless line between, and
+# on a page where the model drops points the rows in between are not BOUND either, so no reading-
+# order anchor separates the two `Previous` lines.
+
+
+def noheads(own, own_shipped, sib, sib_shipped):
+    native = [
+        ("Real GDP", ["-.4", "1.1", "1.2"]),
+        ("Previous", own),
+        ("Final sales", ["-.5", "5.1", "5.2"]),
+        ("Previous", sib),
+    ]
+    shipped = (
+        block(
+            [
+                ("Real GDP", ["-4", "1.1", "1.2"]),  # the model dropped this point too
+                ("Previous", own_shipped),
+                ("Final sales", ["-5", "5.1", "5.2"]),  # and this one
+                ("Previous", sib_shipped),
+            ]
+        )
+        + "\n"
+    )
+    return native, shipped
+
+
+OWN_LINES = pytest.mark.parametrize(
+    "own",
+    [["- 7", "2.5", "3.0"], ["-7.1", "2.5", "3.0"]],
+    ids=["detached_minus", "model_misread_-7.1"],
+)
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+@OWN_LINES
+def test_n_section_1_previous_is_not_overwritten_from_section_2(rotation, own):
+    """Section 1 `Previous` really prints `- 7` (or `-7.1`); section 2 `Previous` prints `-.7`
+    with the same other values.  `-.7` is section 2's number."""
+    native, shipped = noheads(
+        own, ["-7", "2.5", "3.0"], ["-.7", "2.5", "3.0"], ["-.7", "2.5", "3.1"]
+    )
+    new, reps, refs = live(build_page(native, rotation), shipped)
+    assert cell(new, 0, "Previous", 0) == "-7", (reps, refs)
+    assert rbc.REFUSE_RIVAL_LINE in why(refs)
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+@OWN_LINES
+def test_n_the_correct_repairs_around_it_survive(rotation, own):
+    """Once `Previous` is not bound to section 2's line, `Real GDP` and `Final sales` are
+    repaired from their own lines (before the fix the wrong binding refused `Final sales`)."""
+    native, shipped = noheads(
+        own, ["-7", "2.5", "3.0"], ["-.7", "2.5", "3.0"], ["-.7", "2.5", "3.1"]
+    )
+    new, reps, refs = live(build_page(native, rotation), shipped)
+    assert cell(new, 0, "Real GDP", 0) == "-.4", (reps, refs)
+    assert cell(new, 0, "Final sales", 0) == "-.5", (reps, refs)
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+@pytest.mark.parametrize("true,sib", [("70", "7.0"), ("125", "1.25"), ("125", "12.5")])
+def test_n_a_true_integer_is_not_rewritten_from_a_sibling_with_a_point(rotation, true, sib):
+    """Section 1 `Previous` prints *true* and the model read it right but misread another cell,
+    so its own line is no hit; section 2 prints *sib*, the same digits with a point."""
+    native, shipped = noheads(
+        [true, "2.5", "3.1"], [true, "2.5", "3.0"], [sib, "2.5", "3.0"], [sib, "2.5", "3.2"]
+    )
+    new, reps, refs = live(build_page(native, rotation), shipped)
+    assert cell(new, 0, "Previous", 0) == true, (reps, refs)
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_n_a_clipped_box_does_not_write_the_siblings_12_5_for_1_25(rotation):
+    """Finding 3: section 1 prints 1.25 (the model read 125); section 2 prints 12.5.  The box
+    starts below section 1's line, so section 2's line is the only hit inside it; section 1's
+    own line is still on the page, a point-only hit, so the row is refused."""
+    native, shipped = noheads(
+        ["1.25", "2.5", "3.0"],
+        ["125", "2.5", "3.0"],
+        ["12.5", "2.5", "3.0"],
+        ["12.5", "2.5", "3.1"],
+    )
+    page = build_page(native, rotation)
+    clipped = [raw_box(rotation, V0 + 1.5 * LINE_PITCH, V0 + 4 * LINE_PITCH)]
+    new, reps, refs = live(page, shipped, regions=clipped)
+    assert cell(new, 0, "Previous", 0) == "125", (reps, refs)
+    assert rbc.REFUSE_RIVAL_LINE in why(refs)
+    # control: unclipped, both lines are hits and the row is refused as ambiguous
+    new2, reps2, refs2 = live(page, shipped)
+    assert cell(new2, 0, "Previous", 0) == "125", (reps2, refs2)
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_n_control_a_section_heading_row_between_still_holds(rotation):
+    """The review's own 2a shape (a valueless heading row between the sections) was already
+    refused by condition 6; it stays refused."""
+    native = [
+        ("GDP", []),
+        ("Previous", ["- 7", "2.5", "3.0"]),
+        ("Unemployment", []),
+        ("Previous", ["-.7", "2.5", "3.0"]),
+    ]
+    shipped = (
+        block(
+            [
+                ("GDP", []),
+                ("Previous", ["-7", "2.5", "3.0"]),
+                ("Unemployment", []),
+                ("Previous", ["-.7", "2.5", "3.1"]),
+            ]
+        )
+        + "\n"
+    )
+    new, reps, refs = live(build_page(native, rotation), shipped)
+    assert cell(new, 0, "Previous", 0) == "-7", (reps, refs)
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_n_control_the_minus_point_two_repair_still_happens(rotation):
+    """The defect the repair exists for (2014-01 Tealbook p92: Japan `-.2` read as `-2`)."""
+    native = [("Euro area", ["1.0", "-.9", "1.4", "1.5"]), ("Japan", ["1.1", "-.2", "-.3", "1.2"])]
+    shipped = (
+        block([("Euro area", ["1.0", "-.9", "1.4", "1.5"]), ("Japan", ["1.1", "-2", "-3", "1.2"])])
+        + "\n"
+    )
+    new, reps, refs = live(build_page(native, rotation), shipped)
+    assert [cell(new, 0, "Japan", k) for k in (1, 2)] == ["-.2", "-.3"], (reps, refs)
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_n_control_a_repeated_label_far_from_the_row_does_not_refuse(rotation):
+    """A repeated label is not refused by itself.  Section 2's `Previous` differs from section
+    1's row in more than MAX_RIVAL_MISMATCHES values and is no point-only hit: section 1 is
+    repaired.  The difference: with section 2 one value closer, the same row is refused."""
+    far = rbc.MAX_RIVAL_MISMATCHES + 1
+    row = ["-.7", "2.5", "3.0", "4.0", "5.0"]
+    shipped_row = ["-7", *row[1:]]
+
+    def case(n_differ):
+        sib = row[:1] + [f"{9 + k}.9" if k < n_differ else v for k, v in enumerate(row[1:])]
+        native = [("Real GDP", ["1.1", "1.2", "1.3", "1.4", "1.5"]), ("Previous", row)]
+        native += [("Final sales", ["2.1", "2.2", "2.3", "2.4", "2.5"]), ("Previous", sib)]
+        shipped = block([native[0], ("Previous", shipped_row), native[2], ("Previous", sib)])
+        return live(build_page(native, rotation), shipped + "\n")
+
+    # sib: -.7 then `far` values changed; vs the shipped row it differs in the point and `far`
+    new, reps, refs = case(far - 1)
+    assert cell(new, 0, "Previous", 0) == "-.7", (reps, refs)
+    new2, reps2, refs2 = case(far - 2)
+    assert cell(new2, 0, "Previous", 0) == "-7", (reps2, refs2)
+    assert rbc.REFUSE_RIVAL_LINE in why(refs2)
+
+
+# ---------------------------------------------------------------------------
+# N at process(): the arms differ exactly by the correct repairs
+# ---------------------------------------------------------------------------
+
+# Six lines: the harness sends four-line pages to the native lane (no model table to repair).
+F2A_NATIVE = [
+    ("Real GDP", ["-.4", "1.1", "1.2"]),
+    ("Previous", ["- 7", "2.5", "3.0"]),
+    ("Final sales", ["-.5", "5.1", "5.2"]),
+    ("Previous", ["-.7", "2.5", "3.0"]),
+    ("Exports", ["2.1", "2.2", "2.3"]),
+    ("Imports", ["3.1", "3.2", "3.3"]),
+]
+F2A_SHIPPED = [
+    ("Real GDP", ["-4", "1.1", "1.2"]),
+    ("Previous", ["-7", "2.5", "3.0"]),
+    ("Final sales", ["-5", "5.1", "5.2"]),
+    ("Previous", ["-.7", "2.5", "3.1"]),
+    *F2A_NATIVE[4:],
+]
+
+
+@pytest.mark.parametrize("providers", [True, False], ids=["ladder", "no_ladder"])
+def test_n_at_process_the_step_repairs_the_own_line_rows_and_leaves_previous(tmp_path, providers):
+    """Arms differ only by the repair step (the control arm replaces it with a no-op).  With the
+    ladder, they differ in exactly the `Real GDP` and `Final sales` cells; section 1's
+    `Previous` ships the model's `-7` in both.  With an empty ladder no model reads the page and
+    the arms are identical.  Rotation 0 only: the harness sends this page to the native lane at
+    270 (no model table)."""
+    from test_gh1267_row_binding_pipeline import _events, _fragment, _run
+    from test_gh1282_point_repair_pipeline import KIND, _noop
+
+    from socr.pipeline.orchestrator import UnifiedPipeline
+
+    markdown = block(F2A_SHIPPED) + "\n"
+    kw = dict(check_runs=True, native=F2A_NATIVE, markdown=markdown, providers=providers)
+    _, _, _, on, pdf = _run(tmp_path, None, 0, out_name="on", **kw)
+    with patch.object(UnifiedPipeline, "_repair_dropped_points", _noop):
+        _, _, _, off, _ = _run(tmp_path, None, 0, out_name="off", pdf=pdf, **kw)
+    if not providers:
+        assert _fragment(on) == _fragment(off) and _events(on, KIND) == []
+        return
+    f_on, f_off = _fragment(on), _fragment(off)
+    assert cell(f_on, 0, "Previous", 0) == cell(f_off, 0, "Previous", 0) == "-7"
+    assert (cell(f_on, 0, "Real GDP", 0), cell(f_off, 0, "Real GDP", 0)) == ("-.4", "-4")
+    assert (cell(f_on, 0, "Final sales", 0), cell(f_off, 0, "Final sales", 0)) == ("-.5", "-5")
+    rows = [r for e in _events(on, KIND) for r in e["data"]["rows"]]
+    assert sorted((r["label"], r["old"], r["new"]) for r in rows) == [
+        ("Final sales", "-5", "-.5"),
+        ("Real GDP", "-4", "-.4"),
+    ]
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_n_a_clipped_box_with_three_dropped_points_is_refused_by_the_point_only_rule(rotation):
+    """Section 1's own line differs from the row in three values (all dropped points), more
+    than MAX_RIVAL_MISMATCHES, so only the point-only clause names it as a rival.  The box hides
+    it; section 2's `12.5` would be written for the true `1.25`."""
+    own = ["1.25", "-.2", "-.3", "2.5", "3.0"]
+    native = [
+        ("Real GDP", ["1.1", "1.2", "1.3", "1.4", "1.5"]),
+        ("Previous", own),
+        ("Final sales", ["2.1", "2.2", "2.3", "2.4", "2.5"]),
+        ("Previous", ["12.5", "-.2", "-.3", "2.5", "3.0"]),
+    ]
+    shipped = block(
+        [
+            native[0],
+            ("Previous", ["125", "-2", "-3", "2.5", "3.0"]),
+            native[2],
+            ("Previous", ["12.5", "-.2", "-.3", "2.5", "3.1"]),
+        ]
+    )
+    assert len(own) - 2 > rbc.MAX_RIVAL_MISMATCHES  # three differences, two agreeing
+    page = build_page(native, rotation)
+    clipped = [raw_box(rotation, V0 + 1.5 * LINE_PITCH, V0 + 4 * LINE_PITCH)]
+    new, reps, refs = live(page, shipped + "\n", regions=clipped)
+    assert cell(new, 0, "Previous", 0) == "125", (reps, refs)
+    assert rbc.REFUSE_RIVAL_LINE in why(refs)

@@ -128,7 +128,14 @@ def test_identical_previous_lines_are_ambiguous_and_refused():
 
 
 def test_previous_lines_told_apart_by_the_other_values():
+    """The other `Previous` line must be told apart by more than MAX_RIVAL_MISMATCHES values
+    (review fix N): differing in the point and one value, it could be the row's own line with
+    one more model slip, and the row is refused; differing in three, line 1 is repaired."""
+    assert rbc.MAX_RIVAL_MISMATCHES == 2
     words = page(("Previous", ["-.7", "1.2", "3.4"]), ("Previous", ["-.7", "1.2", "3.5"]))
+    _, reps, refs = run(words, md(("Previous", ["-7", "1.2", "3.5"])))
+    assert reps == [] and refs[0].why == (rbc.REFUSE_RIVAL_LINE,), (reps, refs)
+    words = page(("Previous", ["-.7", "1.9", "3.4"]), ("Previous", ["-.7", "1.2", "3.5"]))
     _, reps, refs = run(words, md(("Previous", ["-7", "1.2", "3.5"])))
     assert [(r.old, r.new, r.native_line) for r in reps] == [("-7", "-.7", 1)], (reps, refs)
 

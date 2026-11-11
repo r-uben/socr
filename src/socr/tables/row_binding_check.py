@@ -1172,6 +1172,19 @@ def table_payload(
 # corroborate themselves.
 MIN_AGREEING_VALUES = 2
 
+# A page line that prints the row's exact label, with the same number of values, and differs from
+# the shipped row in at most this many values may be the row's OWN line (condition 7).  The row's
+# own line fails condition 1 only because the model slipped somewhere in the row; when it is not
+# the hit, at least one of those slips is not a point drop (a detached minus `- 7`, a misread
+# `-7.1`).  One such slip plus the dropped point being repaired in the same row is two
+# differences.  A hit with such a rival anywhere on the page could be another section's line
+# (`Previous`, a country name) whose value would be written into this row (review of #1282,
+# findings 2a and 3).  A named judgement, not a measured optimum: TB-34's cached pages lose 2 of
+# 152 proposed repairs at 2 (docs/log/2026-11-07_1282-point-repair.md); requiring the label to be
+# unique on the page instead loses 74.  The same tolerance names a labelled line as "near" in the
+# refusal reasons.
+MAX_RIVAL_MISMATCHES = 2
+
 # Refusal reasons (named, so a test and a sidecar can quote them).
 REFUSE_CONTRADICTED = "table_contradicted"
 REFUSE_AMBIGUOUS = "ambiguous_lines"
@@ -1185,6 +1198,7 @@ REFUSE_LABEL = "label_not_exact"
 REFUSE_NO_AGREEING = "no_agreeing_value"
 REFUSE_AFFIX = "token_affix_differs"
 REFUSE_SHARED_REGION = "region_shared_with_another_block"
+REFUSE_RIVAL_LINE = "another_line_prints_the_label_close_to_the_row"
 
 # A numeric token split into what stands before the number, the number and what follows it
 # (`-.7%` -> "", "-.7", "%").  The affixes of the shipped token and of the native one must be
@@ -1282,6 +1296,60 @@ class PointRefusal:
     detail: str = ""
 
 
+def _alignments(c: _Cand, n_values: int) -> list[tuple[list[int], list[str]]]:
+    """The ways candidate *c*'s numbers line up with a row of *n_values* values: all of them, or
+    all but a leading one (a numeric row label leads the line)."""
+    idx = [i for i in range(c.start, c.stop) if c.line.words[i].num is not None]
+    nums = [c.line.words[i].num for i in idx]
+    out = []
+    if len(nums) == n_values:
+        out.append((idx, nums))
+    if idx and idx[0] == c.start and len(nums) - 1 == n_values and len(nums) > 1:
+        out.append((idx[1:], nums[1:]))
+    return out
+
+
+def _value_word_keys(c: _Cand, aidx: list[int]) -> frozenset:
+    """The text-layer words under *aidx*, by position: the same printed words whichever region
+    the lines were built from."""
+    return frozenset((w.x0, w.y0, w.x1, w.y1, w.text) for w in (c.line.words[i] for i in aidx))
+
+
+def _is_detached_sign(text: str) -> bool:
+    return text.translate(_UNICODE_MINUS).strip() in ("-", "+")
+
+
+def _rival_lines(r: _Row, hit: dict, page_cands: list[_Cand]) -> list[str]:
+    """Condition 7: page lines other than *hit* that could be row *r*'s own line.  A line counts
+    when it prints the row's label exactly (the hit's rule; a sign printed as a word of its own
+    before the first value is read as the value's, not the label's), carries the same number of values,
+    shares no value word with the hit, and either differs from the row in at most
+    ``MAX_RIVAL_MISMATCHES`` values or is itself a point-only hit (every difference a point drop,
+    ``MIN_AGREEING_VALUES`` agreeing)."""
+    out: list[str] = []
+    for c in page_cands:
+        for aidx, anums in _alignments(c, len(r.numbers)):
+            if _value_word_keys(c, aidx) & hit["words"]:
+                continue  # the hit's own printed words
+            # a sign printed as its own word before the first value (`Previous - 7`) belongs to
+            # the value, not to the label: that line prints the label `Previous`
+            lead = aidx[0]
+            while lead > c.start and _is_detached_sign(c.line.words[lead - 1].text):
+                lead -= 1
+            printed = _printed_label(c, lead)
+            if not _labels_exact(r.label, printed, strict=True):
+                continue
+            mism = [(s, n) for s, n in zip(r.numbers, anums) if s != n]
+            point_only = (
+                bool(mism)
+                and all(point_dropped(s, n) for s, n in mism)
+                and len(anums) - len(mism) >= MIN_AGREEING_VALUES
+            )
+            if len(mism) <= MAX_RIVAL_MISMATCHES or point_only:
+                out.append(f"{printed!r}: {len(mism)} of {len(anums)} values differ")
+    return out
+
+
 def propose_point_repairs(
     words: list,
     region: tuple[float, float, float, float] | None,
@@ -1305,7 +1373,10 @@ def propose_point_repairs(
        the lines of the nearest BOUND rows above and below (reading order);
     5. the data cells carry no markdown decoration (the substitution is token-exact);
     6. after the substitution the production check binds that row BOUND, no row that was BOUND
-       loses it, and the table does not turn CONTRADICTED.
+       loses it, and the table does not turn CONTRADICTED;
+    7. no OTHER line anywhere on the page (not just in the region) prints the row's exact label
+       with the same number of values and is within ``MAX_RIVAL_MISMATCHES`` values of the row, or
+       is itself a point-only hit for the row (:func:`_rival_lines`).
 
     The number written is the text layer's printed string.  Pure and idempotent."""
     base = check_row_binding(words, region, table_markdown)
@@ -1339,14 +1410,7 @@ def propose_point_repairs(
         hits: list[dict] = []
         near: list[dict] = []
         for c in cands:
-            idx = [i for i in range(c.start, c.stop) if c.line.words[i].num is not None]
-            nums = [c.line.words[i].num for i in idx]
-            alignments = []
-            if len(nums) == len(r.numbers):
-                alignments.append((idx, nums))
-            if idx and idx[0] == c.start and len(nums) - 1 == len(r.numbers) and len(nums) > 1:
-                alignments.append((idx[1:], nums[1:]))  # a numeric row label leads the line
-            for aidx, anums in alignments:
+            for aidx, anums in _alignments(c, len(r.numbers)):
                 pairs = list(zip(r.numbers, anums))
                 mism = [(k, s, n) for k, (s, n) in enumerate(pairs) if s != n]
                 if not mism:
@@ -1363,6 +1427,7 @@ def propose_point_repairs(
                     "agree": agree,
                     "mism": [(k, s, n, c.line.words[aidx[k]].text) for k, s, n in mism],
                     "kinds": kinds,
+                    "words": _value_word_keys(c, aidx),
                 }
                 if (
                     kinds == {"point_dropped"}
@@ -1370,7 +1435,7 @@ def propose_point_repairs(
                     and agree >= MIN_AGREEING_VALUES  # condition 3
                 ):
                     hits.append(rec)
-                elif kinds == {"point_dropped"} or (label_ok and len(mism) <= 2):
+                elif kinds == {"point_dropped"} or (label_ok and len(mism) <= MAX_RIVAL_MISMATCHES):
                     near.append(rec)
         if not hits:
             if near:
@@ -1392,6 +1457,10 @@ def propose_point_repairs(
             refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_AMBIGUOUS,)))
             continue
         h = hits[0]
+        rivals = _rival_lines(r, h, page_cands)
+        if rivals:  # condition 7
+            refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_RIVAL_LINE,), rivals[0]))
+            continue
         if h["line"] in claimed:  # condition 4 (one-to-one)
             refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_CLAIMED,)))
             continue
