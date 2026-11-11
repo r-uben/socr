@@ -481,10 +481,15 @@ class TestFullPipeline:
         assert result.success
         assert result.pages_processed == 3
 
-    def test_full_loop_born_digital_skip(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("ladder", [[], [PROFILE_QWEN_LOCAL]], ids=["ci-empty", "qwen-local"])
+    def test_full_loop_born_digital_skip(self, tmp_path: Path, ladder) -> None:
         """Born-digital pages should skip OCR entirely."""
         config = _make_config(quiet=True)
         pipeline = UnifiedPipeline(config)
+        # CH-12: pin the provider ladder. With qwen-ocr on PATH the unpinned ladder
+        # probes the Ollama host (the GH-984 guard then fails the test); CI has no
+        # qwen-ocr and sees an empty ladder.
+        pipeline._available_engines_for_agentic = MagicMock(return_value=ladder)
 
         # All pages are born-digital
         pipeline.bd_detector = MagicMock()
@@ -1276,12 +1281,17 @@ class TestDefaultPathParity:
         assert md.exists() and md.read_text(encoding="utf-8").strip()
         mock_engine.process_pages.assert_called()  # OCR actually ran
 
-    def test_default_prose_only_skips_ocr(self, tmp_path):
+    @pytest.mark.parametrize("ladder", [[], [PROFILE_QWEN_LOCAL]], ids=["ci-empty", "qwen-local"])
+    def test_default_prose_only_skips_ocr(self, tmp_path, ladder):
         """The fast-path invariant codex required: prose-only born-digital docs
         do zero OCR work and never call an engine."""
         pdf = self._real_pdf(tmp_path, n_pages=2)
         config = _make_config(primary_engine=EngineType.DEEPSEEK)
         pipeline = UnifiedPipeline(config)
+        # CH-12: pin the provider ladder. With qwen-ocr on PATH the unpinned ladder
+        # probes the Ollama host (the GH-984 guard then fails the test); CI has no
+        # qwen-ocr and sees an empty ladder.
+        pipeline._available_engines_for_agentic = MagicMock(return_value=ladder)
         pipeline.bd_detector = MagicMock()
         pipeline.bd_detector.detect.return_value = _make_bd_assessment(
             2,
@@ -1301,7 +1311,13 @@ class TestDefaultPathParity:
 
     def test_default_engine_unavailable_returns_error(self, tmp_path):
         pdf = self._real_pdf(tmp_path, n_pages=1)
-        config = _make_config(primary_engine=EngineType.DEEPSEEK)
+        # CH-12: the ladder is NOT pinned here, so the mocked engine's availability
+        # still decides it (every CLI rung is probed through the patched get_engine).
+        # With no cloud qwen pin, the gemma-cloud rung is the one probe here that
+        # bypasses get_engine: with qwen-ocr on PATH it reaches the Ollama host and
+        # the GH-984 guard fails the test. Turn that rung off instead of pinning the
+        # ladder. Mutant (CH-12 F1): is_available=True makes this test fail.
+        config = _make_config(primary_engine=EngineType.DEEPSEEK, enable_gemma_cloud=False)
         pipeline = UnifiedPipeline(config)
         pipeline.bd_detector = MagicMock()
         pipeline.bd_detector.detect.return_value = _make_bd_assessment(

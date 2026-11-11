@@ -167,6 +167,7 @@ from socr.tables.extract import canary_deadline, probe_ollama_idle, probe_openai
 from socr.tables.extract import resolve_ollama_host as _resolve_ollama_host
 from socr.tables.furniture import TABLE_FURNITURE_REMOVED_KIND
 from socr.tables.label_canonical import canonicalize_candidate, canonicalize_table_labels
+from socr.tables.reconcile import TABLE_BLANK_LINES_DROPPED_KIND, drop_blank_table_lines
 
 
 class _MaskUnavailable(Exception):
@@ -444,6 +445,10 @@ _RESUME_REPLAYED: dict[str, str] = {
         )
         for kind in UNSHIPPED_FIGURE_EVENT_KINDS
     },
+    TABLE_BLANK_LINES_DROPPED_KIND: (
+        "the model's table had blank rows/columns removed before it was checked and shipped; the "
+        "counts live only on this event, and a terminal resumed page skips the gate"
+    ),
     TABLE_FURNITURE_REMOVED_KIND: (
         "#988: the table gate removed page furniture (a site menu) from the shipped text; the "
         "removed runs live only on this event, and a terminal resumed page skips the gate"
@@ -17429,6 +17434,10 @@ class UnifiedPipeline:
         if loaded is None:
             return None
         text, recorded_judge, figures, prof = loaded
+        # The judge chain drops blank table rows/columns from the text it is given, and
+        # the re-judge refuses a verdict on bytes the chain rewrote. Clean once here
+        # (idempotent), so the hash is taken on the bytes the judge will actually see.
+        text = drop_blank_table_lines(text).text
         backend, model = resolved_provenance(prof, self.config)
 
         def snapshot() -> PageOutput:

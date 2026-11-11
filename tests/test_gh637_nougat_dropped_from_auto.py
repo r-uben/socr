@@ -39,15 +39,14 @@ def test_resolve_auto_engine_never_returns_nougat_when_others_unavailable():
     # tried and, since NougatEngine().is_available() is not patched here, the
     # fallback would be governed by nougat rather than the documented
     # GEMINI-fallback contract.
-    with patch.dict(
-        "socr.engines.registry._ENGINES",
-        {
-            EngineType.QWEN: _unavailable_engine(),
-            EngineType.GEMINI: _unavailable_engine(),
-            EngineType.MARKER: _unavailable_engine(),
-            EngineType.GLM: _unavailable_engine(),
-        },
-    ):
+    # CH-12: derive the set from AUTO_ENGINE_ORDER so a newly added engine cannot
+    # leak through (GEMMA's is_available is CLI presence: qwen-ocr on PATH made it
+    # win locally, not on CI). GEMINI is mocked unavailable too, as before: it is
+    # returned as the documented no-engine fallback, not because it probed up.
+    # NOUGAT is left unmocked on purpose: if it ever re-enters the order, it must be
+    # free to win so this test catches it (CH-12 mutant M8).
+    unavailable = {e: _unavailable_engine() for e in AUTO_ENGINE_ORDER if e != EngineType.NOUGAT}
+    with patch.dict("socr.engines.registry._ENGINES", unavailable):
         result = resolve_auto_engine()
     assert result != EngineType.NOUGAT
     assert result == EngineType.GEMINI  # documented fallback

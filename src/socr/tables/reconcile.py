@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,80 @@ def find_table_blocks(markdown: str) -> list[_Block]:
         else:
             i += 1
     return blocks
+
+
+#: A cell with no content: only whitespace, ``&nbsp;``, and at most an emphasis
+#: wrapper around nothing (``****``, ``____``). A lone ``*`` is NOT blank: it is
+#: a footnote / significance mark and is content.
+_BLANK_CELL_RE = re.compile(
+    r"^(?:&nbsp;|\s)*(?:(\*{2,3}|_{2,3})(?:&nbsp;|\s)*\1)?(?:&nbsp;|\s)*$", re.IGNORECASE
+)
+
+
+#: Audit event kind: blank rows/columns were dropped from a model table before it
+#: was checked and shipped. The counts live on the event.
+TABLE_BLANK_LINES_DROPPED_KIND = "table_blank_lines_dropped"
+
+
+class BlankLinesDropped(NamedTuple):
+    """``drop_blank_table_lines`` result: the text and what was removed from it."""
+
+    text: str
+    rows: int
+    columns: int
+
+
+def drop_blank_table_lines(markdown: str) -> BlankLinesDropped:
+    """Drop all-blank rows and all-blank columns from every markdown table.
+
+    A model sometimes writes an empty header row (``| | | |``) above the real
+    header tiers, and an empty spacer column between column groups. Neither
+    carries content, but each shifts the real header tiers away from the grid's
+    first rows and every later column one lane off the native lanes, so the
+    header and cell checks reject a table whose values are all correct. The
+    checks and the shipped text must see the same grid, so this runs once,
+    before either.
+
+    A row or column is dropped only if EVERY cell is blank; any content keeps it
+    (a header over an empty body is content). A block is left byte-identical
+    unless it is rectangular with its separator directly under its first line (a
+    ragged block is the grid-shape gate's to judge, not ours to repair), and a
+    block holding an escaped pipe (``\\|``) is skipped: ``_split_row`` splits on
+    it, so its cell counts are not trustworthy.
+    """
+    lines = markdown.splitlines()
+    out = list(lines)
+    rows_dropped = cols_dropped = 0
+    for block in reversed(find_table_blocks(markdown)):
+        raw = lines[block.start : block.end + 1]
+        if any("\\|" in line for line in raw):
+            continue
+        rows = [_split_row(line) for line in raw]
+        width = len(rows[0])
+        if (
+            len(rows) < 2
+            or any(len(r) != width for r in rows)
+            or not _is_separator_row(rows[1])
+            or any(_is_separator_row(r) for r in rows[2:])
+        ):
+            continue
+        body = [r for i, r in enumerate(rows) if i != 1]
+        keep_rows = [r for r in body if not all(_BLANK_CELL_RE.match(c) for c in r)]
+        keep_cols = [c for c in range(width) if any(not _BLANK_CELL_RE.match(r[c]) for r in body)]
+        if not keep_rows or not keep_cols:
+            continue
+        if len(keep_rows) == len(body) and len(keep_cols) == width:
+            continue
+        rows_dropped += len(body) - len(keep_rows)
+        cols_dropped += width - len(keep_cols)
+        sep = [rows[1][c] for c in keep_cols]
+        rebuilt = [[r[c] for c in keep_cols] for r in keep_rows]
+        rebuilt.insert(1, sep)
+        out[block.start : block.end + 1] = ["| " + " | ".join(r) + " |" for r in rebuilt]
+    if not rows_dropped and not cols_dropped:
+        return BlankLinesDropped(markdown, 0, 0)
+    text = "\n".join(out) + ("\n" if markdown.endswith("\n") else "")
+    return BlankLinesDropped(text, rows_dropped, cols_dropped)
 
 
 def table_grid_identity(grid: list[list[str]]) -> str:

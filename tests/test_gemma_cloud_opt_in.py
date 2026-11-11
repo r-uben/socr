@@ -5,10 +5,23 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.providers import is_cloud_model
 from socr.engines.gemma_cloud import GemmaCloudEngine, gemma_cloud_model_available
 from socr.pipeline.orchestrator import UnifiedPipeline
+
+
+@pytest.fixture(autouse=True)
+def _no_qwen_host_probe(monkeypatch):
+    """CH-12: qwen-ocr on PATH makes the QWEN rung probe the Ollama host (the
+    GH-984 guard then fails the test); CI has no qwen-ocr. The gemma gate under
+    test is patched inside each test, so only the QWEN probe is stubbed here."""
+    import socr.engines.qwen as qwen
+
+    monkeypatch.setattr(qwen.QwenEngine, "is_available", lambda self: False)
+    monkeypatch.setattr(qwen, "cloud_model_available", lambda: False)
 
 
 def test_gemma_cloud_enabled_by_default_in_config() -> None:
