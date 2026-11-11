@@ -903,11 +903,12 @@ def _max_merge_numeric(left: Counter, right: Counter) -> Counter:
 def _render_crop_pixmap(page, bbox: tuple[float, float, float, float], dpi: int):
     import fitz
 
-    from socr.core.born_digital import render_rotation_for
+    from socr.core.born_digital import pixmap_clip, render_rotation_for
 
-    rect = fitz.Rect(bbox)
+    # bbox is a text-layer (unrotated) TableBox; get_pixmap(clip=) is displayed frame.
+    rect = fitz.Rect(pixmap_clip(page, bbox))
     # GH-304b: derive clip-local rotation; keep bbox and clip in page space, rotate only raster pixels.
-    rotation = render_rotation_for(page, clip=rect)
+    rotation = render_rotation_for(page, clip=fitz.Rect(bbox))
     mat = fitz.Matrix(dpi / 72, dpi / 72)
     if rotation != 0:
         mat.prerotate(rotation)

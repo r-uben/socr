@@ -788,9 +788,11 @@ class TableCropExtractor:
         import fitz
         from PIL import Image
 
-        from socr.core.born_digital import render_rotation_for
+        from socr.core.born_digital import pixmap_clip, render_rotation_for, text_layer_clip
 
-        x0, y0, x1, y1 = box.bbox
+        # TableBox is text-layer (unrotated) frame; the pixmap clip and page_rect are
+        # displayed frame. Convert BEFORE padding and clamping.
+        x0, y0, x1, y1 = pixmap_clip(page, box.bbox)
         clip = fitz.Rect(
             max(page_rect.x0, x0 - CROP_PADDING_PT),
             max(page_rect.y0, y0 - CROP_PADDING_PT),
@@ -798,7 +800,8 @@ class TableCropExtractor:
             min(page_rect.y1, y1 + CROP_PADDING_PT),
         )
         # GH-304b: derive clip-local rotation; keep bbox and clip in page space, rotate only raster pixels.
-        rotation = render_rotation_for(page, clip=clip)
+        # get_text(clip=) filters in the unrotated frame; clip is displayed frame.
+        rotation = render_rotation_for(page, clip=text_layer_clip(page, clip))
         mat = fitz.Matrix(self._crop_dpi / 72, self._crop_dpi / 72)
         if rotation != 0:
             mat.prerotate(rotation)

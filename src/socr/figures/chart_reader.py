@@ -2249,13 +2249,13 @@ def crop_digest(page, bbox, dpi: int) -> tuple[str, int, tuple[float, float, flo
     try:
         import fitz
 
-        from socr.core.born_digital import render_rotation_for
+        from socr.core.born_digital import pixmap_clip, render_rotation_for
 
         mat = fitz.Matrix(dpi / 72, dpi / 72)
         rotation = render_rotation_for(page, clip=bbox)
         if rotation:
             mat = mat.prerotate(rotation)
-        pix = page.get_pixmap(matrix=mat, clip=bbox)
+        pix = page.get_pixmap(matrix=mat, clip=pixmap_clip(page, bbox))
         return hashlib.sha256(pix.tobytes("png")).hexdigest(), dpi, clip
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("chart_reader: crop digest failed: %s", exc)

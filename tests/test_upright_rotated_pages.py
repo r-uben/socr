@@ -29,6 +29,8 @@ import pytest
 fitz = pytest.importorskip("fitz")
 np = pytest.importorskip("numpy")
 
+from socr.core.born_digital import text_layer_page_rect  # noqa: E402
+
 from PIL import Image  # noqa: E402
 
 RIGHT_ANGLES = (0, 90, 180, 270)
@@ -326,7 +328,9 @@ def test_evidence_crop_pixmap_is_upright(pdfs) -> None:
     for key, path in pdfs.items():
         with fitz.open(path) as doc:
             page = doc[0]
-            images[key] = _pix_image(_render_crop_pixmap(page, tuple(page.rect), 72))
+            # Table boxes are text-layer (unrotated) frame: the whole page, in that frame.
+            box = tuple(text_layer_page_rect(page))
+            images[key] = _pix_image(_render_crop_pixmap(page, box, 72))
     _assert_all_upright(images)
 
 
@@ -383,12 +387,13 @@ def test_chart_region_crop_is_upright_and_matches_its_digest(pdfs, tmp_path) -> 
     for key, path in pdfs.items():
         with fitz.open(path) as doc:
             page = doc[0]
-            rect = fitz.Rect(page.rect)
+            # Chart boxes are text-layer frame; the pixels are drawn from page.rect.
+            rect = text_layer_page_rect(page)
             digest, _, _ = crop_digest(page, rect, RENDER_DPI)
-            by_eye = _upright_rotation_by_eye(page, clip=rect, dpi=RENDER_DPI)
+            by_eye = _upright_rotation_by_eye(page, clip=page.rect, dpi=RENDER_DPI)
             mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72).prerotate(by_eye)
             expected = hashlib.sha256(
-                page.get_pixmap(matrix=mat, clip=rect).tobytes("png")
+                page.get_pixmap(matrix=mat, clip=page.rect).tobytes("png")
             ).hexdigest()
         assert digest == expected, f"crop_digest does not name an upright crop for {key}"
         assets = render_chart_region_crops(path, 1, [rect], tmp_path / f"{key}")
