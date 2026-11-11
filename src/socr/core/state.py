@@ -280,9 +280,10 @@ class PageState:
     #: this shape -- it is False on that page.
     native_table_lane_refused_rotated: bool = False
     #: #1144 round 4: the page's /Rotate value. ``native_words`` are in
-    #: UNROTATED coordinates and ``detected_table_bboxes`` in rotated ones, so on
-    #: a non-zero rotation the prose floor's box rule compares two different
-    #: spaces and matches nothing -- a /Rotate 90 page shipped its Yes/No grid as
+    #: UNROTATED coordinates and ``detected_table_bboxes`` WERE in rotated ones
+    #: (now stored unrotated, ``born_digital.text_layer_box``), so on
+    #: a non-zero rotation the prose floor's box rule compared two different
+    #: spaces and matched nothing -- a /Rotate 90 page shipped its Yes/No grid as
     #: prose (Fable, PR #1158 round 4; 31 of 808 corpus floors are /Rotate 90, 15
     #: with a box). Read by ``manifest.table_floor_text_for_source``, which
     #: refuses the recovery rather than transforming coordinates: refusing is the

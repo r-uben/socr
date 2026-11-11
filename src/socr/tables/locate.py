@@ -17,14 +17,29 @@ Two detectors, both validated against synthetic econ/finance table styles:
 Fully borderless (whitespace-only) tables have no geometric anchor and are out of
 scope; the whole-page hard-page judge still covers them.
 
-All bboxes are PDF points (72-unit space, origin top-left, y-down), the same
-space ``find_tables`` and ``get_drawings`` report in.
+All bboxes are PDF points (72-unit space, origin top-left, y-down).
+
+Frames (pages with a ``/Rotate`` entry). PyMuPDF reports ``get_text`` words,
+``get_text(clip=)`` and ``get_drawings`` in the UNROTATED frame (the page as
+stored), but ``find_tables``, ``page.rect`` and ``get_pixmap(clip=)`` in the
+ROTATED frame (the page as displayed). ``TableBox.bbox`` is always in the
+UNROTATED frame, so it compares directly with words and drawings. A caller that
+renders a pixmap must first convert the box with ``pixmap_clip`` (identity when
+``/Rotate`` is 0, so unrotated pages are unchanged). The frame helpers live in
+``socr.core.born_digital`` beside ``render_rotation_for``; one convention, one helper.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+
+from socr.core.born_digital import (  # noqa: F401 - pixmap_clip/text_layer_clip re-exported
+    pixmap_clip,
+    text_layer_box,
+    text_layer_clip,
+    text_layer_page_rect,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +53,9 @@ _RULE_MIN_WIDTH_PT = 72.0  # >= ~1 inch wide to be a table rule, not an underlin
 # and are not separated by a large vertical gap. Both are geometric, not tuned.
 _RULE_X_OVERLAP = 0.6  # fraction of shared width to be the "same" table column band
 _BOX_IOU_DEDUP = 0.5  # ruled/booktabs boxes overlapping this much are the same table
+# A rule touching both edges of the unrotated page (a filled banner bar, a page
+# frame) is not a table rule. Same tolerance as "is this line straight".
+_FULL_SPAN_TOL_PT = _RULE_FLATNESS_PT
 
 
 @dataclass(frozen=True)
@@ -74,11 +92,29 @@ def locate_tables(page) -> list[TableBox]:
     if not boxes and _is_scanned(page):
         from socr.tables.image_locate import locate_tables_image
 
-        boxes.extend(locate_tables_image(page))
+        boxes.extend(_to_unrotated_boxes(page, locate_tables_image(page)))
 
     boxes = _dedup(boxes)
     boxes.sort(key=lambda b: (b.bbox[1], b.bbox[0]))  # reading order
     return boxes
+
+
+def _unrotated_rect(page):
+    """The page rectangle in the unrotated frame (``page.rect`` when /Rotate is 0)."""
+    return text_layer_page_rect(page)
+
+
+def _to_unrotated(page, bbox) -> tuple[float, float, float, float]:
+    """A displayed-frame bbox (``find_tables``, the raster locator) in the unrotated frame."""
+    if not getattr(page, "rotation", 0):
+        return tuple(float(v) for v in bbox)
+    return text_layer_box(page, bbox)
+
+
+def _to_unrotated_boxes(page, boxes: list[TableBox]) -> list[TableBox]:
+    if not getattr(page, "rotation", 0):
+        return boxes
+    return [TableBox(bbox=_to_unrotated(page, b.bbox), source=b.source) for b in boxes]
 
 
 def _is_scanned(page) -> bool:
@@ -104,7 +140,8 @@ def _ruled_tables(page) -> list[TableBox]:
     for table in getattr(result, "tables", []):
         bbox = getattr(table, "bbox", None)
         if bbox and _plausible(bbox):
-            out.append(TableBox(bbox=tuple(float(v) for v in bbox), source="ruled"))
+            # find_tables reports in the rotated frame; boxes are unrotated.
+            out.append(TableBox(bbox=_to_unrotated(page, bbox), source="ruled"))
     return out
 
 
@@ -115,8 +152,33 @@ def _booktabs_tables(page) -> list[TableBox]:
     a horizontal span, then bounds each group by ``(min x, top y, max x, bottom y)``.
     A single isolated rule is not a table (needs >= 2 rules to bound a band).
     """
-    rules = _horizontal_rules(page)
-    return bands_from_rules(rules, page.rect, source="booktabs")
+    if not page.rotation:
+        return bands_from_rules(_horizontal_rules(page), page.rect, source="booktabs")
+
+    import fitz
+
+    from socr.core.born_digital import upright_rotation_for
+
+    # /Rotate page. Printed horizontal rules are vertical strokes in the
+    # unrotated frame when the text reads upright only after a 90/270 rotation.
+    transpose = upright_rotation_for(page) in (90, 270)
+    rules = _rules(page, transpose=transpose)
+    rect = _unrotated_rect(page)
+    if transpose:  # rules are (x, y0, y1): run the bands in swapped coordinates
+        rect = fitz.Rect(rect.y0, rect.x0, rect.y1, rect.x1)
+    # Drop rules spanning the page edge to edge (banner bars, page frames): they
+    # would bound a full-page band and win the dedup over the real table.
+    rules = [
+        r
+        for r in rules
+        if not (r[1] <= rect.x0 + _FULL_SPAN_TOL_PT and r[2] >= rect.x1 - _FULL_SPAN_TOL_PT)
+    ]
+    out: list[TableBox] = []
+    for band in bands_from_rules(rules, rect, source="booktabs"):
+        x0, y0, x1, y1 = band.bbox
+        bbox = (y0, x0, y1, x1) if transpose else (x0, y0, x1, y1)
+        out.append(TableBox(bbox=bbox, source="booktabs"))
+    return out
 
 
 def bands_from_rules(
@@ -170,7 +232,17 @@ def _horizontal_rules(page) -> list[tuple[float, float, float]]:
     """Extract long horizontal drawn lines as ``(y, x0, x1)``, sorted by y.
 
     Reads both explicit line items ("l") and thin filled/stroked rectangles
-    ("re") that LaTeX/booktabs sometimes emit for rules.
+    ("re") that LaTeX/booktabs sometimes emit for rules. Unrotated frame.
+    """
+    return _rules(page, transpose=False)
+
+
+def _rules(page, transpose: bool) -> list[tuple[float, float, float]]:
+    """Long straight drawn lines as ``(coord, start, end)``, sorted, unrotated frame.
+
+    ``transpose=False``: horizontal lines, ``coord`` = y, extent along x.
+    ``transpose=True``: vertical lines, ``coord`` = x, extent along y. Clamped to
+    the page in the unrotated frame (the frame ``get_drawings`` reports in).
     """
     try:
         drawings = page.get_drawings()
@@ -183,27 +255,39 @@ def _horizontal_rules(page) -> list[tuple[float, float, float]]:
     # dense Fama-French pages). Including them stretches a table band to the whole
     # page. Clamp x to the page so a rule bleeding into the margin still anchors
     # the band sanely.
-    page_rect = page.rect
+    page_rect = _unrotated_rect(page)
+    if transpose:
+        c_lo, c_hi, s_lo, s_hi = page_rect.x0, page_rect.x1, page_rect.y0, page_rect.y1
+    else:
+        c_lo, c_hi, s_lo, s_hi = page_rect.y0, page_rect.y1, page_rect.x0, page_rect.x1
     rules: list[tuple[float, float, float]] = []
     for d in drawings:
         for item in d.get("items", []):
             kind = item[0]
             if kind == "l":  # line: ("l", p0, p1)
                 (px0, py0), (px1, py1) = item[1], item[2]
-                if abs(py0 - py1) <= _RULE_FLATNESS_PT and abs(px1 - px0) >= _RULE_MIN_WIDTH_PT:
-                    rules.append((min(py0, py1), min(px0, px1), max(px0, px1)))
+                if transpose:
+                    across0, across1, along0, along1 = px0, px1, py0, py1
+                else:
+                    across0, across1, along0, along1 = py0, py1, px0, px1
+                if (
+                    abs(across0 - across1) <= _RULE_FLATNESS_PT
+                    and abs(along1 - along0) >= _RULE_MIN_WIDTH_PT
+                ):
+                    rules.append((min(across0, across1), min(along0, along1), max(along0, along1)))
             elif kind == "re":  # rectangle: ("re", Rect, ...)
                 rect = item[1]
                 w = abs(rect.x1 - rect.x0)
                 h = abs(rect.y1 - rect.y0)
-                if h <= _RULE_FLATNESS_PT and w >= _RULE_MIN_WIDTH_PT:
-                    y = (rect.y0 + rect.y1) / 2.0
-                    rules.append((y, min(rect.x0, rect.x1), max(rect.x0, rect.x1)))
-    rules = [
-        (y, max(page_rect.x0, x0), min(page_rect.x1, x1))
-        for (y, x0, x1) in rules
-        if page_rect.y0 <= y <= page_rect.y1
-    ]
+                if transpose:
+                    thin, long_, mid = w, h, (rect.x0 + rect.x1) / 2.0
+                    a0, a1 = min(rect.y0, rect.y1), max(rect.y0, rect.y1)
+                else:
+                    thin, long_, mid = h, w, (rect.y0 + rect.y1) / 2.0
+                    a0, a1 = min(rect.x0, rect.x1), max(rect.x0, rect.x1)
+                if thin <= _RULE_FLATNESS_PT and long_ >= _RULE_MIN_WIDTH_PT:
+                    rules.append((mid, a0, a1))
+    rules = [(c, max(s_lo, a0), min(s_hi, a1)) for (c, a0, a1) in rules if c_lo <= c <= c_hi]
     rules.sort()
     return rules
 

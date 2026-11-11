@@ -1100,7 +1100,8 @@ def check_page_row_binding(
     """Run :func:`check_row_binding` for every table block of *markdown* on fitz *page*.
 
     Words are rotated into the reading frame with ``native_first.upright_words_for_page`` and the
-    detected table boxes (raw page frame) with the same pivot and rotation the rowizer uses
+    detected table boxes (raw page frame: the unrotated text-layer frame every socr table box is
+    stored in, ``born_digital.pixmap_clip``) with the same pivot and rotation the rowizer uses
     (``reconstruct._words_center`` / ``_rotate_point``).  Block *i* takes box *i* when there is one box
     per block; otherwise every block takes the union of the boxes (a superset: it can only add
     ambiguity, never a false line).  Returns ``(results per block, rotation)``."""

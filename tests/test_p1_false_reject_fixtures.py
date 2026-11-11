@@ -252,7 +252,13 @@ def dense_decoy_pdf(tmp_path: Path) -> tuple[Path, dict[str, str]]:
 #: outcome it is the same on every machine.
 GEOMETRY_BRANCH = {
     "spanning_header_and_notes_row": "pass",
-    "cut_or_rotated_crop": "abstain",
+    # Was "abstain". On a /Rotate 90 page the locator's box was in the wrong frame (a
+    # box holding 0 of the table's 9 words), so geometry could not bind and abstained.
+    # With table boxes in the text-layer frame the box holds all 9 words, the same box
+    # as the /Rotate 0 control of the same drawing, and geometry verifies it exactly as
+    # it does there; the two-cell swap is still not cleared (TABLE_UNVERIFIED, as at
+    # /Rotate 0). Measured: scratch/army/fed-e2e/UPRIGHT/results/p1_rotated_probe.txt.
+    "cut_or_rotated_crop": "pass",
     "dense_decoy_scan": "abstain",
 }
 

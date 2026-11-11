@@ -410,6 +410,51 @@ def render_rotation_for(page, clip=None) -> int:
     return (rotation - displayed) % _FULL_TURN_DEGREES
 
 
+# ---------------------------------------------------------------------------
+# Page frames. PyMuPDF reports ``get_text`` words, ``get_text(clip=)`` and
+# ``get_drawings`` in the UNROTATED frame (the page as stored), but
+# ``find_tables``, ``page.rect`` and ``get_pixmap(clip=)`` in the DISPLAYED frame
+# (the page after ``/Rotate``). socr's convention: every table box it records or
+# passes between modules is in the UNROTATED (text-layer) frame, so it compares
+# directly with words and drawings. Code that renders pixels converts the box with
+# ``pixmap_clip`` first; a displayed-frame rectangle goes back with
+# ``text_layer_clip``. Both are the identity at /Rotate 0.
+# ---------------------------------------------------------------------------
+
+
+def pixmap_clip(page, bbox):
+    """A text-layer (unrotated) ``bbox`` in the displayed frame ``get_pixmap(clip=)`` takes.
+
+    Returns ``bbox`` unchanged at /Rotate 0 (or for a page object without an int
+    rotation), else a normalised ``fitz.Rect``. Call it BEFORE padding and clamping
+    to ``page.rect``, which is a displayed-frame rectangle.
+    """
+    if not _displayed_rotation(page):
+        return bbox
+    return (fitz.Rect(bbox) * page.rotation_matrix).normalize()
+
+
+def text_layer_clip(page, clip):
+    """A displayed-frame ``clip`` in the unrotated frame ``get_text(clip=)`` filters in.
+
+    Inverse of :func:`pixmap_clip`; the identity at /Rotate 0.
+    """
+    if not _displayed_rotation(page):
+        return clip
+    return (fitz.Rect(clip) * page.derotation_matrix).normalize()
+
+
+def text_layer_box(page, bbox) -> tuple[float, float, float, float]:
+    """:func:`text_layer_clip` as a float 4-tuple, the shape table boxes are stored in."""
+    rect = text_layer_clip(page, bbox)
+    return (float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
+
+
+def text_layer_page_rect(page):
+    """``page.rect`` in the unrotated frame (``page.rect`` itself at /Rotate 0)."""
+    return fitz.Rect(text_layer_clip(page, page.rect))
+
+
 def text_direction_is_rotated(direction: tuple[float, float]) -> bool:
     """True when a page's dominant text direction runs off the horizontal axis.
 
@@ -4461,7 +4506,10 @@ class BornDigitalDetector:
                 continue
             if x1 <= x0 or y1 <= y0:
                 continue
-            boxes.append((x0, y0, x1, y1))
+            # ``find_tables`` reports in the DISPLAYED frame; every consumer of these
+            # boxes compares them with ``native_words`` / ``get_text`` output, which is
+            # unrotated. Stored in the text-layer frame (identity at /Rotate 0).
+            boxes.append(text_layer_box(page, (x0, y0, x1, y1)))
         return len(tables), boxes
 
     @staticmethod
