@@ -170,15 +170,27 @@ def _live_bytes(out: Path) -> dict:
 def test_offline_bytes_equal_live_bytes(tmp_path, rotation, case, capsys):
     """Ruling 3: the step enabled (live) and the step-off run plus the tool give the same
     fragment, document, sidecar and events -- including a table that binds completely after the
-    repair (DROPPED: it stays recorded UNVERIFIABLE, no mark lifts) and Fable's two-table page."""
+    repair (DROPPED: it stays recorded UNVERIFIABLE, no mark lifts) and Fable's two-table page.
+
+    The two-table page has no ruled boxes; with both blocks scanning the whole page the
+    shared-region refusal (review fix B) repairs nothing, live or offline.  Both sides are handed
+    one box per table, the regions they get when ``locate_tables`` finds them."""
+    from contextlib import nullcontext
+
+    from test_gh1267_row_binding_check import LINE_PITCH, V0
+    from test_gh1282_point_repair_review_fixes import one_box_per_table
+
     kw = {
         "dropped": dict(rows=DROPPED),
         "slipped": dict(rows=SLIPPED),
         "two_tables": dict(rows=None, native=TWO_NATIVE, markdown=TWO_MARKDOWN),
     }[case]
-    on, off, pdf_dir = _runs(tmp_path, kw.pop("rows"), rotation, **kw)
-    assert _fragment(off) != _fragment(on)
-    out = _tool(off, pdf_dir, "--apply", capsys=capsys)
+    bands = [(V0 - 10, V0 + 2.5 * LINE_PITCH), (V0 + 2.5 * LINE_PITCH, V0 + 5 * LINE_PITCH)]
+    boxed = one_box_per_table(rotation, bands) if case == "two_tables" else nullcontext()
+    with boxed:
+        on, off, pdf_dir = _runs(tmp_path, kw.pop("rows"), rotation, **kw)
+        assert _fragment(off) != _fragment(on)
+        out = _tool(off, pdf_dir, "--apply", capsys=capsys)
     assert "1  pages repaired" in out
     live, offline = _live_bytes(on), _live_bytes(off)
     for key in live:

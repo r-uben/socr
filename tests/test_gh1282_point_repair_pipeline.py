@@ -22,7 +22,7 @@ import pytest
 
 pytest.importorskip("fitz")
 
-from test_gh1267_row_binding_check import ROTATIONS, build_page, md  # noqa: E402
+from test_gh1267_row_binding_check import LINE_PITCH, ROTATIONS, V0, build_page, md  # noqa: E402
 from test_gh1267_row_binding_pipeline import (  # noqa: E402
     _assembled,
     _events,
@@ -259,20 +259,48 @@ def test_a_repair_lifts_no_mark_even_when_every_row_now_binds(tmp_path, rotation
 @pytest.mark.parametrize("rotation", ROTATIONS)
 def test_repair_evidence_follows_its_table_when_an_earlier_table_is_withheld(tmp_path, rotation):
     """Two tables: t0 is CONTRADICTED (withheld, its reading untouched), t1 carries a dropped point.
-    The evidence is attached to p1-t1, by block, and t0's withheld markdown is the model's own."""
+    The evidence is attached to p1-t1, by block, and t0's withheld markdown is the model's own.
+
+    The synthetic page has no ruled boxes, so ``locate_tables`` finds none and both blocks would
+    scan the whole page: the shared-region refusal (review fix B) then repairs nothing.  The
+    repair is handed the regions the pipeline passes when ``locate_tables`` finds one box per
+    table; the second arm, without them, pins that refusal at ``process()``."""
+    from test_gh1282_point_repair_review_fixes import one_box_per_table
+
     t1_native = [("Wages", ["5.1", "-.2", "5.3"]), ("Prices", ["6.1", "6.2", "6.3"])]
     t1_shipped = [("Wages", ["5.1", "-2", "5.3"]), ("Prices", ["6.1", "6.2", "6.3"])]
     markdown = md(DISPLACED) + "\nProse between the tables.\n\n" + md(t1_shipped)
     native = [*NATIVE, *t1_native]
-    _, _, _, on, pdf = _run(
-        tmp_path, None, rotation, check_runs=True, out_name="on", native=native, markdown=markdown
-    )
+    bands = [(V0 - 10, V0 + 3.5 * LINE_PITCH), (V0 + 3.5 * LINE_PITCH, V0 + 6 * LINE_PITCH)]
+    with one_box_per_table(rotation, bands):
+        _, _, _, on, pdf = _run(
+            tmp_path,
+            None,
+            rotation,
+            check_runs=True,
+            out_name="on",
+            native=native,
+            markdown=markdown,
+        )
     side = _sidecar(on)
     t0, t1 = side["row_binding"]["p1-t0"], side["row_binding"]["p1-t1"]
     assert t0["outcome"] == "contradicted" and "repairs" not in t0
     assert t0["withheld_markdown"] == md(DISPLACED).rstrip("\n")
     assert [(r["old"], r["new"]) for r in t1["repairs"]] == [("-2", "-.2")]
     assert [e["data"]["table_id"] for e in _events(on, KIND)] == ["p1-t1"]
+    # the difference: with no box per table (what this page really has) nothing is repaired
+    _, _, _, shared, _ = _run(
+        tmp_path,
+        None,
+        rotation,
+        check_runs=True,
+        out_name="shared",
+        pdf=pdf,
+        native=native,
+        markdown=markdown,
+    )
+    assert all("repairs" not in rec for rec in _sidecar(shared)["row_binding"].values())
+    assert _events(shared, KIND) == []
 
 
 @PROVIDER_STATES

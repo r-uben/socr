@@ -1184,6 +1184,7 @@ REFUSE_NOT_BOUND = "gate_does_not_bind_repaired_row"
 REFUSE_LABEL = "label_not_exact"
 REFUSE_NO_AGREEING = "no_agreeing_value"
 REFUSE_AFFIX = "token_affix_differs"
+REFUSE_SHARED_REGION = "region_shared_with_another_block"
 
 # A numeric token split into what stands before the number, the number and what follows it
 # (`-.7%` -> "", "-.7", "%").  The affixes of the shipped token and of the native one must be
@@ -1537,13 +1538,23 @@ def propose_page_point_repairs(
     geometry of :func:`check_page_row_binding`.  Returns ``(repaired page markdown, [(block index,
     repairs)], [(block index, refusals)])``; only blocks with something to report are listed.
     Repairs change cell text only, so line numbers (``md_line`` is relative to the block) and the
-    block boundaries are unchanged."""
+    block boundaries are unchanged.
+
+    A block that would scan a region shared with another block (no box per block: no boxes at
+    all, or a box count that differs from the block count, with more than one block) gets NO
+    repair and a ``REFUSE_SHARED_REGION`` refusal of the whole table.  The check may judge such a
+    block against the union (a superset only adds ambiguity), but a repair WRITES a number: with
+    two blocks over one region, the other table's line with the same label can be the only hit and
+    its value lands in this table (review of #1282, finding 1)."""
     words, (boxes, union), _rotation = _page_frame(page, regions_raw)
     md_lines = markdown.splitlines()
     kept = markdown.splitlines(keepends=True)  # the page's own line endings survive a repair
     blocks = find_table_blocks(markdown)
     repaired: list[tuple[int, list[PointRepair]]] = []
     refused: list[tuple[int, list[PointRefusal]]] = []
+    if len(blocks) > 1 and len(boxes) != len(blocks):
+        shared = [PointRefusal(-1, "", (REFUSE_SHARED_REGION,), f"{len(boxes)} boxes")]
+        return markdown, [], [(i, list(shared)) for i in range(len(blocks))]
     for i, b in enumerate(blocks):
         region = boxes[i] if len(boxes) == len(blocks) else union
         new, reps, refs = propose_point_repairs(
