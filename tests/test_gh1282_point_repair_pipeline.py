@@ -210,10 +210,12 @@ def test_a_second_run_reaches_the_page_ledger_and_reproduces_the_repaired_page(t
 @pytest.mark.parametrize("rotation", ROTATIONS)
 def test_the_page_level_restore_replays_the_event_and_the_evidence(tmp_path, rotation):
     """`_restore_terminal_page_state` (what a resumed page goes through) brings back the
-    `table_point_repaired` event exactly once, and the repair evidence in the row-binding record."""
+    `table_point_repaired` event exactly once, and the repair evidence in the row-binding record.
+    The resumed page starts from a FRESH PageState, as a resume does: handing it the live run's
+    state would already carry the evidence, and the restore would not be tested (review, 7a)."""
     from socr.core.document import DocumentHandle
     from socr.core.result import PageOutput, PageStatus
-    from socr.core.state import DocumentState
+    from socr.core.state import DocumentState, PageState
 
     pipeline, _, state, out_dir, pdf = _run(
         tmp_path, DROPPED, rotation, check_runs=True, out_name="out", native=NATIVE
@@ -221,7 +223,8 @@ def test_the_page_level_restore_replays_the_event_and_the_evidence(tmp_path, rot
     fragment = _fragment(out_dir)
     assert pipeline._flush_page_sidecar(state, 1, out_dir, terminal=True) is not None
     resumed = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
-    resumed.pages[1] = state.pages[1]
+    resumed.pages[1] = PageState(page_num=1)
+    assert not resumed.pages[1].row_binding  # nothing to find unless the restore brings it
     restored = PageOutput(
         page_num=1, text=fragment, status=PageStatus.SUCCESS, engine="qwen", audit_passed=True
     )
