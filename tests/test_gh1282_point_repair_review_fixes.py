@@ -199,3 +199,52 @@ def test_b_control_one_box_per_block_scans_its_own_box(rotation):
     new, reps, refs = live(page, F1_3_MD, regions=regions)
     assert [cell(new, 1, "Real GDP", k) for k in range(3)] == ["-7", "-2", "-3"], (reps, refs)
     assert REFUSE_SHARED_REGION not in why(refs)
+
+
+# ---------------------------------------------------------------------------
+# Z (finding 2b): a point drop keeps every digit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "shipped,native",
+    [("70", ".070"), ("70", "0.070"), ("7", ".07"), ("7", ".007"), ("-7", "-.07")],
+)
+def test_z_a_zero_lost_after_the_point_is_not_a_point_drop(shipped, native):
+    """`.070` read as `70` loses the zero after the point as well as the point."""
+    assert not point_dropped(rbc._canon_number(shipped), rbc._canon_number(native))
+
+
+@pytest.mark.parametrize(
+    "shipped,native",
+    [
+        ("-7", "-.7"),
+        ("-7", "-0.7"),
+        ("4", ".4"),
+        ("12", "1.2"),
+        ("70", "7.0"),
+        ("125", "1.25"),
+        ("125", "12.5"),
+        ("-2.", "-.2"),
+    ],
+)
+def test_z_control_a_point_drop_by_design_is_still_one(shipped, native):
+    assert point_dropped(rbc._canon_number(shipped), rbc._canon_number(native))
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_z_a_row_whose_line_has_a_zero_after_the_point_is_not_repaired(rotation):
+    """Through the entry: the page prints `.07`, the model shipped `7`.  Writing `.07` would
+    rest on a pair that is not a point drop; the row is refused.  Control: `.7` is repaired."""
+
+    def case(printed):
+        page = build_page(
+            [("Real GDP", ["1.1", "2.2", "3.3"]), ("Rate", [printed, "1.5", "2.5"])], rotation
+        )
+        shipped = block([("Real GDP", ["1.1", "2.2", "3.3"]), ("Rate", ["7", "1.5", "2.5"])]) + "\n"
+        return live(page, shipped)
+
+    new, reps, refs = case(".07")
+    assert reps == [] and cell(new, 0, "Rate", 0) == "7", (reps, refs)
+    new2, reps2, _ = case(".7")
+    assert cell(new2, 0, "Rate", 0) == ".7", reps2

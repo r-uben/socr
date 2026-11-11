@@ -1218,16 +1218,27 @@ def _digit_run(canon: str) -> str:
     return canon.lstrip("-").replace(".", "").lstrip("0") or "0"
 
 
+def _digits_apart_from_point(canon: str) -> str:
+    """The digits of canonical *canon* with the sign and the decimal point removed, and the one
+    ``0`` a canonical form writes before a leading point (``-.7`` -> ``-0.7``) dropped again."""
+    unsigned = canon.lstrip("-")
+    if unsigned.startswith("0."):
+        unsigned = unsigned[1:]
+    return unsigned.replace(".", "")
+
+
 def point_dropped(shipped: str, native: str) -> bool:
     """Canonical *shipped* is canonical *native* with its decimal point (and the zero before it)
-    removed: ``-7`` for ``-0.7``, ``4`` for ``0.4``, ``12`` for ``1.2``.  Same sign, same digit
-    run.  Never a different digit run (``-0.1`` for ``-1.1``), a point on both sides, or no point
+    removed: ``-7`` for ``-0.7``, ``4`` for ``0.4``, ``12`` for ``1.2``, ``70`` for ``7.0``.  Same
+    sign, and the SAME digit string apart from the point: no digit is added, dropped or moved.
+    Never a different digit run (``-0.1`` for ``-1.1``), a zero lost after the point (``7`` for
+    ``.07``, ``70`` for ``.070``: review of #1282, finding 2b), a point on both sides, or no point
     on the native side."""
     if shipped.startswith("-") != native.startswith("-"):
         return False
     if "." in shipped or "." not in native:
         return False
-    return _digit_run(shipped) == _digit_run(native)
+    return _digits_apart_from_point(shipped) == _digits_apart_from_point(native)
 
 
 def _classify_pair(shipped: str, native: str) -> str:
