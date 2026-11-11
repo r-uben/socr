@@ -6,6 +6,10 @@ only thing that changes between arms is whether the step runs.  No absolute stat
 provider-dependent machinery may legitimately move it (CLAUDE.md, the no-provider trap).  The
 helper ``_run`` pins ``primary_engine``, ``local_engine`` and ``enabled_engines`` and patches
 ``_available_engines_for_agentic``.
+
+The control-arm tests run in both provider states.  With the ladder, the arms differ exactly by
+the repair.  With an EMPTY ladder (what CI would see if the patch were missing) no model reads the
+page, the step has no model table to act on, and the arms must be identical.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ import pytest
 
 pytest.importorskip("fitz")
 
-from test_gh1267_row_binding_check import build_page, md  # noqa: E402
+from test_gh1267_row_binding_check import ROTATIONS, build_page, md  # noqa: E402
 from test_gh1267_row_binding_pipeline import (  # noqa: E402
     _assembled,
     _events,
@@ -56,7 +60,13 @@ def _noop(self, state, page_num, ps, bo):
     return 0
 
 
-def _pair(tmp_path, rows, rotation, **kw):
+# The control-arm tests run with the provider ladder and with an empty one (CLAUDE.md: pin a
+# difference, parametrised over both provider states).
+PROVIDER_STATES = pytest.mark.parametrize("providers", [True, False], ids=["ladder", "no_ladder"])
+
+
+def _pair(tmp_path, rows, rotation, providers=True, **kw):
+    kw = dict(kw, providers=providers)
     _, _, st_on, on, pdf = _run(
         tmp_path, rows, rotation, check_runs=True, out_name="on", native=NATIVE, **kw
     )
@@ -67,15 +77,38 @@ def _pair(tmp_path, rows, rotation, **kw):
     return (on, st_on), (off, st_off)
 
 
+def _assert_identical_arms(on, off):
+    """Empty ladder: no model reads the page, so the step has nothing to repair.  The two arms
+    write the same files, every Markdown file byte-identical, the same sidecar apart from timings,
+    and neither records a repair."""
+    files_on = sorted(p.relative_to(on) for p in on.rglob("*") if p.is_file())
+    files_off = sorted(p.relative_to(off) for p in off.rglob("*") if p.is_file())
+    assert files_on == files_off
+    for rel in files_on:
+        if rel.suffix == ".md":
+            assert (on / rel).read_bytes() == (off / rel).read_bytes(), rel
+    side_on, side_off = _sidecar(on), _sidecar(off)
+    side_on.pop("timings_s", None)
+    side_off.pop("timings_s", None)
+    assert side_on == side_off
+    assert _events(on, KIND) == _events(off, KIND) == []
+
+
 def _without_text_layer_marks(text: str) -> str:
     """*text* without the paragraphs of the ``text_layer_*`` page marks."""
     blocks = text.split("\n\n")
     return "\n\n".join(b for b in blocks if "text_layer_" not in b)
 
 
-@pytest.mark.parametrize("rotation", [0, 90])
-def test_the_step_changes_exactly_the_repaired_cell_and_adds_its_event(tmp_path, rotation):
-    (on, st_on), (off, st_off) = _pair(tmp_path, SLIPPED, rotation)
+@PROVIDER_STATES
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_the_step_changes_exactly_the_repaired_cell_and_adds_its_event(
+    tmp_path, rotation, providers
+):
+    (on, st_on), (off, st_off) = _pair(tmp_path, SLIPPED, rotation, providers)
+    if not providers:
+        _assert_identical_arms(on, off)
+        return
     frag_on, frag_off = _fragment(on), _fragment(off)
     assert "| -7 |" in frag_off and "| -7 |" not in frag_on
     assert "| -.7 |" in frag_on and "| -.7 |" not in frag_off
@@ -107,19 +140,27 @@ def test_the_step_changes_exactly_the_repaired_cell_and_adds_its_event(tmp_path,
     assert "Net exports" in row_verdicts(off) and "Net exports" not in row_verdicts(on)
 
 
-@pytest.mark.parametrize("rotation", [0, 90])
-def test_a_clean_page_is_untouched_by_the_step(tmp_path, rotation):
-    (on, _), (off, _) = _pair(tmp_path, NATIVE, rotation)
+@PROVIDER_STATES
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_clean_page_is_untouched_by_the_step(tmp_path, rotation, providers):
+    (on, _), (off, _) = _pair(tmp_path, NATIVE, rotation, providers)
+    if not providers:
+        _assert_identical_arms(on, off)
+        return
     assert _fragment(on) == _fragment(off)
     assert _assembled(on) == _assembled(off)
     assert _events(on, KIND) == []
     assert "repairs" not in _sidecar(on).get("row_binding", {}).get("p1-t0", {})
 
 
-@pytest.mark.parametrize("rotation", [0, 90])
-def test_a_contradicted_table_is_withheld_with_its_text_unrepaired(tmp_path, rotation):
+@PROVIDER_STATES
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_contradicted_table_is_withheld_with_its_text_unrepaired(tmp_path, rotation, providers):
     """Owner ruling: nothing derived from the text layer reaches the re-read's input."""
-    (on, _), (off, _) = _pair(tmp_path, DISPLACED, rotation)
+    (on, _), (off, _) = _pair(tmp_path, DISPLACED, rotation, providers)
+    if not providers:
+        _assert_identical_arms(on, off)
+        return
     assert _events(on, KIND) == []
     rec_on = _sidecar(on)["row_binding"]["p1-t0"]
     rec_off = _sidecar(off)["row_binding"]["p1-t0"]
@@ -130,7 +171,7 @@ def test_a_contradicted_table_is_withheld_with_its_text_unrepaired(tmp_path, rot
     assert _fragment(on) == _fragment(off)
 
 
-@pytest.mark.parametrize("rotation", [0, 90])
+@pytest.mark.parametrize("rotation", ROTATIONS)
 def test_a_second_run_reaches_the_page_ledger_and_reproduces_the_repaired_page(tmp_path, rotation):
     """The document-level gate would skip the whole document and the second run would never
     look at the page (the first version of this test was vacuous that way).  The root index is
@@ -166,7 +207,7 @@ def test_a_second_run_reaches_the_page_ledger_and_reproduces_the_repaired_page(t
     assert _events(out, KIND) == ev
 
 
-@pytest.mark.parametrize("rotation", [0, 90])
+@pytest.mark.parametrize("rotation", ROTATIONS)
 def test_the_page_level_restore_replays_the_event_and_the_evidence(tmp_path, rotation):
     """`_restore_terminal_page_state` (what a resumed page goes through) brings back the
     `table_point_repaired` event exactly once, and the repair evidence in the row-binding record."""
@@ -191,11 +232,15 @@ def test_the_page_level_restore_replays_the_event_and_the_evidence(tmp_path, rot
     assert resumed.pages[1].row_binding["p1-t0"]["repairs"] == replayed[0].data["rows"]
 
 
-@pytest.mark.parametrize("rotation", [0, 90])
-def test_a_repair_lifts_no_mark_even_when_every_row_now_binds(tmp_path, rotation):
+@PROVIDER_STATES
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_repair_lifts_no_mark_even_when_every_row_now_binds(tmp_path, rotation, providers):
     """Ruling 2: the ladder judged the unrepaired bytes, so the shipped text is not the judged
     text.  DROPPED binds completely after the repair; the page keeps its row-binding mark and status."""
-    (on, st_on), (off, st_off) = _pair(tmp_path, DROPPED, rotation)
+    (on, st_on), (off, st_off) = _pair(tmp_path, DROPPED, rotation, providers)
+    if not providers:
+        _assert_identical_arms(on, off)
+        return
     assert "| -.7 |" in _fragment(on) and "| -7 |" in _fragment(off)
     for out in (on, off):
         assert "row binding not verified" in _fragment(out)
@@ -211,7 +256,7 @@ def test_a_repair_lifts_no_mark_even_when_every_row_now_binds(tmp_path, rotation
     assert side_on["row_binding_unverifiable_tables"] == [0]
 
 
-@pytest.mark.parametrize("rotation", [0, 90])
+@pytest.mark.parametrize("rotation", ROTATIONS)
 def test_repair_evidence_follows_its_table_when_an_earlier_table_is_withheld(tmp_path, rotation):
     """Two tables: t0 is CONTRADICTED (withheld, its reading untouched), t1 carries a dropped point.
     The evidence is attached to p1-t1, by block, and t0's withheld markdown is the model's own."""
@@ -230,17 +275,23 @@ def test_repair_evidence_follows_its_table_when_an_earlier_table_is_withheld(tmp
     assert [e["data"]["table_id"] for e in _events(on, KIND)] == ["p1-t1"]
 
 
-@pytest.mark.parametrize("rotation", [0, 90])
-def test_a_page_whose_layer_may_not_judge_gets_no_repair_and_no_event(tmp_path, rotation):
+@PROVIDER_STATES
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_a_page_whose_layer_may_not_judge_gets_no_repair_and_no_event(
+    tmp_path, rotation, providers
+):
     """The check's own guard: a layer refused for more than spacing is not evidence."""
     (on, _), (off, _) = _pair(
-        tmp_path, SLIPPED, rotation, classifier_refuses=True, spacing_alone=False
+        tmp_path, SLIPPED, rotation, providers, classifier_refuses=True, spacing_alone=False
     )
+    if not providers:
+        _assert_identical_arms(on, off)
+        return
     assert _fragment(on) == _fragment(off)
     assert _events(on, KIND) == []
 
 
-@pytest.mark.parametrize("rotation", [0, 90])
+@pytest.mark.parametrize("rotation", ROTATIONS)
 def test_a_suspect_prior_ocr_layer_gets_no_repair_and_no_event(tmp_path, rotation):
     from socr.core import state as state_mod
 
