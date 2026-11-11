@@ -170,11 +170,11 @@ def _render_page_image(pdf: Any, index: int, scale: float, quality: int) -> tupl
         # GH-307: the review HTML is the JUDGEMENT instrument -- showing a
         # sideways PDF beside an upright extract makes a human reviewer compare
         # two things that cannot agree.
-        from socr.core.born_digital import upright_rotation_for
+        from socr.core.born_digital import render_rotation_for
 
         _page = pdf.load_page(index)
         _mat = fitz.Matrix(scale, scale)
-        _rotation = upright_rotation_for(_page)
+        _rotation = render_rotation_for(_page)
         if _rotation:
             _mat = _mat.prerotate(_rotation)
         pixmap = _page.get_pixmap(matrix=_mat)

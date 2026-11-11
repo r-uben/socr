@@ -788,7 +788,7 @@ class TableCropExtractor:
         import fitz
         from PIL import Image
 
-        from socr.core.born_digital import upright_rotation_for
+        from socr.core.born_digital import render_rotation_for
 
         x0, y0, x1, y1 = box.bbox
         clip = fitz.Rect(
@@ -798,7 +798,7 @@ class TableCropExtractor:
             min(page_rect.y1, y1 + CROP_PADDING_PT),
         )
         # GH-304b: derive clip-local rotation; keep bbox and clip in page space, rotate only raster pixels.
-        rotation = upright_rotation_for(page, clip=clip)
+        rotation = render_rotation_for(page, clip=clip)
         mat = fitz.Matrix(self._crop_dpi / 72, self._crop_dpi / 72)
         if rotation != 0:
             mat.prerotate(rotation)

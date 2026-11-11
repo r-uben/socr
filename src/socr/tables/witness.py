@@ -326,7 +326,7 @@ def _render_crop_safe(pdf_path: Path, page_num: int, box: TableBox, crop_dpi: in
     import fitz
     from PIL import Image
 
-    from socr.core.born_digital import upright_rotation_for
+    from socr.core.born_digital import render_rotation_for
 
     try:
         doc = open_pdf(pdf_path)
@@ -343,7 +343,7 @@ def _render_crop_safe(pdf_path: Path, page_num: int, box: TableBox, crop_dpi: in
             min(page_rect.x1, x1 + CROP_PADDING_PT),
             min(page_rect.y1, y1 + CROP_PADDING_PT),
         )
-        rotation = upright_rotation_for(page, clip=clip)
+        rotation = render_rotation_for(page, clip=clip)
         mat = fitz.Matrix(crop_dpi / 72, crop_dpi / 72)
         if rotation != 0:
             mat.prerotate(rotation)

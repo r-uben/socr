@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from socr.core.born_digital import upright_rotation_for
+from socr.core.born_digital import render_rotation_for
 from socr.tables.column_gutter import detect_column_gutter
 
 
@@ -150,7 +150,7 @@ def render_gemma_crops(
     with open_pdf(pdf_path) as doc:
         page = doc[page_num - 1]
         plan = plan_gemma_page_crops(page)
-        rotation = upright_rotation_for(page)
+        rotation = render_rotation_for(page)
         for label, clip in plan.clips:
             mat = fitz.Matrix(dpi / 72, dpi / 72)
             if rotation:

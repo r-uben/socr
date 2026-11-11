@@ -5334,10 +5334,10 @@ class UnifiedPipeline:
                 # visual semantics -- the lane records "data values not
                 # transcribed" and hands the reader the image instead. A sideways
                 # image is the whole payload, rendered unreadable.
-                from socr.core.born_digital import upright_rotation_for
+                from socr.core.born_digital import render_rotation_for
 
                 mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
-                rotation = upright_rotation_for(page)
+                rotation = render_rotation_for(page)
                 if rotation:
                     mat = mat.prerotate(rotation)
                 pix = page.get_pixmap(matrix=mat)
@@ -11171,7 +11171,7 @@ class UnifiedPipeline:
         import fitz
         from PIL import Image
 
-        from socr.core.born_digital import upright_rotation_for
+        from socr.core.born_digital import render_rotation_for
         from socr.core.pdf import open_pdf
         from socr.tables.extract import CROP_PADDING_PT, DEFAULT_CROP_DPI
 
@@ -11194,7 +11194,7 @@ class UnifiedPipeline:
                 clip &= fitz.Rect(clip_limits)
             if clip.is_empty or clip.is_infinite:
                 return None
-            rotation = upright_rotation_for(page, clip=clip)
+            rotation = render_rotation_for(page, clip=clip)
             mat = fitz.Matrix(DEFAULT_CROP_DPI / 72, DEFAULT_CROP_DPI / 72)
             if rotation != 0:
                 mat.prerotate(rotation)
