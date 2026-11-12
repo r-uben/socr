@@ -740,6 +740,8 @@ PERMANENTLY_UNRESOLVABLE_MODES: frozenset[FailureMode] = frozenset(
         FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER,
         # #1218: the same page and config re-read give the same omission.
         FailureMode.NUMBERS_DROPPED_FROM_READING,
+        # #1294: the same page and config produce the same shipped words.
+        FailureMode.WORDS_MISSING_FROM_PAGE,
     }
 )
 
@@ -760,6 +762,16 @@ TEXT_LAYER_DROPS_MODES: dict[FailureMode, Check] = {
 NUMBER_CHECK_MODES: dict[FailureMode, Check] = {
     **TEXT_LAYER_NUMBERS_MODES,
     **TEXT_LAYER_DROPS_MODES,
+}
+#: #1294: the demotion mode of the ``text_layer_words`` clause.
+TEXT_LAYER_WORDS_MODES: dict[FailureMode, Check] = {
+    FailureMode.WORDS_MISSING_FROM_PAGE: Check.TEXT_LAYER_WORDS,
+}
+#: Every mode a text-layer clause demotes a page with, for the consumers that treat them
+#: alike (the resume WARNING guard, ``_mode_is_explained``).
+LAYER_CHECK_MODES: dict[FailureMode, Check] = {
+    **NUMBER_CHECK_MODES,
+    **TEXT_LAYER_WORDS_MODES,
 }
 
 
@@ -1305,6 +1317,98 @@ def text_layer_drops_clause(output: PageOutput, p: Any) -> VerdictClause | None:
     )
 
 
+#: #1294: the reason of a ``text_layer_words`` clause. The words are named: they are the
+#: page's own printed words, never a value socr withheld (a page where socr withheld a
+#: table gets no clause), and a reader can judge in seconds whether they matter.
+TEXT_LAYER_WORDS_REASON = (
+    "{count} word(s) this page's own text layer prints are missing from it: {words}"
+)
+#: The same on a layer socr's page analysis refused or found glyph-damaged: the missing
+#: words may be the layer's own damage, so the result is UNKNOWN, still named.
+TEXT_LAYER_WORDS_DAMAGED_REASON = (
+    "this page's text layer is damaged, and it prints {count} word(s) missing from the "
+    "page: {words}"
+)
+_IMAGE_LINK_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+
+
+def _word_layer_is_damaged(p: Any) -> bool:
+    """A layer whose WORDS may not be the page's: refused by the page analysis, or set in a
+    symbol font it could not map. The digit-damage flags of ``_layer_is_damaged`` say
+    nothing about words, so they are not used here."""
+    return not _flag(p, "is_born_digital") or _flag(p, "has_unrecovered_symbol_glyphs")
+
+
+def page_missing_words(output: PageOutput, p: Any) -> tuple[str, ...] | None:
+    """#1294: the words the page's own layer prints and the shipped page lacks, in layer
+    order; ``()`` when none; ``None`` when the check does not apply.
+
+    Applies to every engine (a native page loses words to socr's own table, equation and
+    column handling, a model reading to the model). Does not apply, and records nothing,
+    when: the page ships no text or socr's page-failed marker; its layer is an earlier OCR
+    run (#1156 marks it); socr withheld a table on it (those words are missing by design);
+    or the reference is EMPTY (not computed, or no word), which means NOT CHECKED.
+    """
+    from socr.core.manifest import is_page_failed_marker
+    from socr.tables.layer_words import WordReference, missing_words
+
+    text = output.text or ""
+    if not text.strip() or is_page_failed_marker(text):
+        return None
+    if _flag(p, "prior_ocr_layer_suspect") or _table_withheld_by_socr(output, p):
+        return None
+    reference = getattr(p, "own_layer_word_reference", "")
+    if not isinstance(reference, str) or not reference.strip():
+        return None
+    figure = getattr(p, "own_layer_figure_words", "")
+    shipped = _HTML_COMMENT_RE.sub(" ", _IMAGE_LINK_RE.sub(" ", text))
+    return tuple(
+        missing_words(
+            WordReference(reference, figure if isinstance(figure, str) else ""),
+            reading_numbers_text(shipped, output.page_num),
+            figure_shipped=bool(_IMAGE_LINK_RE.search(text)),
+        )
+    )
+
+
+def page_word_check_record(output: PageOutput, p: Any) -> dict | None:
+    """#1294: what the words check did on this page, PASS or not, for the page's sidecar.
+
+    ``{"compared": owed words, "missing": missing words}``, or ``None`` when the check did
+    not apply (:func:`page_missing_words`). A clean page thereby shows it was checked,
+    rather than only that nothing was found (fix-plan rule: a check records its passes).
+    """
+    from socr.tables.layer_words import word_tokens
+
+    missing = page_missing_words(output, p)
+    if missing is None:
+        return None
+    figure = getattr(p, "own_layer_figure_words", "") or ""
+    owed = word_tokens(p.own_layer_word_reference)
+    if not _IMAGE_LINK_RE.search(output.text or ""):
+        owed += word_tokens(figure)
+    return {"compared": sum(owed.values()), "missing": len(missing)}
+
+
+def _name_words(words: tuple[str, ...]) -> str:
+    return ", ".join(dict.fromkeys(words))
+
+
+def text_layer_words_clause(output: PageOutput, p: Any) -> VerdictClause | None:
+    """#1294: FAIL naming the words when :func:`page_missing_words` finds any (UNKNOWN on a
+    damaged layer, :func:`_word_layer_is_damaged`); else nothing."""
+    missing = page_missing_words(output, p)
+    if not missing:
+        return None
+    if _word_layer_is_damaged(p):
+        result, template = CheckResult.UNKNOWN, TEXT_LAYER_WORDS_DAMAGED_REASON
+    else:
+        result, template = CheckResult.FAIL, TEXT_LAYER_WORDS_REASON
+    reason = template.format(count=len(missing), words=_name_words(missing))
+    return VerdictClause(Check.TEXT_LAYER_WORDS, result, SCOPE_PAGE, reason)
+
+
 #: The order ``silent_success_clauses`` emits its clauses in, as ``(check, scope kind)``.
 #: Named here, beside the function that defines it, so the two cannot drift.
 #:
@@ -1321,6 +1425,9 @@ _SILENT_SUCCESS_ORDER: tuple[tuple[Check, str], ...] = (
     # #1218: LAST, so ``with_text_layer_numbers_clause``'s count of the clauses ahead of
     # #1185's slot is unchanged.
     (Check.TEXT_LAYER_DROPS, SCOPE_PAGE),
+    # #1294: after #1218's, for the same reason: the count of clauses ahead of #1185's slot
+    # is unchanged.
+    (Check.TEXT_LAYER_WORDS, SCOPE_PAGE),
 )
 
 
@@ -1361,10 +1468,12 @@ def silent_success_clauses(
     """
     numbers = text_layer_numbers_clause(output, p)
     drops = text_layer_drops_clause(output, p)
+    words = text_layer_words_clause(output, p)
     return (
         *_clauses_ahead_of_text_layer_numbers(output, p, event_kinds),
         *((numbers,) if numbers is not None else ()),
         *((drops,) if drops is not None else ()),
+        *((words,) if words is not None else ()),
     )
 
 
@@ -1598,7 +1707,7 @@ def _status_is_explained(
     # Two independent early returns, deliberately: a page can carry BOTH a figure it does not
     # show and numbers its layer disputes, and the mode records only the one that demoted it
     # first. Each asks about its own clause, so neither lane's answer depends on the other's.
-    check = NUMBER_CHECK_MODES.get(output.failure_mode)
+    check = LAYER_CHECK_MODES.get(output.failure_mode)
     if check is not None and any(c.check is check for c in clauses):
         return True
     status_free = set(silent_success_clauses(output, p, event_kinds))

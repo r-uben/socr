@@ -6684,6 +6684,7 @@ _VERDICT_DERIVED_MODES: frozenset[FailureMode] = frozenset(
         FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER,
         FailureMode.NUMBERS_UNCHECKED,
         FailureMode.NUMBERS_DROPPED_FROM_READING,
+        FailureMode.WORDS_MISSING_FROM_PAGE,
     }
 )
 
@@ -6768,6 +6769,8 @@ def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
         Check.PRIOR_OCR_LAYER: FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
         # #1218: FAIL is the only result the clause emits, so the check alone maps it.
         Check.TEXT_LAYER_DROPS: FailureMode.NUMBERS_DROPPED_FROM_READING,
+        # #1294: FAIL and UNKNOWN both say words are missing; one mode.
+        Check.TEXT_LAYER_WORDS: FailureMode.WORDS_MISSING_FROM_PAGE,
     }
     #: #1187: the one place two silent-success classes share a CHECK and must not share a
     #: mode. The chart lane's clause is page-scoped and means "a picture shipped without its

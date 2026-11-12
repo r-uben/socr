@@ -30,6 +30,17 @@ from socr.core.table_counts import TableCounts, count_from_sidecars, count_page_
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 
+@pytest.fixture(autouse=True)
+def _no_words_check(monkeypatch):
+    """#1294: this file's stub readings carry only part of the page (a table without the
+    page's title or prose), so the words check would mark every page for words the stub
+    left out. It is tested in ``test_gh1294_layer_words``; here it is switched off so these
+    tests keep pinning what they are about."""
+    from socr.core import verdict
+
+    monkeypatch.setattr(verdict, "page_missing_words", lambda output, p: None)
+
+
 def _ruled_pdf_as_read(tmp_path: Path, name: str = "doc.pdf") -> Path:
     """#1185 round 2 (approved fixture change): ``_ruled_pdf``'s grid printing the table the
     stub reading ships (header ``c0..c3``), plus a caption without digits, so the page is a

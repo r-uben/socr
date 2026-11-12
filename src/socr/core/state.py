@@ -149,6 +149,10 @@ class PageState:
     #: #1218: table-row numbers the layer prints; see
     #: ``PageAssessment.own_layer_drop_reference``. Empty = not checked. In memory only.
     own_layer_drop_reference: str = ""
+    #: #1294: words the layer owes a shipped page, and its chart/image words; see
+    #: ``PageAssessment.own_layer_word_reference``. Empty = not checked. In memory only.
+    own_layer_word_reference: str = ""
+    own_layer_figure_words: str = ""
     #: #990: control characters before a digit in the native text; see ``PageAssessment``.
     control_byte_digit_hits: int = 0
     control_byte_scan_failed: bool = False
@@ -964,6 +968,8 @@ class DocumentState:
                 ps.prior_ocr_layer_text = getattr(pa, "prior_ocr_layer_text", "") or ""
                 ps.own_layer_text = getattr(pa, "own_layer_text", "") or ""
                 ps.own_layer_drop_reference = getattr(pa, "own_layer_drop_reference", "") or ""
+                ps.own_layer_word_reference = getattr(pa, "own_layer_word_reference", "") or ""
+                ps.own_layer_figure_words = getattr(pa, "own_layer_figure_words", "") or ""
                 # #1156: a failed scan is "unknown", which is not trust. #1027 keeps its own,
                 # narrower key (``invisible_text_over_raster``) and is not widened here.
                 # BOTH detection routes feed suspicion: #961's render-mode route catches

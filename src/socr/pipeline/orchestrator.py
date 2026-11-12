@@ -17089,6 +17089,14 @@ class UnifiedPipeline:
         _coverage = (getattr(ps, "text_coverage_verdict", "") or "") if ps else ""
         if _coverage:
             payload["text_coverage"] = _coverage
+        # #1294: the words check records a PASS as well as a FAIL. Sparse: absent where the
+        # check did not apply (no own layer, a failed marker, a table socr withheld).
+        if winning_out is not None and ps is not None:
+            from socr.core.verdict import page_word_check_record
+
+            _words_record = page_word_check_record(winning_out, ps)
+            if _words_record is not None:
+                payload["text_layer_words"] = _words_record
 
         # #1269: sparse, only on a page whose chart floor declined (key absent otherwise).
         _abstention = getattr(ps, "chart_floor_abstention", None) if ps else None
@@ -17855,16 +17863,13 @@ class UnifiedPipeline:
             # ever on the strength of its mode alone).
             if is_permanently_unverifiable:
                 from socr.core.result import FailureMode as _FM
-                from socr.core.verdict import NUMBER_CHECK_MODES
+                from socr.core.verdict import LAYER_CHECK_MODES
 
                 try:
                     _mode = _FM(str(winning.get("failure_mode") or ""))
                 except ValueError:
                     _mode = None
-                if (
-                    _mode in NUMBER_CHECK_MODES
-                    and winning.get("status") != PageStatus.WARNING.value
-                ):
+                if _mode in LAYER_CHECK_MODES and winning.get("status") != PageStatus.WARNING.value:
                     is_permanently_unverifiable = False
 
             # #1187 round 5 (Argon P1-2c): a crop this lane FAILED to render is retried,
