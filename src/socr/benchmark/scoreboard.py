@@ -234,14 +234,14 @@ def count_text_layer(args: tuple[Path, Path]) -> collections.Counter:
     Multiset differences per page; a lead count, not a verdict (a damaged text layer
     or a correctly withheld region also shows up here).
     """
-    import fitz  # noqa: PLC0415 — only this group needs PyMuPDF
+    from socr.core.pdf import open_pdf  # noqa: PLC0415 — only this group needs PyMuPDF
 
     doc_dir, pdf_path = args
     c: collections.Counter = collections.Counter()
     if not pdf_path.exists():
         c["textlayer.documents_without_pdf"] += 1
         return c
-    with fitz.open(pdf_path) as pdf:
+    with open_pdf(pdf_path) as pdf:
         for sc_path in sorted((doc_dir / "pages").glob("*.json")):
             md_path = sc_path.with_suffix(".md")
             if not md_path.exists():
