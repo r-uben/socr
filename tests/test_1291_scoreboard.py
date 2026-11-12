@@ -113,12 +113,10 @@ def test_file_counts(run: Path) -> None:
 def test_two_runs_count_only_shared_documents(run: Path, tmp_path: Path) -> None:
     other = tmp_path / "other" / "doc-a"
     _page(other, 1, "Plain prose.\n")
-    shared = set(scoreboard.find_documents(run)) & set(
-        scoreboard.find_documents(tmp_path / "other")
-    )
-    c = scoreboard.score_run(run, shared, None, workers=2)
-    assert shared == {"doc-a"}
-    assert c["coverage.documents"] == 1
+    out = tmp_path / "out.json"
+    scoreboard.main([str(run), str(tmp_path / "other"), "--json", str(out), "--workers", "2"])
+    results = json.loads(out.read_text())
+    assert [r["coverage.documents"] for r in results.values()] == [1, 1]
 
 
 def test_duplicate_document_keeps_the_fuller_folder(run: Path) -> None:
@@ -126,6 +124,7 @@ def test_duplicate_document_keeps_the_fuller_folder(run: Path) -> None:
     dup = run / "a0" / "out" / "w0" / "doc-a"
     _page(dup, 1, "x\n")
     assert scoreboard.find_documents(run)["doc-a"].parts[-4] == "t0"
+    assert scoreboard.score_run(run, None, None, 2)["coverage.duplicate_document_folders"] == 1
 
 
 def test_text_layer_counts_missing_words_numbers_and_dropped_decimals(tmp_path: Path) -> None:
@@ -133,16 +132,57 @@ def test_text_layer_counts_missing_words_numbers_and_dropped_decimals(tmp_path: 
     pdfs.mkdir()
     pdf = pymupdf.open()
     page = pdf.new_page()
-    page.insert_text((72, 72), "Core inflation fell -.9 percent in 2003")
+    page.insert_text((72, 72), "Core inflation fell -.9 percent in 2003, rates -0.27")
     pdf.save(pdfs / "doc-t.pdf")
     doc = tmp_path / "run" / "doc-t"
-    _page(doc, 1, "inflation fell -9 percent in 2003\n")
+    _page(doc, 1, "inflation fell -9 percent in 2003, rates 0.27\n")
     _finish(doc)
     c = scoreboard.score_run(tmp_path / "run", None, pdfs, workers=1)
     assert c["textlayer.words_missing"] == 1  # "core"
-    assert c["textlayer.numbers_missing"] == 1  # ".9"
+    assert c["textlayer.numbers_missing"] == 1  # ".9"; the audit's count ignores signs
     assert c["textlayer.dropped_decimal_point_values"] == 1
     assert c["textlayer.pages_dropped_decimal_point"] == 1
+    assert c["textlayer.sign_dropped_values"] == 1  # -0.27 shipped as 0.27
+    assert c["textlayer.pages_sign_dropped"] == 1
+
+
+def test_text_layer_is_read_without_glyph_recovery(tmp_path: Path, monkeypatch) -> None:
+    import socr.core.pdf as pdf_mod
+
+    calls = []
+    monkeypatch.setattr(pdf_mod, "apply_glyph_recovery", lambda *a, **k: calls.append(a))
+    pdf = pymupdf.open()
+    pdf.new_page().insert_text((72, 72), "Words")
+    pdf.save(tmp_path / "doc-r.pdf")
+    doc = tmp_path / "doc-r"
+    _page(doc, 1, "Words\n")
+    c = scoreboard.count_text_layer((doc, tmp_path / "doc-r.pdf"))
+    assert c["textlayer.words"] == 1
+    assert calls == []
+
+
+def test_unreadable_files_are_counted_and_the_count_goes_on(run: Path, tmp_path: Path) -> None:
+    a = run / "t0" / "out" / "w0" / "doc-a"
+    (a / "pages" / "00006.md").write_text("orphan fragment\n")
+    (a / "pages" / "00007.json").write_text('{"page_num": 7, "sta')
+    (a / "tables_trust.json").write_text('{"pages": ')
+    c_dir = run / "t0" / "out" / "w0" / "doc-c"
+    _page(c_dir, 1, "fine\n")
+    _finish(c_dir)
+    (c_dir / "metadata.json").write_text("{")
+    gold_path = tmp_path / "gold.jsonl"
+    gold_path.write_text(
+        json.dumps({"doc": "doc-a", "page": 6, "md_sha256": "0" * 64, "content": "clean"}) + "\n"
+    )
+    queue = tmp_path / "queue.jsonl"
+    c = scoreboard.score_run(run, None, None, 2, scoreboard.load_gold(gold_path), queue)
+    assert c["coverage.pages_without_sidecar"] == 1
+    assert c["coverage.unreadable_sidecars"] == 1
+    assert c["coverage.unreadable_tables_trust"] == 1
+    assert c["coverage.unreadable_metadata"] == 1
+    assert c["coverage.documents"] == 3
+    assert c["gold.sidecar_unreadable_needs_review"] == 1
+    assert [json.loads(x)["why"] for x in queue.read_text().splitlines()] == ["sidecar"]
 
 
 def test_render_shows_delta_only_for_two_runs() -> None:
@@ -181,10 +221,24 @@ def test_gold_carries_verdicts_only_to_identical_bytes(run: Path, tmp_path: Path
     assert c["gold.pages"] == 4
     assert c["gold.pages_not_in_run"] == 1
     assert c["gold.carried.defective_silent"] == 1
-    assert (
-        c["gold.carried.defective_marked"] == 2
-    )  # doc-a p2, and doc-b p1 (an unmarked ERROR is not SUCCESS)
+    assert c["gold.carried.defective_marked"] == 1  # doc-a p2 carries a visible mark
+    assert c["gold.carried.defective_unmarked_non_success"] == 1  # doc-b p1: ERROR, no mark
     assert c["gold.carried.seats_disagree"] == 1
     assert c["gold.changed_needs_review"] == 1
     assert c["gold.changed_needs_review.unmarked_success"] == 1
     assert [json.loads(x)["page"] for x in queue.read_text().splitlines()] == [4]
+
+    outside = scoreboard.score_run(run, {"doc-a"}, None, 2, scoreboard.load_gold(gold_path))
+    assert outside["gold.pages_outside_docs"] == 2  # doc-b p1 (two seats) and doc-z p1
+    assert outside["gold.pages_not_in_run"] == 0
+
+
+def test_render_keeps_per_digest_rows_out_of_the_table() -> None:
+    from collections import Counter
+
+    out = scoreboard.render(
+        [Counter({"records.source_digest.abc": 2, "records.distinct_source_digests": 1})],
+        ["run1"],
+    )
+    assert "records.distinct_source_digests" in out
+    assert "source_digest.abc" not in out

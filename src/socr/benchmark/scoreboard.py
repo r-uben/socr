@@ -11,11 +11,16 @@ any depth (a Slurm task tree ``<task>/out/w<N>/<doc>/`` or a single output folde
 
 With two runs, only the documents both runs hold are counted (or ``--docs``), and the
 table shows old, new and the difference. ``--pdf-dir`` adds the text-layer group, which
-opens every page of every PDF and is the slow part.
+opens every page of every PDF and is the slow part. The text layer is read raw, without
+socr's glyph recovery, so a broken recovery step cannot break the yardstick with it.
 
 Every count is a number of pages unless its name says otherwise. The groups:
 ``coverage``, ``labels``, ``tells`` (silent defects visible in the shipped bytes of a
-SUCCESS page), ``events`` (pages per audit-event kind), ``textlayer`` and ``records``.
+SUCCESS page), ``events`` (pages per audit-event kind), ``textlayer``, ``records`` and
+``gold`` (auditor verdicts carried to byte-identical pages, with ``--gold``).
+
+A file that cannot be read (missing, truncated, not a JSON object) is counted under
+``coverage.unreadable_*`` and skipped; it never stops the count.
 """
 
 from __future__ import annotations
@@ -45,24 +50,47 @@ _IMAGE_MD_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 
 GROUPS = ("coverage", "labels", "tells", "events", "textlayer", "records", "gold")
+# Counts kept in --json but not rendered: one row per value would bury the table.
+_JSON_ONLY_PREFIX = "records.source_digest."
 
 
-def find_documents(run: Path) -> dict[str, Path]:
+def scan_documents(run: Path) -> tuple[dict[str, Path], list[Path]]:
     """Map document name to its folder for every ``<doc>/pages/`` under ``run``.
 
-    A document found twice keeps the folder with more page sidecars; ties keep the one
-    that has ``metadata.json``.
+    Identity is the folder name, which is also how ``--pdf-dir`` finds ``<doc>.pdf``. A
+    document found twice (a retried Slurm task) keeps the folder with more page sidecars,
+    ties keep the one that has ``metadata.json``; the folders it drops are returned too,
+    so the collapse is counted rather than hidden.
     """
     found: dict[str, Path] = {}
+    dropped: list[Path] = []
     for pages in sorted(run.rglob("pages")):
         if not pages.is_dir():
             continue
         doc_dir = pages.parent
         name = doc_dir.name
         prev = found.get(name)
-        if prev is None or _doc_rank(doc_dir) > _doc_rank(prev):
+        if prev is None:
             found[name] = doc_dir
-    return found
+        elif _doc_rank(doc_dir) > _doc_rank(prev):
+            dropped.append(prev)
+            found[name] = doc_dir
+        else:
+            dropped.append(doc_dir)
+    return found, dropped
+
+
+def find_documents(run: Path) -> dict[str, Path]:
+    return scan_documents(run)[0]
+
+
+def _read_json(path: Path) -> dict | None:
+    """The JSON object in *path*, or None when it is missing, truncated or not an object."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _doc_rank(doc_dir: Path) -> tuple[int, int]:
@@ -108,8 +136,14 @@ def count_document(doc_dir: Path) -> collections.Counter:
     c["coverage.documents"] += 1
     status_by_page: dict[int, str] = {}
     page_statuses: collections.Counter = collections.Counter()
+    for md_path in (doc_dir / "pages").glob("*.md"):
+        if not md_path.with_suffix(".json").exists():
+            c["coverage.pages_without_sidecar"] += 1
     for sc_path in sorted((doc_dir / "pages").glob("*.json")):
-        sidecar = json.loads(sc_path.read_text())
+        sidecar = _read_json(sc_path)
+        if sidecar is None:
+            c["coverage.unreadable_sidecars"] += 1
+            continue
         md_path = sc_path.with_suffix(".md")
         text = md_path.read_text(errors="replace") if md_path.exists() else ""
         page = int(sidecar.get("page_num") or int(sc_path.stem))
@@ -178,10 +212,12 @@ def count_document(doc_dir: Path) -> collections.Counter:
         c[f"records.source_digest.{digest[:12]}"] += 1
 
     meta_path = doc_dir / "metadata.json"
+    meta = _read_json(meta_path)
     if not meta_path.exists():
         c["coverage.documents_unfinished"] += 1
+    elif meta is None:
+        c["coverage.unreadable_metadata"] += 1
     else:
-        meta = json.loads(meta_path.read_text())
         doc_status = str(meta.get("status") or "missing")
         c[f"coverage.document_status.{doc_status}"] += 1
         if doc_status == "completed" and (page_statuses["warning"] or page_statuses["error"]):
@@ -196,9 +232,11 @@ def count_document(doc_dir: Path) -> collections.Counter:
         c["coverage.documents_torn"] += 1
 
     trust_path = doc_dir / "tables_trust.json"
-    if trust_path.exists():
-        trust = json.loads(trust_path.read_text())
-        pages = trust.get("pages") if isinstance(trust, dict) else None
+    trust = _read_json(trust_path)
+    if trust_path.exists() and trust is None:
+        c["coverage.unreadable_tables_trust"] += 1
+    if trust is not None:
+        pages = trust.get("pages")
         for key, entry in (pages or {}).items():
             if isinstance(entry, dict) and entry.get("flagged"):
                 c["labels.tables_trust_flagged"] += 1
@@ -207,14 +245,18 @@ def count_document(doc_dir: Path) -> collections.Counter:
     return c
 
 
-def _norm_number(token: str) -> str:
-    token = token.replace("−", "-").replace("–", "-").replace(",", "")
-    return token.lstrip("-").rstrip(".")
+def _norm_number(token: str, *, keep_sign: bool = False) -> str:
+    """The audit's number token: separators and trailing point dropped, sign dropped too
+    unless *keep_sign* (``numbers_missing`` keeps the audit's unsigned definition)."""
+    token = token.replace("−", "-").replace("–", "-").replace(",", "").rstrip(".")
+    return token if keep_sign else token.lstrip("-")
 
 
-def _numbers(text: str) -> collections.Counter:
+def _numbers(text: str, *, keep_sign: bool = False) -> collections.Counter:
     return collections.Counter(
-        _norm_number(t) for t in _NUM_RE.findall(text) if any(ch.isdigit() for ch in t)
+        _norm_number(t, keep_sign=keep_sign)
+        for t in _NUM_RE.findall(text)
+        if any(ch.isdigit() for ch in t)
     )
 
 
@@ -241,12 +283,17 @@ def count_text_layer(args: tuple[Path, Path]) -> collections.Counter:
     if not pdf_path.exists():
         c["textlayer.documents_without_pdf"] += 1
         return c
-    with open_pdf(pdf_path) as pdf:
+    try:
+        pdf = open_pdf(pdf_path, repair=False)
+    except (RuntimeError, OSError, ValueError):
+        c["textlayer.unreadable_pdfs"] += 1
+        return c
+    with pdf:
         for sc_path in sorted((doc_dir / "pages").glob("*.json")):
             md_path = sc_path.with_suffix(".md")
-            if not md_path.exists():
+            sidecar = _read_json(sc_path)
+            if sidecar is None or not md_path.exists():
                 continue
-            sidecar = json.loads(sc_path.read_text())
             status = str(sidecar.get("status") or "missing")
             page = int(sidecar.get("page_num") or int(sc_path.stem))
             if page - 1 >= len(pdf):
@@ -274,6 +321,15 @@ def count_text_layer(args: tuple[Path, Path]) -> collections.Counter:
             if dropped:
                 c["textlayer.pages_dropped_decimal_point"] += 1
                 c["textlayer.dropped_decimal_point_values"] += dropped
+            # A minus lost on the way: -0.27 in the PDF, 0.27 in the shipped page.
+            ls, ss = _numbers(layer, keep_sign=True), _numbers(shipped, keep_sign=True)
+            lost, gained = ls - ss, ss - ls
+            sign_dropped = sum(
+                min(n, gained.get(t[1:], 0)) for t, n in lost.items() if t.startswith("-")
+            )
+            if sign_dropped:
+                c["textlayer.pages_sign_dropped"] += 1
+                c["textlayer.sign_dropped_values"] += sign_dropped
     return c
 
 
@@ -287,18 +343,33 @@ def load_gold(path: Path) -> dict[tuple[str, int], list[dict]]:
     return gold
 
 
+def _reader_sees(status: str, text: str) -> str:
+    """What a reader of the page sees: a visible mark, an unmarked SUCCESS page, or an
+    unmarked page whose failure shows only in the sidecar status."""
+    if _is_marked(text):
+        return "marked"
+    return "unmarked_success" if status == "success" else "unmarked_non_success"
+
+
 def score_gold(
-    found: dict[str, Path], gold: dict[tuple[str, int], list[dict]]
+    found: dict[str, Path],
+    gold: dict[tuple[str, int], list[dict]],
+    docs: set[str] | None = None,
 ) -> tuple[collections.Counter, list[dict]]:
     """Carry each gold verdict to this run where the page ships byte-identical markdown.
 
-    A page whose bytes match no judged version goes to the review queue: its verdict is
-    unknown until someone reads it against the PDF. ``defective_silent`` is the count that
-    matters most: a page judged wrong that ships as unmarked SUCCESS.
+    A page whose bytes match no judged version, or whose sidecar cannot be read, goes to
+    the review queue: its verdict is unknown until someone reads it against the PDF.
+    ``defective_silent`` is the count that matters most: a page judged wrong that ships as
+    unmarked SUCCESS. Gold pages of documents outside *docs* are counted apart from pages
+    the run lacks.
     """
     c: collections.Counter = collections.Counter()
     queue: list[dict] = []
     for (doc, page), entries in sorted(gold.items()):
+        if docs is not None and doc not in docs:
+            c["gold.pages_outside_docs"] += 1
+            continue
         doc_dir = found.get(doc)
         md_path = doc_dir / "pages" / f"{page:05d}.md" if doc_dir else None
         if md_path is None or not md_path.exists():
@@ -306,24 +377,39 @@ def score_gold(
             continue
         c["gold.pages"] += 1
         data = md_path.read_bytes()
-        sidecar = json.loads(md_path.with_suffix(".json").read_text())
+        sidecar = _read_json(md_path.with_suffix(".json"))
+        if sidecar is None:
+            c["gold.sidecar_unreadable_needs_review"] += 1
+            queue.append(
+                {"doc": doc, "page": page, "status": None, "engine": None, "why": "sidecar"}
+            )
+            continue
         status = str(sidecar.get("status") or "missing")
-        silent_label = status == "success" and not _is_marked(data.decode(errors="replace"))
+        sees = _reader_sees(status, data.decode(errors="replace"))
         digest = hashlib.sha256(data).hexdigest()
         contents = {e["content"] for e in entries if e["md_sha256"] == digest}
         if not contents:
             c["gold.changed_needs_review"] += 1
-            c[f"gold.changed_needs_review.{'unmarked_success' if silent_label else 'marked'}"] += 1
+            c[f"gold.changed_needs_review.{sees}"] += 1
             queue.append(
-                {"doc": doc, "page": page, "status": status, "engine": sidecar.get("engine")}
+                {
+                    "doc": doc,
+                    "page": page,
+                    "status": status,
+                    "engine": sidecar.get("engine"),
+                    "why": "changed",
+                }
             )
             continue
         if "defective" in contents and "clean" in contents:
             c["gold.carried.seats_disagree"] += 1
         if "defective" in contents:
-            c[
-                "gold.carried.defective_silent" if silent_label else "gold.carried.defective_marked"
-            ] += 1
+            name = {
+                "unmarked_success": "defective_silent",
+                "marked": "defective_marked",
+                "unmarked_non_success": "defective_unmarked_non_success",
+            }[sees]
+            c[f"gold.carried.{name}"] += 1
         elif "withheld_or_marked" in contents:
             c["gold.carried.withheld_or_marked"] += 1
         else:
@@ -339,7 +425,7 @@ def score_run(
     gold: dict[tuple[str, int], list[dict]] | None = None,
     queue_out: Path | None = None,
 ) -> collections.Counter:
-    found = find_documents(run)
+    found, dropped = scan_documents(run)
     if docs is not None:
         absent = sorted(docs - found.keys())
         found = {d: p for d, p in found.items() if d in docs}
@@ -347,6 +433,7 @@ def score_run(
         absent = []
     total: collections.Counter = collections.Counter()
     total["coverage.documents_requested_absent"] = len(absent)
+    total["coverage.duplicate_document_folders"] = sum(p.name in found for p in dropped)
     # Reading sidecars is I/O-bound (run folders often sit on an external or network drive).
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for part in pool.map(count_document, found.values()):
@@ -359,7 +446,7 @@ def score_run(
             for part in pool.map(count_text_layer, jobs, chunksize=4):
                 total.update(part)
     if gold is not None:
-        part, queue = score_gold(found, gold)
+        part, queue = score_gold(found, gold, docs)
         total.update(part)
         if queue_out is not None:
             queue_out.write_text("".join(json.dumps(q) + "\n" for q in queue))
@@ -372,7 +459,9 @@ def _group_order(key: str) -> tuple[int, str]:
 
 
 def render(results: list[collections.Counter], labels: list[str]) -> str:
-    keys = sorted({k for r in results for k in r}, key=_group_order)
+    keys = sorted(
+        {k for r in results for k in r if not k.startswith(_JSON_ONLY_PREFIX)}, key=_group_order
+    )
     width = max(len(k) for k in keys) if keys else 10
     head = f"{'count':<{width}}  " + "  ".join(f"{lab:>12}" for lab in labels)
     if len(results) == 2:
@@ -410,7 +499,12 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="write each run's changed gold pages (needing a fresh read) to <this>.runN.jsonl",
     )
-    ap.add_argument("--workers", type=int, default=8, help="processes for the text-layer group")
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="threads for the file counts and processes for the text-layer group",
+    )
     ns = ap.parse_args(argv)
     if len(ns.runs) > 2:
         ap.error("give one or two run folders")
