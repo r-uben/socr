@@ -1497,8 +1497,8 @@ def propose_point_repairs(
                     if _canon_number(printed_text.translate(_UNICODE_MINUS)) != n:
                         ok = False
                     # The shipped trailing-point form (`-2.` for `-.2`) is the dropped point itself,
-                    # not an affix; the PRINTED token has no such licence (`-.7,` refuses).
-                    if _affixes(t.rstrip(".")) != _affixes(printed_text):
+                    # not an affix (ONE terminal period only: `-7..` still refuses); the PRINTED token has no such licence (`-.7,` refuses).
+                    if _affixes(t.removesuffix(".")) != _affixes(printed_text):
                         affix_ok = False
                     subs.append((t, printed_text, k))
                     out_toks.append(printed_text)

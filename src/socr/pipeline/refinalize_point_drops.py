@@ -292,7 +292,8 @@ def rewrite_page_events(
     The text-layer events of a clause the page no longer carries are removed; a ``drops`` event
     that remains gets the recomputed list.  A row-binding event takes its table's new payload.
     ``table_point_repaired`` events replace any earlier ones of the same table and sit after the
-    page's last event (the order a run records them in: once the page's final output is known).  Idempotent."""
+    page's last event (the order a run records them in: once the page's final output is known).
+    Idempotent."""
     from socr.core.verdict import NUMBERS_DISAGREE_KIND, NUMBERS_DROPPED_KIND
     from socr.judge.table_verdict import ROW_BINDING_EVENT_KINDS, TABLE_POINT_REPAIRED_KIND
 

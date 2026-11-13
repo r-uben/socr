@@ -384,3 +384,14 @@ def test_trailing_punctuation_on_the_printed_value_is_an_affix_and_refuses(print
     # the difference: without the trailing mark the same row is a plain point repair
     _new, reps2, _ = run(page(("Net exports", ["-.7", "1.2", "3.4"])), shipped)
     assert [(r.old, r.new) for r in reps2] == [("-7", "-.7")], reps2
+
+
+def test_only_one_terminal_period_is_the_dropped_point_form():
+    """cubic: `rstrip(".")` took every trailing period, so `-7..` passed as `-7.`."""
+    words = page(("Net exports", ["-.7", "1.2", "3.4"]))
+    new, reps, refs = run(words, md(("Net exports", ["-7..", "1.2", "3.4"])))
+    assert reps == [], (reps, refs)
+    assert refs and refs[0].why == (rbc.REFUSE_AFFIX,), refs
+    # the difference: a single terminal period is the dropped point and still repairs
+    _new, reps2, _ = run(words, md(("Net exports", ["-7.", "1.2", "3.4"])))
+    assert [(r.new) for r in reps2] == ["-.7"], reps2
