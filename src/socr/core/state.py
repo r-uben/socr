@@ -149,6 +149,10 @@ class PageState:
     #: #1218: table-row numbers the layer prints; see
     #: ``PageAssessment.own_layer_drop_reference``. Empty = not checked. In memory only.
     own_layer_drop_reference: str = ""
+    #: #1294: words the layer owes a shipped page, and its chart/image words; see
+    #: ``PageAssessment.own_layer_word_reference``. Empty = not checked. In memory only.
+    own_layer_word_reference: str = ""
+    own_layer_figure_words: str = ""
     #: #990: control characters before a digit in the native text; see ``PageAssessment``.
     control_byte_digit_hits: int = 0
     control_byte_scan_failed: bool = False
@@ -191,6 +195,12 @@ class PageState:
     #: (``refinalize_own_text.resolve_dropped``) so a failed reassessment cannot erase the
     #: original list of a page whose restored verdict still carries the FAIL clause.
     persisted_numbers_dropped_events: list[dict] = field(default_factory=list)
+    #: #1294: the page's ``words_missing_from_page`` audit events and its ``text_layer_words``
+    #: record as its sidecar recorded them, restored on resume. The words reference lives in
+    #: memory only, so a resumed run whose page analysis cannot rebuild it must keep these
+    #: rather than write an empty list or drop the record.
+    persisted_words_missing_events: list[dict] = field(default_factory=list)
+    persisted_text_layer_words: dict | None = None
     #: #960: the non-zero garbled-math signal counts and whether that scan failed (unknown,
     #: treated as a hit). See ``born_digital.GarbledMathSignals``.
     garbled_math_signals: dict[str, int] = field(default_factory=dict)
@@ -968,6 +978,8 @@ class DocumentState:
                 ps.prior_ocr_layer_text = getattr(pa, "prior_ocr_layer_text", "") or ""
                 ps.own_layer_text = getattr(pa, "own_layer_text", "") or ""
                 ps.own_layer_drop_reference = getattr(pa, "own_layer_drop_reference", "") or ""
+                ps.own_layer_word_reference = getattr(pa, "own_layer_word_reference", "") or ""
+                ps.own_layer_figure_words = getattr(pa, "own_layer_figure_words", "") or ""
                 # #1156: a failed scan is "unknown", which is not trust. #1027 keeps its own,
                 # narrower key (``invisible_text_over_raster``) and is not widened here.
                 # BOTH detection routes feed suspicion: #961's render-mode route catches

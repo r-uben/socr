@@ -266,6 +266,10 @@ class FailureMode(str, Enum):
     #: (``text_layer_drops`` FAIL). The reading is shipped, marked, never CHECKED. In
     #: ``PERMANENTLY_UNRESOLVABLE_MODES``: the same config re-reads the same page.
     NUMBERS_DROPPED_FROM_READING = "numbers_dropped_from_reading"
+    #: #1294: the shipped page lacks words its own text layer prints (``text_layer_words``
+    #: FAIL or UNKNOWN). Shipped, marked with the words, never CHECKED. In
+    #: ``PERMANENTLY_UNRESOLVABLE_MODES``: the same config produces the same page.
+    WORDS_MISSING_FROM_PAGE = "words_missing_from_page"
     #: #658: a scanned table page failed the source-evidence gate because this
     #: host has NO classical OCR backend, so the gate never read the pixels and
     #: holds no evidence about the table at all.

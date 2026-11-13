@@ -42,6 +42,18 @@ from socr.core.state import DocumentState  # noqa: E402
 from socr.pipeline.agentic import PageDecision, ProviderAttempt  # noqa: E402
 from socr.pipeline.orchestrator import UnifiedPipeline  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _no_words_check(monkeypatch):
+    """#1294: this file's stub readings carry only part of the page (a table without the
+    page's title or prose), so the words check would mark every page for words the stub
+    left out. It is tested in ``test_gh1294_layer_words``; here it is switched off so these
+    tests keep pinning what they are about."""
+    from socr.core import verdict
+
+    monkeypatch.setattr(verdict, "page_missing_words", lambda output, p: None)
+
+
 CONTRADICTED_KIND = "table_row_binding_contradicted"
 MARKER = "[page 1 failed: unverifiable table — see image]"
 LINK = "![Failed table page 1](figures/failed_table_p1.png)"
