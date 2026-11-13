@@ -34,6 +34,18 @@ from test_gh1267_row_binding_pipeline import (  # noqa: E402
 from socr.core.born_digital import BornDigitalDetector  # noqa: E402
 from socr.pipeline.orchestrator import UnifiedPipeline  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _no_words_check(monkeypatch):
+    """#1294: this file's stub readings carry only part of the page, so the words check would
+    mark pages for words the stub left out, in one arm of a comparison and not the other. It is
+    tested in ``test_gh1294_layer_words``; here it is switched off so these tests keep pinning
+    what they are about."""
+    from socr.core import verdict
+
+    monkeypatch.setattr(verdict, "page_missing_words", lambda output, p: None)
+
+
 KIND = "table_point_repaired"
 NATIVE = [
     ("Real GDP", ["1.1", "2.2", "3.3"]),
