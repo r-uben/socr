@@ -41,21 +41,25 @@ def job(args):
 
     gold = _gold()
     pdf = PDFS / f"{doc}.pdf"
+    # Skipped documents and pages are returned as rows with a "skipped" reason, so the
+    # report can say how far the measured totals fall short of the gold set.
     if not pdf.exists():
-        return []
+        return [{"doc": doc, "skipped": "no PDF"}]
     try:
         analysis = BornDigitalDetector().detect(pdf)
     except Exception as exc:
-        return [{"doc": doc, "error": repr(exc)}]
+        return [{"doc": doc, "skipped": f"page analysis failed: {exc!r}"}]
     out = []
     for run, doc_dir in dirs.items():
         for sc in sorted((doc_dir / "pages").glob("*.json")):
             side = sb._read_json(sc)
             md = sc.with_suffix(".md")
             if side is None or not md.exists():
+                out.append({"doc": doc, "run": run, "skipped": f"{sc.name}: no sidecar or md"})
                 continue
             n = int(side.get("page_num") or int(sc.stem))
             if n - 1 >= len(analysis.pages):
+                out.append({"doc": doc, "run": run, "skipped": f"page {n} beyond the PDF"})
                 continue
             pa = analysis.pages[n - 1]
             p = PageState(page_num=n)
@@ -142,11 +146,23 @@ def cls(r):
 
 
 def report(path, prev=None):
-    rows = [json.loads(l) for l in open(path)]
+    rows = [json.loads(line) for line in open(path)]
+    skipped = collections.Counter(r["skipped"].split(":")[0] for r in rows if "skipped" in r)
+    if skipped:
+        print("SKIPPED (not in the totals):", dict(skipped))
+    rows = [r for r in rows if "skipped" not in r]
     g = [r for r in rows if r["gold"] and r["status"] == "success" and not r["marked"]]
+    # Gold pages are counted per run: a page byte-identical in both runs is one page-version
+    # in each, so the totals are page-versions, reported per run and summed.
     for k in ["loss", "other_defect", "clean"]:
+        parts = []
+        for run in ["aebc444c", "51270eb5"]:
+            s = [r for r in g if cls(r) == k and r["run"] == run]
+            parts.append(f"{run} {sum(bool(r['result']) for r in s)}/{len(s)}")
         s = [r for r in g if cls(r) == k]
-        print(f"{k:13} n={len(s):3} flagged={sum(bool(r['result']) for r in s):3}")
+        both = f"both {sum(bool(r['result']) for r in s)}/{len(s)}"
+        distinct = len({(r["doc"], r["page"]) for r in s})
+        print(f"{k:13} " + "  ".join(parts) + f"  {both}  ({distinct} distinct pages)")
     for run in ["aebc444c", "51270eb5"]:
         sil = [r for r in rows if r["run"] == run and r["status"] == "success" and not r["marked"]]
         print(

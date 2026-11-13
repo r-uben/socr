@@ -1007,9 +1007,10 @@ def main(argv: list[str] | None = None) -> int:
             failed.append((doc_dir, f"{type(exc).__name__}: {exc}"))
             continue
         for change in changes:
-            counts[(change.before, change.after, change.result, change.drops)] += 1
-    for (before, after, result, drops), n in sorted(counts.items()):
+            counts[(change.before, change.after, change.result, change.drops, change.words)] += 1
+    for (before, after, result, drops, words), n in sorted(counts.items()):
         extra = f", text_layer_drops={drops}" if drops else ""
+        extra += f", text_layer_words={words}" if words else ""
         print(f"{n:6d}  {before} -> {after}  (text_layer_numbers={result}{extra})")
     print(f"{sum(counts.values()):6d}  pages re-finalized")
     for reason, n in sorted(skipped.items()):

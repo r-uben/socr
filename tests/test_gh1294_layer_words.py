@@ -520,3 +520,24 @@ def test_a_page_missing_words_is_kept_on_resume_and_an_error_one_is_reprocessed(
     again: list[int] = []
     _run(out, pdf, monkeypatch, lose_label=True, pages_read=again, ladder=True)
     assert 1 in again, again
+
+
+def test_refinalize_cli_summary_names_the_words_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import shutil
+
+    from socr.core import verdict
+    from socr.pipeline.refinalize_own_text import main
+
+    pdf = _rotated_pdf(tmp_path / "doc.pdf")
+    old = tmp_path / "old"
+    with monkeypatch.context() as m:
+        m.setattr(verdict, "text_layer_words_clause", lambda output, p: None)
+        _run(old, pdf, monkeypatch, lose_label=True, pages_read=[], ladder=True)
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    shutil.copy(pdf, pdf_dir / pdf.name)
+    capsys.readouterr()
+    assert main([str(old), "--pdf-dir", str(pdf_dir)]) == 0
+    assert "text_layer_words=FAIL" in capsys.readouterr().out

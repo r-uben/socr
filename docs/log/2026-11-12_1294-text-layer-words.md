@@ -20,7 +20,8 @@ prints ("Core PCE inflation" → "PCE inflation"; "seasonally adjusted annual ra
 
 ## How the rules were chosen
 
-Each rule removed a false-alarm class seen on gold-clean pages. These are PROTOTYPE counts
+Each rule removed a false-alarm class seen on gold-clean pages (counts below are
+page-versions over both runs, as in the next section). These are PROTOTYPE counts
 (a scratch script, raw layer unless stated), kept to show why each rule exists; the numbers
 that describe the shipped check are in the next section.
 
@@ -51,11 +52,17 @@ Findings behind the rules:
 (`BornDigitalDetector().detect`) to every page of both runs, no OCR
 (`2026-11-12_1294-measure.py`). Final rules, after the PR #1295 review:
 
+Gold counts are page-versions: a page judged in one run is counted in that run, and a page
+byte-identical in both runs is counted in each.
+
+| | aebc444c | 51270eb5 | both runs | distinct pages |
+|---|---|---|---|---|
+| gold lost-text pages caught | 42 / 90 | 6 / 21 | 48 / 111 | 90 |
+| gold other-defect pages flagged | 8 / 55 | 2 / 41 | 10 / 96 | 57 |
+| gold clean pages flagged | 3 / 235 | 0 / 210 | 3 / 445 | 235 |
+
 | | value |
 |---|---|
-| gold lost-text pages caught | 48 / 111 |
-| gold other-defect pages flagged | 10 / 96 |
-| gold clean pages flagged | 3 / 445 |
 | aebc444c unmarked SUCCESS pages flagged | 86 / 8,297 (all qwen) |
 | 51270eb5 unmarked SUCCESS pages flagged | 16 / 8,125 (all qwen; native 67 → 0 after the split-word rules) |
 
