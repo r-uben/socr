@@ -660,6 +660,14 @@ class PageOutput:
     #: that were actually evaluated, plus the document checksum, page number,
     #: witness identities and judge/provider/config provenance.
     table_acceptance_credential: dict | None = None
+    #: #1282: THIS reading's text was rewritten by the decimal-point repair
+    #: (``UnifiedPipeline._repair_dropped_points``).  A transient provenance link, not data: set on
+    #: the one ``PageOutput`` whose bytes were repaired, carried by ``dataclasses.replace`` into
+    #: every finalized copy, and absent on any other reading (an older attempt, a native or floor
+    #: body built fresh).  A repair is recorded only for an output that carries it, so a
+    #: different reading that happens to print the same row is never credited with the repair.
+    #: Not in ``to_dict`` / ``from_dict`` (no hash or sidecar changes) and not compared.
+    point_repaired: bool = field(default=False, compare=False, repr=False)
 
     @property
     def word_count(self) -> int:
