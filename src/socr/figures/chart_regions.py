@@ -1062,7 +1062,7 @@ def render_chart_region_crops(
         try:
             import fitz
 
-            from socr.core.born_digital import upright_rotation_for
+            from socr.core.born_digital import pixmap_clip, render_rotation_for
             from socr.core.pdf import open_pdf
             from socr.figures.extractor import RENDER_DPI
 
@@ -1072,10 +1072,12 @@ def render_chart_region_crops(
                 # GH-307: clip-scoped, matching the crop path -- a region
                 # can run against the page's dominant direction.
                 mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
-                _rotation = upright_rotation_for(_page, clip=bbox)
+                _rotation = render_rotation_for(_page, clip=bbox)
                 if _rotation:
                     mat = mat.prerotate(_rotation)
-                pix = _page.get_pixmap(matrix=mat, clip=bbox)
+                # bbox comes from words and drawings (text-layer frame); the pixmap
+                # clip is displayed frame.
+                pix = _page.get_pixmap(matrix=mat, clip=pixmap_clip(_page, bbox))
                 pix.save(str(out_path))
             # A path is not a render. Check the asset the markdown will point
             # at actually exists and has bytes -- a stale or truncated file

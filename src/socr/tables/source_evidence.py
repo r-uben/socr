@@ -574,7 +574,13 @@ def _invisible_text_layer_bboxes(page) -> list[tuple[float, float, float, float]
 
 
 def _text_layer_ink_matrix(page):
-    """Render matrix for per-glyph ink clips (rotation-aware, GH-304b)."""
+    """Render matrix for per-glyph ink clips (rotation-aware, GH-304b).
+
+    Deliberately ``upright_rotation_for``, not ``render_rotation_for``: no reader sees
+    these pixels, only an ink test, and ``_tokens_from_page_text_layer`` maps glyph
+    boxes into ``page_pix`` with this matrix. Its frame on ``/Rotate`` pages is a
+    separate, known defect (TB-55 frames-audit), not an orientation-for-a-reader one.
+    """
     import fitz
 
     from socr.core.born_digital import upright_rotation_for
@@ -897,11 +903,12 @@ def _max_merge_numeric(left: Counter, right: Counter) -> Counter:
 def _render_crop_pixmap(page, bbox: tuple[float, float, float, float], dpi: int):
     import fitz
 
-    from socr.core.born_digital import upright_rotation_for
+    from socr.core.born_digital import pixmap_clip, render_rotation_for
 
-    rect = fitz.Rect(bbox)
+    # bbox is a text-layer (unrotated) TableBox; get_pixmap(clip=) is displayed frame.
+    rect = fitz.Rect(pixmap_clip(page, bbox))
     # GH-304b: derive clip-local rotation; keep bbox and clip in page space, rotate only raster pixels.
-    rotation = upright_rotation_for(page, clip=rect)
+    rotation = render_rotation_for(page, clip=fitz.Rect(bbox))
     mat = fitz.Matrix(dpi / 72, dpi / 72)
     if rotation != 0:
         mat.prerotate(rotation)
@@ -1134,10 +1141,10 @@ def build_scanned_evidence(
         try:
             import fitz
 
-            from socr.core.born_digital import upright_rotation_for
+            from socr.core.born_digital import render_rotation_for
 
             # GH-304b: derive page-level rotation; rotate raster pixels only.
-            rotation = upright_rotation_for(page)
+            rotation = render_rotation_for(page)
             mat = fitz.Matrix(_EVIDENCE_OCR_DPI / 72, _EVIDENCE_OCR_DPI / 72)
             if rotation != 0:
                 mat.prerotate(rotation)

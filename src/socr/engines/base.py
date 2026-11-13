@@ -101,16 +101,19 @@ def sanitize_filename(name: str) -> str:
 
 
 def _upright_rotation_for(page) -> int:
-    """Rotation in degrees that makes ``page``'s dominant text read horizontally.
+    """Rotation in degrees that makes the RENDERED image of ``page`` read horizontally.
+
+    ``born_digital.render_rotation_for``: it accounts for the page's ``/Rotate``,
+    which ``get_pixmap`` applies and the text-layer direction does not.
 
     Returns 0 whenever the page is already horizontal, has no directional
     evidence, or cannot be inspected -- rendering unrotated is the status quo, so
     a failure here must never be worse than not having tried (fail-open by
     design; the caller has no fallback if this raises mid-render).
     """
-    from socr.core.born_digital import upright_rotation_for
+    from socr.core.born_digital import render_rotation_for
 
-    return upright_rotation_for(page)
+    return render_rotation_for(page)
 
 
 class BaseEngine(ABC):

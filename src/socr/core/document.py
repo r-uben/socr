@@ -10,14 +10,15 @@ from pathlib import Path
 
 
 def _upright_rotation_for(page) -> int:
-    """Rotation in degrees making ``page``'s dominant text read horizontally.
+    """Rotation in degrees making the RENDERED image of ``page`` read horizontally.
 
+    ``born_digital.render_rotation_for``, so a ``/Rotate`` page is turned upright too.
     Fails open to 0 (render unchanged) when the page cannot be inspected: a
     failure here must never be worse than not having tried.
     """
-    from socr.core.born_digital import upright_rotation_for
+    from socr.core.born_digital import render_rotation_for
 
-    return upright_rotation_for(page)
+    return render_rotation_for(page)
 
 
 @dataclass

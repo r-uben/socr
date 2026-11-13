@@ -5339,10 +5339,10 @@ class UnifiedPipeline:
                 # visual semantics -- the lane records "data values not
                 # transcribed" and hands the reader the image instead. A sideways
                 # image is the whole payload, rendered unreadable.
-                from socr.core.born_digital import upright_rotation_for
+                from socr.core.born_digital import render_rotation_for
 
                 mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
-                rotation = upright_rotation_for(page)
+                rotation = render_rotation_for(page)
                 if rotation:
                     mat = mat.prerotate(rotation)
                 pix = page.get_pixmap(matrix=mat)
@@ -11176,7 +11176,7 @@ class UnifiedPipeline:
         import fitz
         from PIL import Image
 
-        from socr.core.born_digital import upright_rotation_for
+        from socr.core.born_digital import pixmap_clip, render_rotation_for, text_layer_clip
         from socr.core.pdf import open_pdf
         from socr.tables.extract import CROP_PADDING_PT, DEFAULT_CROP_DPI
 
@@ -11188,7 +11188,9 @@ class UnifiedPipeline:
         try:
             page = doc[page_num - 1]
             page_rect = page.rect
-            x0, y0, x1, y1 = bbox
+            # bbox and clip_limits are text-layer (unrotated) word/cell boxes; the
+            # pixmap clip and page_rect are displayed frame. Convert BEFORE padding.
+            x0, y0, x1, y1 = pixmap_clip(page, bbox)
             clip = fitz.Rect(
                 max(page_rect.x0, x0 - CROP_PADDING_PT),
                 max(page_rect.y0, y0 - CROP_PADDING_PT),
@@ -11196,10 +11198,10 @@ class UnifiedPipeline:
                 min(page_rect.y1, y1 + CROP_PADDING_PT),
             )
             if clip_limits is not None:
-                clip &= fitz.Rect(clip_limits)
+                clip &= fitz.Rect(pixmap_clip(page, clip_limits))
             if clip.is_empty or clip.is_infinite:
                 return None
-            rotation = upright_rotation_for(page, clip=clip)
+            rotation = render_rotation_for(page, clip=text_layer_clip(page, clip))
             mat = fitz.Matrix(DEFAULT_CROP_DPI / 72, DEFAULT_CROP_DPI / 72)
             if rotation != 0:
                 mat.prerotate(rotation)

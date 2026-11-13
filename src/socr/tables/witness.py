@@ -326,7 +326,7 @@ def _render_crop_safe(pdf_path: Path, page_num: int, box: TableBox, crop_dpi: in
     import fitz
     from PIL import Image
 
-    from socr.core.born_digital import upright_rotation_for
+    from socr.core.born_digital import pixmap_clip, render_rotation_for, text_layer_clip
 
     try:
         doc = open_pdf(pdf_path)
@@ -336,14 +336,15 @@ def _render_crop_safe(pdf_path: Path, page_num: int, box: TableBox, crop_dpi: in
     try:
         page = doc[page_num - 1]
         page_rect = page.rect
-        x0, y0, x1, y1 = box.bbox
+        # TableBox is text-layer (unrotated) frame; the pixmap clip is displayed frame.
+        x0, y0, x1, y1 = pixmap_clip(page, box.bbox)
         clip = fitz.Rect(
             max(page_rect.x0, x0 - CROP_PADDING_PT),
             max(page_rect.y0, y0 - CROP_PADDING_PT),
             min(page_rect.x1, x1 + CROP_PADDING_PT),
             min(page_rect.y1, y1 + CROP_PADDING_PT),
         )
-        rotation = upright_rotation_for(page, clip=clip)
+        rotation = render_rotation_for(page, clip=text_layer_clip(page, clip))
         mat = fitz.Matrix(crop_dpi / 72, crop_dpi / 72)
         if rotation != 0:
             mat.prerotate(rotation)
@@ -381,8 +382,11 @@ def _render_page_safe(pdf_path: Path, page_num: int, crop_dpi: int) -> Path | No
         logger.warning("table witness: cannot open %s for page crop (%s)", pdf_path, exc)
         return None
     try:
+        from socr.core.born_digital import text_layer_page_rect
+
         page = doc[page_num - 1]
-        rect = page.rect
+        # The whole page as a TableBox, so in the text-layer frame like every box.
+        rect = text_layer_page_rect(page)
         box = TableBox(
             bbox=(float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)),
             source="page",

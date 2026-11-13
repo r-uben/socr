@@ -3740,7 +3740,10 @@ def table_floor_text_for_source(
             return chart_body
         # #1144 round 4, P0 (Fable, PR #1158). ``native_words`` are
         # ``get_text("words")`` -- UNROTATED coordinates -- while
-        # ``detected_table_bboxes`` come from ``find_tables()`` in ROTATED ones.
+        # ``detected_table_bboxes`` came from ``find_tables()`` in ROTATED ones.
+        # They are now stored unrotated (``born_digital.text_layer_box``), so the
+        # two spaces agree; the refusal below stays until #1159 measures recovery
+        # on /Rotate pages -- removing it would ship content this lane never has.
         # On a /Rotate 90 page the box rule therefore compares two different
         # spaces and matches nothing, and the reproduction ships the Yes/No grid
         # as prose: boxes at x=516..626, the answers at x=400. Both rotation

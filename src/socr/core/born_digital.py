@@ -275,6 +275,70 @@ def upright_rotation_degrees(direction: tuple[float, float]) -> int:
     return int(round(-bearing / 90.0) * 90) % 360
 
 
+def _unrotated_frame_rotation(page, clip=None) -> int | None:
+    """``upright_rotation_for``'s answer, or None when it has no evidence to give one.
+
+    None covers every path ``upright_rotation_for`` documents as fail-open to 0: the
+    page or clip is uninspectable, carries no text line, or the direction helpers
+    raise. ``render_rotation_for`` needs the difference: "horizontal" and "no
+    evidence" are both 0 in the unrotated frame, but only the first may become a
+    rotation of the displayed frame.
+    """
+    try:
+        if clip is None:
+            blocks = page.get_text("dict").get("blocks", [])
+        else:
+            blocks = page.get_text("dict", clip=clip).get("blocks", [])
+    except Exception:
+        if clip is not None:
+            return None
+        else:
+            return None
+
+    if clip is not None:
+        has_clipped_line = False
+        for block in blocks:
+            for line in block.get("lines", []) or []:
+                text = "".join(span.get("text", "") for span in line.get("spans", []) or [])
+                if text.strip():
+                    has_clipped_line = True
+                    break
+            if has_clipped_line:
+                break
+
+        if not has_clipped_line:
+            try:
+                blocks = page.get_text("dict").get("blocks", [])
+            except Exception:
+                return None
+
+    if not blocks:
+        return None
+
+    # GH-310: the fail-open guard wrapped only get_text. dominant_text_direction
+    # and upright_rotation_degrees sat outside it, so a malformed ``dir`` -- or
+    # any raise in either -- propagated out of a helper documented as
+    # fail-open, aborting the crop extract() (whose call precedes _render_crop's
+    # own error boundary, so its never-raises contract failed) and the OCR
+    # render loop that now delegates here.
+    #
+    # One wrap, in the shared helper, covers every caller: #309 hoisted this, so
+    # a second try at each call site would be the duplication that hoist removed.
+    try:
+        # Blocks without a single line (an image-only page) make
+        # dominant_text_direction answer (1, 0): no evidence, not horizontal text.
+        if not any(block.get("lines") for block in blocks):
+            return None
+        return upright_rotation_degrees(dominant_text_direction(blocks))
+    except Exception:
+        # Logged, not swallowed (GH-424 review). Fail-open must not mean
+        # invisible: if either helper regresses, every page renders unrotated
+        # and nothing anywhere says why. Debug level keeps a malformed `dir` on
+        # one page from being noise, while `exc_info` keeps it diagnosable.
+        logger.debug("upright_rotation_for: direction inspection failed", exc_info=True)
+        return None
+
+
 def upright_rotation_for(page, clip=None) -> int:
     """Rotation in degrees making ``page``'s text read horizontally.
 
@@ -292,55 +356,103 @@ def upright_rotation_for(page, clip=None) -> int:
     evidence, or cannot be inspected -- rendering unrotated is the status quo, so
     a failure here must never be worse than not having tried (fail-open by design).
     """
-    try:
-        if clip is None:
-            blocks = page.get_text("dict").get("blocks", [])
-        else:
-            blocks = page.get_text("dict", clip=clip).get("blocks", [])
-    except Exception:
-        if clip is not None:
-            return 0
-        else:
-            return 0
+    rotation = _unrotated_frame_rotation(page, clip)
+    return 0 if rotation is None else rotation
 
-    if clip is not None:
-        has_clipped_line = False
-        for block in blocks:
-            for line in block.get("lines", []) or []:
-                text = "".join(span.get("text", "") for span in line.get("spans", []) or [])
-                if text.strip():
-                    has_clipped_line = True
-                    break
-            if has_clipped_line:
-                break
 
-        if not has_clipped_line:
-            try:
-                blocks = page.get_text("dict").get("blocks", [])
-            except Exception:
-                return 0
+#: Degrees in a full turn: rotations compose modulo this.
+_FULL_TURN_DEGREES = 360
 
-    if not blocks:
+
+def _displayed_rotation(page) -> int:
+    """The page's ``/Rotate`` in degrees, 0 when it is not a plain int.
+
+    PyMuPDF normalises ``page.rotation`` to 0, 90, 180 or 270. Anything else (a
+    test double without the attribute, a mock) is treated as unrotated, so the
+    caller keeps exactly the behaviour it had before ``/Rotate`` was considered.
+    """
+    rotation = getattr(page, "rotation", 0)
+    if isinstance(rotation, bool) or not isinstance(rotation, int):
         return 0
+    return rotation % _FULL_TURN_DEGREES
 
-    # GH-310: the fail-open guard wrapped only get_text. dominant_text_direction
-    # and upright_rotation_degrees sat outside it, so a malformed ``dir`` -- or
-    # any raise in either -- propagated out of a helper documented as
-    # fail-open, aborting the crop extract() (whose call precedes _render_crop's
-    # own error boundary, so its never-raises contract failed) and the OCR
-    # render loop that now delegates here.
-    #
-    # One wrap, in the shared helper, covers every caller: #309 hoisted this, so
-    # a second try at each call site would be the duplication that hoist removed.
-    try:
-        return upright_rotation_degrees(dominant_text_direction(blocks))
-    except Exception:
-        # Logged, not swallowed (GH-424 review). Fail-open must not mean
-        # invisible: if either helper regresses, every page renders unrotated
-        # and nothing anywhere says why. Debug level keeps a malformed `dir` on
-        # one page from being noise, while `exc_info` keeps it diagnosable.
-        logger.debug("upright_rotation_for: direction inspection failed", exc_info=True)
+
+def render_rotation_for(page, clip=None) -> int:
+    """Degrees to ``prerotate`` a ``get_pixmap`` matrix by so the IMAGE reads upright.
+
+    ``upright_rotation_for`` measures the text direction with ``get_text``, which
+    reports line ``dir`` in the UNROTATED page frame. ``get_pixmap`` draws the
+    DISPLAYED frame, which already applies the page's ``/Rotate``. On a page whose
+    ``/Rotate`` is not 0 the two disagree: a Tealbook table set horizontally on a
+    landscape mediabox with ``/Rotate 270`` has ``dir == (1, 0)``, so
+    ``upright_rotation_for`` says 0 and the image went to the model on its side
+    (scratch/army/fed-e2e/UPRIGHT: 130 of 219 rows wrong on 8 such pages, 25 upright).
+
+    The displayed direction is the unrotated one turned by ``/Rotate``, so the image
+    needs ``upright_rotation_for - /Rotate`` (modulo a full turn).
+
+    Every site that renders a page or a crop for a reader uses this. Code that turns
+    TEXT-LAYER words (rowizer, row-binding words, chart bands) keeps
+    ``upright_rotation_for``, whose frame is the words' own. ``clip`` is passed to
+    the direction inspection unchanged, in the frame ``get_text`` filters in.
+
+    Fail-open as before: with no directional evidence (no text line, or the page
+    cannot be inspected) it returns 0, so the page is drawn as displayed -- a scan
+    stored sideways with a ``/Rotate`` that makes it upright stays upright. On a
+    ``/Rotate 0`` page it is ``upright_rotation_for`` exactly.
+    """
+    displayed = _displayed_rotation(page)
+    if displayed == 0:
+        return upright_rotation_for(page, clip=clip)
+    rotation = _unrotated_frame_rotation(page, clip)
+    if rotation is None:
         return 0
+    return (rotation - displayed) % _FULL_TURN_DEGREES
+
+
+# ---------------------------------------------------------------------------
+# Page frames. PyMuPDF reports ``get_text`` words, ``get_text(clip=)`` and
+# ``get_drawings`` in the UNROTATED frame (the page as stored), but
+# ``find_tables``, ``page.rect`` and ``get_pixmap(clip=)`` in the DISPLAYED frame
+# (the page after ``/Rotate``). socr's convention: every table box it records or
+# passes between modules is in the UNROTATED (text-layer) frame, so it compares
+# directly with words and drawings. Code that renders pixels converts the box with
+# ``pixmap_clip`` first; a displayed-frame rectangle goes back with
+# ``text_layer_clip``. Both are the identity at /Rotate 0.
+# ---------------------------------------------------------------------------
+
+
+def pixmap_clip(page, bbox):
+    """A text-layer (unrotated) ``bbox`` in the displayed frame ``get_pixmap(clip=)`` takes.
+
+    Returns ``bbox`` unchanged at /Rotate 0 (or for a page object without an int
+    rotation), else a normalised ``fitz.Rect``. Call it BEFORE padding and clamping
+    to ``page.rect``, which is a displayed-frame rectangle.
+    """
+    if not _displayed_rotation(page):
+        return bbox
+    return (fitz.Rect(bbox) * page.rotation_matrix).normalize()
+
+
+def text_layer_clip(page, clip):
+    """A displayed-frame ``clip`` in the unrotated frame ``get_text(clip=)`` filters in.
+
+    Inverse of :func:`pixmap_clip`; the identity at /Rotate 0.
+    """
+    if not _displayed_rotation(page):
+        return clip
+    return (fitz.Rect(clip) * page.derotation_matrix).normalize()
+
+
+def text_layer_box(page, bbox) -> tuple[float, float, float, float]:
+    """:func:`text_layer_clip` as a float 4-tuple, the shape table boxes are stored in."""
+    rect = text_layer_clip(page, bbox)
+    return (float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
+
+
+def text_layer_page_rect(page):
+    """``page.rect`` in the unrotated frame (``page.rect`` itself at /Rotate 0)."""
+    return fitz.Rect(text_layer_clip(page, page.rect))
 
 
 def text_direction_is_rotated(direction: tuple[float, float]) -> bool:
@@ -4426,7 +4538,10 @@ class BornDigitalDetector:
                 continue
             if x1 <= x0 or y1 <= y0:
                 continue
-            boxes.append((x0, y0, x1, y1))
+            # ``find_tables`` reports in the DISPLAYED frame; every consumer of these
+            # boxes compares them with ``native_words`` / ``get_text`` output, which is
+            # unrotated. Stored in the text-layer frame (identity at /Rotate 0).
+            boxes.append(text_layer_box(page, (x0, y0, x1, y1)))
         return len(tables), boxes
 
     @staticmethod
