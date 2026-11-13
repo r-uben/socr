@@ -9540,6 +9540,14 @@ class UnifiedPipeline:
 
         return layer_can_judge_tables(ps, out, page, native_only=bool(self.config.native_only))
 
+    @staticmethod
+    def _table_reading_that_ships(ps: PageState) -> PageOutput | None:
+        """The attempt whose table text ``finalized_page_record`` would ship, chosen with the
+        SAME predicates (D3 floor keep, then structure-class grid winner, else ``best_output``)."""
+        from socr.core.manifest import d3_floor_kept_model_output, structure_class_grid_winner
+
+        return d3_floor_kept_model_output(ps) or structure_class_grid_winner(ps) or ps.best_output
+
     def _repair_dropped_points(
         self, state: DocumentState, page_num: int, ps: PageState, bo: PageOutput | None
     ) -> int:
@@ -9553,6 +9561,11 @@ class UnifiedPipeline:
         did before) and is logged."""
         ps.point_repairs = {}
         if not self._row_binding_applies(ps, bo):
+            return 0
+        if self._table_reading_that_ships(ps) is not bo:
+            # The finalizer ships another attempt's table (D3 floor / structure class chose an
+            # older reading over ``best_output``): repairing ``bo`` would record, and emit an
+            # event for, bytes that never ship.
             return 0
         from socr.core.audit_log import AuditEvent
         from socr.tables.reconcile import find_table_blocks
