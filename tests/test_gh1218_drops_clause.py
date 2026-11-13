@@ -768,9 +768,15 @@ _FIGURE_PHASE_HELPERS = (
 def _kinds_in(text: str) -> set[str]:
     import re
 
+    from socr.core import verdict
+
     kinds: set[str] = set()
     for m in re.finditer(r"\bkind=(.*?)(?:engine=|detail=|data=|\))", text, re.S):
         kinds |= set(re.findall(r'"([a-z0-9_]+)"', m.group(1)))
+        # #1294: a kind written as one of ``core.verdict``'s ``*_KIND`` constants.
+        for name in re.findall(r"\b([A-Z][A-Z0-9_]*_KIND)\b", m.group(1)):
+            if isinstance(getattr(verdict, name, None), str):
+                kinds.add(getattr(verdict, name))
     return kinds
 
 

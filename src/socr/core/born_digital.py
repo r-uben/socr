@@ -2620,6 +2620,13 @@ class PageAssessment:
     #: computation, or no qualifying row), never "nothing dropped": the drop clause emits
     #: nothing on an empty reference. In memory only.
     own_layer_drop_reference: str = ""
+    #: #1294: the words the page's layer owes a shipped page (``WordReference.text``) and
+    #: those inside its chart and image boxes (``figure_text``), computed ONCE here from the
+    #: page's words and the document's repeated and folio slots (repeated text at the page
+    #: edge is never owed). EMPTY ``own_layer_word_reference`` means "not checked" (no
+    #: layer, a failed computation, or no word), never "nothing missing". In memory only.
+    own_layer_word_reference: str = ""
+    own_layer_figure_words: str = ""
     #: #961: the scan raised, so the page is UNKNOWN. Treated exactly as a hit (fail closed).
     invisible_text_scan_failed: bool = False
     #: #960: the non-zero :class:`GarbledMathSignals` counts (empty when clean). Any entry
@@ -3436,6 +3443,27 @@ class BornDigitalDetector:
             logger.warning("#1218: the layer's table-row numbers could not be read", exc_info=True)
             return ""
 
+    def _own_layer_word_reference(self, page: fitz.Page) -> tuple[str, str]:
+        """#1294: the words the page's layer owes a shipped page, and its figure words.
+
+        From ``tables.layer_words.word_reference_from_page`` with the document's repeated and
+        folio slots (``_read_document_furniture``). Guarded like
+        ``_own_layer_drop_reference``: a failure returns ``("", "")``, logged, which the words
+        clause reads as "not checked".
+        """
+        try:
+            from socr.tables.layer_words import word_reference_from_page
+
+            ref = word_reference_from_page(
+                page,
+                repeated_slots=getattr(self, "_repeated_slots", frozenset()),
+                folio_slots=getattr(self, "_doc_folio_slots", frozenset()),
+            )
+            return ref.text or "", ref.figure_text or ""
+        except Exception:
+            logger.warning("#1294: the layer's words could not be read", exc_info=True)
+            return "", ""
+
     def _assess_page(self, page: fitz.Page, page_num: int) -> PageAssessment:
         """Assess a page and stamp its dominant text direction onto the result.
 
@@ -3524,6 +3552,10 @@ class BornDigitalDetector:
         assessment.detected_table_count = detected_count
         assessment.detected_table_bboxes = list(detected_bboxes)
         assessment.own_layer_drop_reference = self._own_layer_drop_reference(page)
+        (
+            assessment.own_layer_word_reference,
+            assessment.own_layer_figure_words,
+        ) = self._own_layer_word_reference(page)
         # #1144 round 4: the page's /Rotate value, needed by the prose-recovery
         # floor. ``get_text("words")`` reports UNROTATED coordinates while
         # ``find_tables()`` reports rotated ones, so on a /Rotate 90 page the two
