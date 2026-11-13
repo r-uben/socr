@@ -156,10 +156,15 @@ from socr.core.verdict import (
     INVALID_FINAL_EMISSION_NOTE_PREFIX,
     NUMBERS_DROPPED_EVENT_DETAIL,
     NUMBERS_DROPPED_KIND,
+    WORDS_MISSING_EVENT_DETAIL,
+    WORDS_MISSING_KIND,
     numbers_disagree_note,
     numbers_dropped_cli_line,
     numbers_dropped_event_data,
     numbers_dropped_note,
+    words_missing_cli_line,
+    words_missing_event_data,
+    words_missing_note,
     page_dropped_numbers,
 )
 from socr.tables.extract import canary_deadline, probe_ollama_idle, probe_openai_server_idle
@@ -17094,7 +17099,10 @@ class UnifiedPipeline:
         if winning_out is not None and ps is not None:
             from socr.core.verdict import page_word_check_record
 
-            _words_record = page_word_check_record(winning_out, ps)
+            # A restored page keeps its recorded result (see ``persisted_text_layer_words``).
+            _words_record = getattr(ps, "persisted_text_layer_words", None) or (
+                page_word_check_record(winning_out, ps)
+            )
             if _words_record is not None:
                 payload["text_layer_words"] = _words_record
 
@@ -18338,6 +18346,18 @@ class UnifiedPipeline:
             for ev in meta.get("audit_events") or []
             if isinstance(ev, dict) and ev.get("kind") == _DROPPED_KIND
         ]
+        # #1294: the same for the words check's event and record.
+        from socr.core.verdict import WORDS_MISSING_KIND as _WORDS_KIND
+
+        ps.persisted_words_missing_events = [
+            dict(ev)
+            for ev in meta.get("audit_events") or []
+            if isinstance(ev, dict) and ev.get("kind") == _WORDS_KIND
+        ]
+        _words_record = meta.get("text_layer_words")
+        ps.persisted_text_layer_words = (
+            dict(_words_record) if isinstance(_words_record, dict) else None
+        )
         raw_verdict = meta.get("verdict")
         if isinstance(raw_verdict, dict):
             from socr.core.verdict import PageVerdict
@@ -19816,6 +19836,30 @@ class UnifiedPipeline:
                     "#1218: p%d: no dropped-number list could be confirmed: %s", _pn, _why
                 )
         numbers_dropped_pages = sorted(numbers_dropped_by_page)
+        # #1294: pages whose shipped text lacks words their own text layer prints. FAIL only,
+        # as #1185: the clause's UNKNOWN (a refused or damaged layer) stays at the page.
+        from socr.core.verdict import page_missing_words as _page_missing_words
+
+        # A page restored on resume keeps the list its sidecar recorded: the reference is
+        # in memory only, and a reassessment that cannot rebuild it reads as "none".
+        def _missing_list(r) -> list[str]:
+            ps_ = state.pages[r.output.page_num]
+            for ev in getattr(ps_, "persisted_words_missing_events", None) or []:
+                held = (ev.get("data") or {}).get("missing")
+                if isinstance(held, list) and held:
+                    return list(held)
+            return list(_page_missing_words(r.output, ps_) or ())
+
+        words_missing_by_page = {
+            r.output.page_num: _missing_list(r)
+            for r in pre_records
+            if r.verdict is not None
+            and any(
+                c.check is _Check.TEXT_LAYER_WORDS and c.result is _CheckResult.FAIL
+                for c in r.verdict.clauses
+            )
+        }
+        words_missing_pages = sorted(words_missing_by_page)
         # #961: the same retained-native condition for a scan's invisible OCR layer.
         invisible_retained_pages = [
             n
@@ -20040,6 +20084,7 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not prior_ocr_retained_pages
         pages_ok = pages_ok and not numbers_disagree_pages
         pages_ok = pages_ok and not numbers_dropped_pages
+        pages_ok = pages_ok and not words_missing_pages
         pages_ok = pages_ok and not garbled_math_retained_pages
         pages_ok = pages_ok and not flattened_table_pages
         pages_ok = pages_ok and not figure_unread_pages
@@ -20370,6 +20415,7 @@ class UnifiedPipeline:
             or prior_ocr_retained_pages
             or numbers_disagree_pages
             or numbers_dropped_pages
+            or words_missing_pages
             or garbled_math_retained_pages
             or flattened_table_pages
             or figure_unread_pages
@@ -20571,6 +20617,18 @@ class UnifiedPipeline:
                             if numbers_dropped_by_page[n] is not None
                             else {"page": n, "unresolved": numbers_dropped_unresolved[n]}
                         ),
+                    )
+                )
+            for n in words_missing_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind=WORDS_MISSING_KIND,
+                        engine=(
+                            state.pages[n].best_output.engine if state.pages[n].best_output else ""
+                        ),
+                        detail=WORDS_MISSING_EVENT_DETAIL,
+                        data=words_missing_event_data(n, words_missing_by_page[n]),
                     )
                 )
             for n in garbled_math_retained_pages:
@@ -20967,6 +21025,10 @@ class UnifiedPipeline:
                 if numbers_dropped_pages:
                     console.print(
                         f"  [yellow]{numbers_dropped_cli_line(numbers_dropped_pages)}[/yellow]"
+                    )
+                if words_missing_pages:
+                    console.print(
+                        f"  [yellow]{words_missing_cli_line(words_missing_pages)}[/yellow]"
                     )
                 if garbled_math_retained_pages:
                     console.print(
@@ -21584,6 +21646,13 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_dropped_note}"
             else:
                 final_result.error = _dropped_note
+        # #1294: and the pages that ship without words their own text layer prints.
+        if words_missing_pages:
+            _words_note = words_missing_note(words_missing_pages)
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_words_note}"
+            else:
+                final_result.error = _words_note
 
         # Save markdown + metadata BEFORE the figure phase: the describe loop
         # makes long paid API calls, and any exception there used to lose the

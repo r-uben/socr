@@ -279,7 +279,8 @@ class Check(str, Enum):
     #: numbers the reading SHIPS, and the mode, event and note of each must say what is true.
     TEXT_LAYER_DROPS = "text_layer_drops"
     #: #1294: words the page's own text layer prints that the shipped page does not carry,
-    #: on every page with a layer of its own (native and model readings alike).
+    #: native and model readings alike. Not run on a failed-marker page, an earlier-OCR
+    #: layer or a page where socr withheld a table: see ``verdict.page_missing_words``.
     TEXT_LAYER_WORDS = "text_layer_words"
     UNREADABLE_INPUT = "unreadable_input"
     #: The fail-closed fallback: the page is not CHECKED and nothing more specific named

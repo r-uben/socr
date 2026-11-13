@@ -22,9 +22,10 @@ correct page legitimately does not carry as text (each measured on the Fed gold 
 :func:`missing_words` compares a shipped page with the reference. It is a multiset
 difference over words of at least :data:`MIN_WORD_LETTERS` letters, with three rescues for
 differences that are not losses: a line-break hyphen (the layer's ``Home-``/``builders`` is
-the shipped ``Homebuilders``), a word whose letters occur in the shipped page with other
-spacing (the layer's ``onthe``), and a broken ligature in the layer (``infation`` for
-``inflation``). A rescue can hide a loss, never invent one.
+the shipped ``Homebuilders``), a join of consecutive shipped words (the layer's fused
+``onthe``, the page's split ``head winds``), and a ligature whose second glyph the layer
+dropped (``infation`` for ``inflation``). Every rescue is word-aligned: a word is never found
+inside another one. A rescue can hide a loss, never invent one.
 """
 
 from __future__ import annotations
@@ -44,7 +45,6 @@ MIN_WORD_LETTERS = 4
 #: variables, which a layer prints as letters and a reading writes as LaTeX. Not words.
 _MATH_LETTERS = "\U0001d400-\U0001d7ff"
 _WORD_RE = re.compile(rf"[^\W\d_{_MATH_LETTERS}]{{{MIN_WORD_LETTERS},}}")
-_NOT_LETTER_RE = re.compile(r"[\W\d_]+")
 _ANY_WORD_RE = re.compile(r"[^\W\d_]+")
 _LETTER_RE = re.compile(r"[^\W\d_]")
 #: A hyphen between two letters inside a shipped word ("longer-term"): the layer may print
@@ -69,18 +69,41 @@ class WordReference:
     figure_text: str = ""
 
 
+#: The soft hyphen: an invisible break hint a layer may print inside a word
+#: ("guaran\u00adteed"). It is not a character of the word.
+_SOFT_HYPHEN = "\u00ad"
+
+
 def word_tokens(text: str) -> Counter:
     """The compared words of *text*, case-folded, as a multiset."""
-    return Counter(w.casefold() for w in _WORD_RE.findall(text or ""))
+    return Counter(word_tokens_in_order(text))
 
 
 def _ligature_variants(word: str) -> set[str]:
-    out = set()
-    for lig in _LIGATURES:
-        if lig in word:
-            out.add(word.replace(lig, "f"))
-            out.add(word.replace(lig, ""))
-    return out
+    """*word* with each ligature collapsed to its ``f`` (``inflation`` -> ``infation``): the
+    form a layer that dropped the ligature's second glyph prints. Not the form with the whole
+    ligature deleted, which would rescue unrelated words (``iation``)."""
+    return {word.replace(lig, "f") for lig in _LIGATURES if lig in word}
+
+
+def _joins(parts: list[str], targets: set[str]) -> Counter:
+    """How often each of *targets* is the join of two or more consecutive *parts*: the layer
+    fused words the page ships apart ("onthe"), or the page split a word ("head winds").
+    Word-aligned on both ends, so a word is never found inside another one ("core" in
+    "underscore")."""
+    found: Counter = Counter()
+    if not targets:
+        return found
+    longest = max(len(t) for t in targets)
+    for i, first in enumerate(parts):
+        joined = first
+        for nxt in parts[i + 1 :]:
+            joined += nxt
+            if len(joined) > longest:
+                break
+            if joined in targets:
+                found[joined] += 1
+    return found
 
 
 def missing_words(reference: WordReference, shipped: str, *, figure_shipped: bool) -> list[str]:
@@ -95,18 +118,15 @@ def missing_words(reference: WordReference, shipped: str, *, figure_shipped: boo
         owed += word_tokens(reference.figure_text)
     joined = _INWORD_HYPHEN_RE.sub(r"\1\2", _BREAK_HYPHEN_RE.sub(r"\1\2", shipped or ""))
     have = word_tokens(shipped) | word_tokens(joined)
-    stream = _NOT_LETTER_RE.sub("", (shipped or "").casefold())
     ligatures = set().union(*(_ligature_variants(w) for w in have)) if have else set()
-    # A split the page shipped with a space ("expecta tions", "head winds"): two adjacent
-    # words that join into an owed word count as that word, also when the word occurs
-    # whole elsewhere on the page (a count deficit the letter-stream rescue cannot see).
-    parts = [w.casefold() for w in _ANY_WORD_RE.findall(shipped or "")]
-    pairs = Counter(a + b for a, b in zip(parts, parts[1:]))
+    deficit = owed - have
+    parts = [w.casefold() for w in _ANY_WORD_RE.findall((shipped or "").replace(_SOFT_HYPHEN, ""))]
+    joins = _joins(parts, set(deficit))
     short: Counter = Counter()
-    for word, n in (owed - have).items():
-        if have.get(word, 0) == 0 and (word in stream or word in ligatures):
+    for word, n in deficit.items():
+        if have.get(word, 0) == 0 and word in ligatures:
             continue
-        n -= min(n, pairs.get(word, 0))
+        n -= min(n, joins.get(word, 0))
         if n:
             short[word] = n
     out = []
@@ -177,8 +197,10 @@ def reference_from_words(
 
 
 def word_tokens_in_order(text: str) -> list[str]:
-    """The compared words of *text*, case-folded, in order."""
-    return [w.casefold() for w in _WORD_RE.findall(text or "")]
+    """The compared words of *text*, case-folded, in order. A soft hyphen inside a word is
+    dropped (a line-end one is handled by :func:`reference_from_words` first)."""
+    text = (text or "").replace(_SOFT_HYPHEN + "\n", _SOFT_HYPHEN).replace(_SOFT_HYPHEN, "")
+    return [w.casefold() for w in _WORD_RE.findall(text)]
 
 
 def word_reference_from_page(page, *, repeated_slots, folio_slots) -> WordReference:

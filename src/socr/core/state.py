@@ -195,6 +195,12 @@ class PageState:
     #: (``refinalize_own_text.resolve_dropped``) so a failed reassessment cannot erase the
     #: original list of a page whose restored verdict still carries the FAIL clause.
     persisted_numbers_dropped_events: list[dict] = field(default_factory=list)
+    #: #1294: the page's ``words_missing_from_page`` audit events and its ``text_layer_words``
+    #: record as its sidecar recorded them, restored on resume. The words reference lives in
+    #: memory only, so a resumed run whose page analysis cannot rebuild it must keep these
+    #: rather than write an empty list or drop the record.
+    persisted_words_missing_events: list[dict] = field(default_factory=list)
+    persisted_text_layer_words: dict | None = None
     #: #960: the non-zero garbled-math signal counts and whether that scan failed (unknown,
     #: treated as a hit). See ``born_digital.GarbledMathSignals``.
     garbled_math_signals: dict[str, int] = field(default_factory=dict)

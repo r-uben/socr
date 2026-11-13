@@ -964,12 +964,44 @@ NUMBERS_DROPPED_EVENT_DETAIL = (
 )
 
 
+#: #1294: the audit event a document records for each page ``text_layer_words`` FAILs, and
+#: the CLI line and document note naming those pages. One definition each, so a run and a
+#: re-finalize tool cannot word them differently.
+WORDS_MISSING_KIND = "words_missing_from_page"
+WORDS_MISSING_EVENT_DETAIL = (
+    "this page ships without words its own text layer prints; the mark names them and this "
+    "event's data lists them. This check adds and withholds nothing, and the page is never "
+    "counted CHECKED (#1294)"
+)
+WORDS_MISSING_NOTE_PREFIX = "page(s) ship without words their own text layer prints"
+
+
+def words_missing_event_data(page_num: int, missing) -> dict:
+    """The audit event's ``data``: the page and its missing words, in layer order."""
+    return {"page": page_num, "missing": list(missing or ())}
+
+
+def words_missing_cli_line(pages: list[int]) -> str:
+    return f"{len(pages)} {WORDS_MISSING_NOTE_PREFIX} (named on each page): {pages}"
+
+
+def words_missing_note(pages: list[int]) -> str:
+    return (
+        WORDS_MISSING_NOTE_PREFIX
+        + ": "
+        + ", ".join(str(n) for n in pages)
+        + " (named on each page)"
+    )
+
+
 #: #1218 re-finalize parity. A run appends its document events in one block and its document
 #: notes in one sequence; ``socr-refinalize-own-text`` must put #1185's and #1218's at the
 #: position the run gives them, not after everything the document already carries. These name
 #: what a run records AFTER them. Pinned against the orchestrator's source by
 #: ``test_the_after_lists_cover_what_the_orchestrator_appends_later``.
 EVENT_KINDS_AFTER_NUMBERS_DROPPED = (
+    # #1294: recorded right after #1218's.
+    WORDS_MISSING_KIND,
     "native_garbled_math_retained",
     "table_not_reconstructed_retained",
     "figure_words_unread_retained",
@@ -1006,6 +1038,11 @@ def event_follows_numbers_dropped(event: dict) -> bool:
         kind == "table_structure_failed"
         and (event.get("data") or {}).get("site") == FINAL_BODY_EVENT_SITE
     )
+
+
+def event_follows_words_missing(event: dict) -> bool:
+    """#1294: whether a run records this event after its ``words_missing_from_page`` one."""
+    return event.get("kind") != WORDS_MISSING_KIND and event_follows_numbers_dropped(event)
 
 
 def event_follows_numbers_disagree(event: dict) -> bool:
@@ -1359,13 +1396,16 @@ def page_missing_words(output: PageOutput, p: Any) -> tuple[str, ...] | None:
     if _flag(p, "prior_ocr_layer_suspect") or _table_withheld_by_socr(output, p):
         return None
     reference = getattr(p, "own_layer_word_reference", "")
-    if not isinstance(reference, str) or not reference.strip():
-        return None
     figure = getattr(p, "own_layer_figure_words", "")
+    reference = reference if isinstance(reference, str) else ""
+    figure = figure if isinstance(figure, str) else ""
+    # Either field counts: a page whose only words sit in a chart is still checked.
+    if not reference.strip() and not figure.strip():
+        return None
     shipped = _HTML_COMMENT_RE.sub(" ", _IMAGE_LINK_RE.sub(" ", text))
     return tuple(
         missing_words(
-            WordReference(reference, figure if isinstance(figure, str) else ""),
+            WordReference(reference, figure),
             reading_numbers_text(shipped, output.page_num),
             figure_shipped=bool(_IMAGE_LINK_RE.search(text)),
         )
@@ -1385,7 +1425,7 @@ def page_word_check_record(output: PageOutput, p: Any) -> dict | None:
     if missing is None:
         return None
     figure = getattr(p, "own_layer_figure_words", "") or ""
-    owed = word_tokens(p.own_layer_word_reference)
+    owed = word_tokens(getattr(p, "own_layer_word_reference", "") or "")
     if not _IMAGE_LINK_RE.search(output.text or ""):
         owed += word_tokens(figure)
     return {"compared": sum(owed.values()), "missing": len(missing)}

@@ -73,6 +73,12 @@ class TestReference:
         # A capitalised next line is a new word, not the hyphenated word's second half.
         assert ref.text.split() == ["homebuilders", "long", "term"]
 
+    def test_a_soft_hyphen_inside_a_word_is_not_a_split(self) -> None:
+        words = [_w(72, 100, "guaran\u00adteed", block=1)]
+        ref = reference_from_words(words, _never)
+        assert ref.text == "guaranteed"
+        assert missing_words(ref, "guaranteed", figure_shipped=False) == []
+
     def test_a_line_break_hyphen_joins_across_blocks(self) -> None:
         words = [_w(72, 100, "construc-", block=5), _w(72, 112, "tion", block=6)]
         assert reference_from_words(words, _never).text == "construction"
@@ -127,6 +133,18 @@ class TestMissing:
             == []
         )
         assert ref.text == "growth"
+
+    def test_a_lost_word_is_not_found_inside_another_word(self) -> None:
+        # The ticket's own example: "Core PCE inflation" shipped as "PCE inflation".
+        ref = WordReference("core inflation")
+        shipped = "PCE inflation. Staff underscore risks to the outlook."
+        assert missing_words(ref, shipped, figure_shipped=False) == ["core"]
+
+    def test_a_ligature_is_collapsed_not_deleted(self) -> None:
+        # Deleting the whole "fl" from "inflation" would give "ination", an unrelated word.
+        assert missing_words(WordReference("ination"), "inflation", figure_shipped=False) == [
+            "ination"
+        ]
 
     def test_short_words_are_not_compared(self) -> None:
         ref = WordReference("the of and growth")
@@ -218,6 +236,11 @@ def test_the_check_does_not_apply(over, out) -> None:
 def test_socr_s_own_marks_do_not_count_as_the_page_s_words() -> None:
     marked = "> [page 1 unchecked: seasonally adjusted]\n\n" + SHORT
     assert page_missing_words(_out(marked), _p()) == ("seasonally", "adjusted")
+
+
+def test_a_page_whose_only_words_are_in_a_chart_is_checked() -> None:
+    p = _p(own_layer_word_reference="", own_layer_figure_words="exports")
+    assert page_missing_words(_out("Chart"), p) == ("exports",)
 
 
 def test_chart_words_are_owed_only_when_no_picture_ships() -> None:
@@ -314,41 +337,56 @@ def _first_page(out: Path) -> tuple[dict, str]:
 
 
 @pytest.mark.parametrize("ladder", [True, False], ids=["provider", "no provider"])
-def test_one_lost_label_changes_the_page_only_when_a_reading_loses_it(
+def test_one_lost_label_changes_every_level_only_when_a_reading_loses_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ladder: bool
 ) -> None:
+    from socr.core.result import contract_status_for
+    from socr.core.verdict import WORDS_MISSING_KIND
+
     arms = {}
     reads = {}
     for lose in (False, True):
         read: list[int] = []
         out = tmp_path / f"out{int(lose)}"
-        _run(
-            out,
-            _rotated_pdf(tmp_path / f"p{int(lose)}.pdf"),
-            monkeypatch,
-            lose_label=lose,
-            pages_read=read,
-            ladder=ladder,
-        )
+        pdf = _rotated_pdf(tmp_path / f"p{int(lose)}.pdf")
+        result = _run(out, pdf, monkeypatch, lose_label=lose, pages_read=read, ladder=ladder)
         reads[lose] = read
         sidecar, md = _first_page(out)
-        words = [
-            c
-            for c in (sidecar.get("verdict") or {}).get("clauses") or []
-            if c["check"] == Check.TEXT_LAYER_WORDS.value
-        ]
-        arms[lose] = (sidecar["status"], sidecar["failure_mode"], words, "text_layer_words" in md)
+        doc_dir = next(out.rglob("pages")).parent
+        audit = doc_dir / "audit_log.json"
+        events = json.loads(audit.read_text())["events"] if audit.is_file() else []
+        arms[lose] = {
+            "page": (sidecar["status"], sidecar["failure_mode"]),
+            "clause": [
+                (c["result"], c["reason"])
+                for c in (sidecar.get("verdict") or {}).get("clauses") or []
+                if c["check"] == Check.TEXT_LAYER_WORDS.value
+            ],
+            "mark": "text_layer_words" in md,
+            "document": result.status.value,
+            "metadata": json.loads((doc_dir / "metadata.json").read_text())["status"],
+            "cli": contract_status_for(result).value,
+            "note": "without words their own text layer prints" in (result.error or ""),
+            "event": [e["data"] for e in events if e["kind"] == WORDS_MISSING_KIND],
+        }
     kept, lost = arms[False], arms[True]
     if not ladder:
         assert not reads[True], "fixture premise: with no provider nothing reads the page"
         assert kept == lost
         return
     assert 1 in reads[True], "fixture premise: with a provider the model reads the page"
-    assert kept[2] == [] and not kept[3]
-    assert lost[:2] == ("warning", "words_missing_from_page")
-    [clause] = lost[2]
-    assert clause["result"] == "FAIL" and clause["reason"].endswith(": korea")
-    assert lost[3]
+    assert {k for k in kept if kept[k] != lost[k]} == set(kept), (kept, lost)
+    assert lost["page"] == ("warning", "words_missing_from_page")
+    [(result, reason)] = lost["clause"]
+    assert result == "FAIL" and reason.endswith(": korea")
+    assert (kept["document"], lost["document"]) == ("success", "audit_failed")
+    assert (kept["metadata"], lost["metadata"]) == ("completed", "partial")
+    assert (kept["cli"], lost["cli"]) == ("completed", "partial")
+    # Both pages lose their first row's label.
+    assert lost["event"] == [
+        {"page": 1, "missing": ["korea"]},
+        {"page": 2, "missing": [_page_rows(1)[0].split()[0].casefold()]},
+    ]
 
 
 def test_the_check_records_a_pass_as_well_as_a_fail() -> None:
@@ -371,3 +409,114 @@ def test_the_run_writes_the_record_on_the_page(tmp_path: Path, monkeypatch) -> N
     )
     record = _first_page(out)[0]["text_layer_words"]
     assert record["missing"] == 0 and record["compared"] > 0
+
+
+# --- socr-refinalize-own-text --------------------------------------------------------------
+
+
+def _artifacts(out: Path) -> dict:
+    from test_gh1185_text_layer_numbers_e2e import _comparable
+
+    doc = next(out.rglob("pages")).parent
+    meta = json.loads((doc / "metadata.json").read_text())
+    [entry] = json.loads((out / "metadata.json").read_text())["files"].values()
+    pages = sorted((doc / "pages").glob("[0-9]*.json"))
+    return {
+        "audit_log": json.loads((doc / "audit_log.json").read_text()),
+        "document": {k: meta.get(k) for k in ("status", "error", "tables")},
+        "root index": {k: entry.get(k) for k in ("status", "error")},
+        "sidecars": {p.name: _comparable(json.loads(p.read_text())) for p in pages},
+        "fragments": {p.name: p.with_suffix(".md").read_text() for p in pages},
+        "document md": next(p for p in doc.glob("*.md")).read_text(),
+    }
+
+
+def test_refinalize_turns_an_old_run_into_what_a_run_of_this_code_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    from socr.core import verdict
+    from socr.pipeline.refinalize_own_text import refinalize_document
+
+    pdf = _rotated_pdf(tmp_path / "doc.pdf")
+    fresh, old = tmp_path / "fresh", tmp_path / "old"
+    _run(fresh, pdf, monkeypatch, lose_label=True, pages_read=[], ladder=True)
+    with monkeypatch.context() as m:
+        # A run made before #1294: no clause and no record.
+        m.setattr(verdict, "text_layer_words_clause", lambda output, p: None)
+        m.setattr(verdict, "page_word_check_record", lambda output, p: None)
+        _run(old, pdf, monkeypatch, lose_label=True, pages_read=[], ladder=True)
+    assert "text_layer_words" not in _first_page(old)[0], "fixture premise: an old run"
+    assert _artifacts(old) != _artifacts(fresh), "fixture premise: the runs differ"
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    shutil.copy(pdf, pdf_dir / pdf.name)
+    changes = refinalize_document(next(old.rglob("pages")).parent, pdf_dir)
+    assert {(c.page_num, c.words) for c in changes} == {(1, "FAIL"), (2, "FAIL")}
+    got, want = _artifacts(old), _artifacts(fresh)
+    assert {k for k in want if got[k] != want[k]} == set(), (got, want)
+
+    snapshot = {p: p.read_bytes() for p in old.rglob("*") if p.is_file()}
+    assert refinalize_document(next(old.rglob("pages")).parent, pdf_dir) == []
+    assert {p: p.read_bytes() for p in old.rglob("*") if p.is_file()} == snapshot
+
+
+def test_refinalize_writes_the_pass_record_on_a_page_that_loses_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    from socr.core import verdict
+    from socr.pipeline.refinalize_own_text import refinalize_document
+
+    pdf = _rotated_pdf(tmp_path / "doc.pdf")
+    fresh, old = tmp_path / "fresh", tmp_path / "old"
+    _run(fresh, pdf, monkeypatch, lose_label=False, pages_read=[], ladder=True)
+    with monkeypatch.context() as m:
+        m.setattr(verdict, "page_word_check_record", lambda output, p: None)
+        _run(old, pdf, monkeypatch, lose_label=False, pages_read=[], ladder=True)
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    shutil.copy(pdf, pdf_dir / pdf.name)
+    assert refinalize_document(next(old.rglob("pages")).parent, pdf_dir) == []
+    assert _first_page(old)[0]["text_layer_words"] == _first_page(fresh)[0]["text_layer_words"]
+    assert _artifacts(old) == _artifacts(fresh)
+
+
+@pytest.mark.parametrize("reassessment", ["same", "failed"])
+def test_a_page_missing_words_is_kept_on_resume_and_an_error_one_is_reprocessed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reassessment: str
+) -> None:
+    """The mode is permanent: a resume restores the WARNING page byte for byte, also when
+    the resumed run's page analysis cannot rebuild the in-memory reference (an empty one
+    means "not checked", which must not re-verdict the restored page)."""
+    from socr.core.born_digital import BornDigitalDetector
+
+    from test_gh1185_text_layer_numbers_e2e import _crash_after_page_one
+
+    out = tmp_path / "out"
+    pdf = _rotated_pdf(tmp_path / "doc.pdf")
+    _run(out, pdf, monkeypatch, lose_label=True, pages_read=[], ladder=True)
+    pages = next(out.rglob("pages"))
+    before = _first_page(out)
+    assert before[0]["failure_mode"] == "words_missing_from_page", "fixture premise"
+    _crash_after_page_one(out)
+    resume: list[int] = []
+    with monkeypatch.context() as m:
+        if reassessment == "failed":
+            m.setattr(BornDigitalDetector, "_own_layer_word_reference", lambda s, p: ("", ""))
+        _run(out, pdf, monkeypatch, lose_label=True, pages_read=resume, ladder=True)
+    assert 2 in resume and 1 not in resume, resume
+    assert _first_page(out) == before
+
+    # The same mode on a page that is not WARNING was not demoted by this check: reprocess.
+    side = pages / "00001.json"
+    data = json.loads(side.read_text())
+    data["winning_output"]["status"] = PageStatus.ERROR.value
+    side.write_text(json.dumps(data))
+    _crash_after_page_one(out)
+    again: list[int] = []
+    _run(out, pdf, monkeypatch, lose_label=True, pages_read=again, ladder=True)
+    assert 1 in again, again

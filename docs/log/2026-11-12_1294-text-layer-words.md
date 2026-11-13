@@ -10,16 +10,19 @@ prints ("Core PCE inflation" → "PCE inflation"; "seasonally adjusted annual ra
 ## Data
 
 - Runs aebc444c and 51270eb5, the same 156 Fed documents (12,413 pages each).
-- Gold pages: `gdrive:databases/socr/gold/fed-2026-11-11.jsonl` (auditor verdicts, carried
-  only to byte-identical pages). "Lost text" = a defective verdict with a defect type in
+- Gold pages: `gdrive:databases/socr/gold/fed-2026-11-11.jsonl` (local mirror
+  `/Volumes/Main/Library/Databases/socr/gold/`), 1,155 lines, sha256
+  `27b2e25db7cf101fcf8f849907af9c75419c2ce3cc3b0c61d9fa86c26f44e633`. Auditor verdicts,
+  carried only to byte-identical pages. Built by the audit's `opus/scripts/build_gold.py`. "Lost text" = a defective verdict with a defect type in
   {lost_content, lost_text, lost_qualifier, splice_math_prose_deletion,
   dropped_ligature_glyphs, lost_table, dropped_redaction_notice}.
 - Only unmarked SUCCESS pages are scored (the pages a reader takes as good).
 
 ## How the rules were chosen
 
-Each rule removed a false-alarm class seen on gold-clean pages. Prototype counts (scratch
-script, raw layer unless stated):
+Each rule removed a false-alarm class seen on gold-clean pages. These are PROTOTYPE counts
+(a scratch script, raw layer unless stated), kept to show why each rule exists; the numbers
+that describe the shipped check are in the next section.
 
 | version | gold lost-text pages caught (/111) | gold clean flagged (/445) | 51270eb5 silent pages flagged |
 |---|---|---|---|
@@ -45,29 +48,46 @@ Findings behind the rules:
 ## Built-in check, measured
 
 `page_missing_words` / `text_layer_words_clause` applied with socr's own page analysis
-(`BornDigitalDetector().detect`) to every page of both runs, no OCR:
+(`BornDigitalDetector().detect`) to every page of both runs, no OCR
+(`2026-11-12_1294-measure.py`). Final rules, after the PR #1295 review:
 
 | | value |
 |---|---|
-| gold lost-text pages caught | 47 / 111 |
+| gold lost-text pages caught | 48 / 111 |
 | gold other-defect pages flagged | 10 / 96 |
-| gold clean pages flagged | 2 / 445 |
-| aebc444c unmarked SUCCESS pages flagged | 80 / 8,297 (all qwen) |
+| gold clean pages flagged | 3 / 445 |
+| aebc444c unmarked SUCCESS pages flagged | 86 / 8,297 (all qwen) |
 | 51270eb5 unmarked SUCCESS pages flagged | 16 / 8,125 (all qwen; native 67 → 0 after the split-word rules) |
 
-Most of the 16 are qwen readings of chart pages that leave out the chart's labels while
-no chart picture ships.
+Most of the 16 are qwen readings of chart pages that leave out the chart's labels while no
+chart picture ships. The three gold-clean flags: "period" and "rate, prices" (qwen dropped a
+running word) and "durables" (qwen wrote "Durable"); all three are real differences on pages
+the auditors judged clean overall.
+
+Review fix (owner, PR #1295): the first version rescued a missing word found anywhere in the
+page's letters, so "core" lost from "Core PCE inflation" passed because "underscore" was on
+the page. Every rescue is now word-aligned (a join of consecutive shipped words, or a ligature
+collapsed to its `f`). Effect on the gold pages: 47 → 48 caught, 2 → 3 clean flagged (the
+"durables" page above, previously hidden inside "nondurables"). Soft hyphens inside words
+("guaran\u00adteed") are not splits.
 
 ## Not caught here
 
 - Pages that lost only numbers or table cells (fix-plan A2; `text_layer_drops`).
 - Pages with no text layer of their own (scans).
 - A word lost while the same word survives elsewhere on the page, beyond the multiset count.
+- One shipped picture excuses the words of every chart box on the page, including charts
+  that ship no picture (figure boxes are not matched to pictures one by one).
+- A page where socr withheld a table is not checked at all; words lost elsewhere on it pass
+  (follow-up: excuse only the withheld table's box).
+- Known noise: three Tealbook equation pages whose layer prints the token "math" dozens of
+  times (tagged formulas) are flagged for it.
 
 ## Side test: a stronger reader (not part of this change)
 
 Claude Sonnet re-read the 92 pages the auditors marked as qwen losses (qwen's exact prompt,
-page image only). Against the text layer: words missing 719 → 98, pages missing numbers
+page image only). Two of the 92 shipped socr's failed-page marker instead of a qwen reading,
+so the comparison covers 90. Against the text layer: words missing 719 → 98, pages missing numbers
 68 → 31, pages matching exactly 18 → 40 of 90; data values the layer does not print about
 equal (qwen 14 on 2 pages, Sonnet 13 on 6), and Sonnet guessed unclear digits despite
 being told not to. Biased toward the challenger (pages chosen because qwen failed); a fair

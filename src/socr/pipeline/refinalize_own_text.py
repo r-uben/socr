@@ -69,6 +69,9 @@ _ANALYSIS_FIELDS = (
     "own_layer_text",
     # #1218: the drop clause's reference, from the same analysis a run reads it from.
     "own_layer_drop_reference",
+    # #1294: the words clause's reference and the page's figure words, likewise.
+    "own_layer_word_reference",
+    "own_layer_figure_words",
     "is_born_digital",
     "control_byte_digit_hits",
     "control_byte_scan_failed",
@@ -79,7 +82,7 @@ _ANALYSIS_FIELDS = (
 )
 
 
-_DROP_FIELDS = ("own_layer_drop_reference",)
+_DROP_FIELDS = ("own_layer_drop_reference", "own_layer_word_reference", "own_layer_figure_words")
 
 
 @dataclass(frozen=True)
@@ -91,6 +94,8 @@ class PageChange:
     result: str
     #: #1218: the ``text_layer_drops`` result this pass added ("" when it added none).
     drops: str = ""
+    #: #1294: the ``text_layer_words`` result this pass added ("" when it added none).
+    words: str = ""
 
 
 def _read_json(path: Path):
@@ -171,6 +176,7 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
         in_fresh_run_order,
         text_layer_drops_clause,
         text_layer_numbers_clause,
+        text_layer_words_clause,
         with_text_layer_numbers_clause,
     )
 
@@ -188,6 +194,10 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
     drops = None
     if not any(c.check is Check.TEXT_LAYER_DROPS for c in published.clauses):
         drops = text_layer_drops_clause(output, p)
+    # #1294: the words clause, the same way (its own check, keyed on its own idempotence).
+    words = None
+    if not any(c.check is Check.TEXT_LAYER_WORDS for c in published.clauses):
+        words = text_layer_words_clause(output, p)
     clause = None
     if not any(c.check is Check.TEXT_LAYER_NUMBERS for c in published.clauses):
         # (a page carrying the clause: already re-finalized, or written by a run of this code)
@@ -202,7 +212,7 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
                 clause = replace(clause, reason=PRIOR_OCR_UNMARKED_REASON)
         else:
             clause = text_layer_numbers_clause(output, p)
-    if clause is None and drops is None:
+    if clause is None and drops is None and words is None:
         return None
     as_run = slot_reference_state(sidecar, output.page_num)
     extended = replace(published, page_num=output.page_num)
@@ -212,6 +222,8 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
         # By the fresh-run order, which puts it last of the silent-success clauses; a count
         # of the clauses ahead would be a second definition of that order.
         extended = replace(extended, clauses=tuple(in_fresh_run_order((*extended.clauses, drops))))
+    if words is not None:
+        extended = replace(extended, clauses=tuple(in_fresh_run_order((*extended.clauses, words))))
     return apply_verdict_marks(output, p, output.page_num, published=extended)
 
 
@@ -324,7 +336,9 @@ def _reposition(events: list[dict], kind: str, make, follows) -> list[dict]:
     return _insert_event([e for e in events if e.get("kind") != kind], event, follows)
 
 
-def _with_number_events(sidecar: dict, engine: str, recomputed, document_data=None):
+def _with_number_events(
+    sidecar: dict, engine: str, recomputed, document_data=None, missing_words=None
+):
     """``(audit_events, why a dropped list could not be written or "")`` for the page sidecar.
 
     #1185's and #1218's events, each once, at the position a run gives it
@@ -380,28 +394,59 @@ def _with_number_events(sidecar: dict, engine: str, recomputed, document_data=No
                 else e
                 for e in events
             ]
+    if _has_words(sidecar):
+        # #1294: the words event, after #1218's; its data are the page's missing words.
+        from socr.core.verdict import (
+            WORDS_MISSING_EVENT_DETAIL,
+            WORDS_MISSING_KIND,
+            event_follows_words_missing,
+            words_missing_event_data,
+        )
+
+        events = _reposition(
+            events,
+            WORDS_MISSING_KIND,
+            lambda: (
+                None
+                if not missing_words
+                else {
+                    "data": words_missing_event_data(int(sidecar["page_num"]), missing_words),
+                    "detail": WORDS_MISSING_EVENT_DETAIL,
+                    "engine": engine,
+                    "kind": WORDS_MISSING_KIND,
+                }
+            ),
+            event_follows_words_missing,
+        )
     return events, why
 
 
-def _repaired_number_events(sidecar: dict, recomputed, document_data=None):
+def _repaired_number_events(sidecar: dict, recomputed, document_data=None, missing_words=None):
     """``(sidecar with its number events whole and in a run's order or None if it is, why a
     list could not be written or "")``, for a page that already carries the clauses.
 
     Such a page is not re-finalized, so an interrupted or earlier-tool pass is repaired
     here, from :func:`resolve_dropped`'s evidence only."""
     if sidecar.get("terminal") is not True or not (
-        _has_drops(sidecar) or _has_disagreement(sidecar)
+        _has_drops(sidecar) or _has_disagreement(sidecar) or _has_words(sidecar)
     ):
         return None, ""
     engine = (sidecar.get("winning_output") or {}).get("engine") or ""
-    events, why = _with_number_events(sidecar, engine, recomputed, document_data)
+    events, why = _with_number_events(sidecar, engine, recomputed, document_data, missing_words)
     if events == (sidecar.get("audit_events") or []):
         return None, why
     return {**sidecar, "audit_events": events}, why
 
 
 def _updated_sidecar(
-    sidecar: dict, output, verdict, dropped=(), document_data=None, why_sink=None
+    sidecar: dict,
+    output,
+    verdict,
+    dropped=(),
+    document_data=None,
+    why_sink=None,
+    missing_words=None,
+    words_record=None,
 ) -> dict:
     from socr.core.manifest import is_page_failed_marker
     from socr.pipeline.orchestrator import _page_blob_key, _socr_source_digest, _socr_version
@@ -419,8 +464,11 @@ def _updated_sidecar(
     out["socr_version"] = _socr_version()
     out["socr_source_digest"] = _socr_source_digest()
     out["audit_events"], why = _with_number_events(
-        out, winning.get("engine") or "", dropped, document_data
+        out, winning.get("engine") or "", dropped, document_data, missing_words
     )
+    # #1294: the words check's record, PASS or not, as a run writes it.
+    if words_record is not None:
+        out["text_layer_words"] = words_record
     if why and why_sink is not None:
         why_sink[int(sidecar["page_num"])] = why
     return out
@@ -477,6 +525,13 @@ def _has_disagreement(sidecar: dict) -> bool:
     return _has_fail(sidecar, Check.TEXT_LAYER_NUMBERS)
 
 
+def _has_words(sidecar: dict) -> bool:
+    """#1294: the page's published verdict carries a ``text_layer_words`` FAIL."""
+    from socr.core.marks import Check
+
+    return _has_fail(sidecar, Check.TEXT_LAYER_WORDS)
+
+
 def _has_drops(sidecar: dict) -> bool:
     """#1218: the page's published verdict carries a ``text_layer_drops`` FAIL."""
     from socr.core.marks import Check
@@ -512,6 +567,7 @@ def _record_disagreement(
     pages: list[tuple[int, str]],
     *,
     drops: bool = False,
+    words: bool = False,
     data_by_page: dict[int, dict] | None = None,
 ) -> None:
     """What a run of this code records for a document with FAIL *pages* (``(page, engine)``):
@@ -528,22 +584,41 @@ def _record_disagreement(
         NUMBERS_DROPPED_EVENT_DETAIL,
         NUMBERS_DROPPED_KIND,
         NUMBERS_DROPPED_NOTE_PREFIX,
+        WORDS_MISSING_NOTE_PREFIX,
         event_follows_numbers_disagree,
         event_follows_numbers_dropped,
         numbers_disagree_note,
         numbers_dropped_note,
     )
 
+    # ``words`` (#1294): the same record for the pages that ship without layer words.
+    if words:
+        from socr.core.verdict import (
+            WORDS_MISSING_EVENT_DETAIL,
+            WORDS_MISSING_KIND,
+            event_follows_words_missing,
+            words_missing_note,
+        )
+
+        kind, detail = WORDS_MISSING_KIND, WORDS_MISSING_EVENT_DETAIL
+        note = words_missing_note([n for n, _engine in pages])
+        follows, later_notes = event_follows_words_missing, (INVALID_FINAL_EMISSION_NOTE_PREFIX,)
     # ``drops`` (#1218): the same document-level record, with the wording of an OMISSION.
-    if drops:
+    elif drops:
         kind, detail = NUMBERS_DROPPED_KIND, NUMBERS_DROPPED_EVENT_DETAIL
         note = numbers_dropped_note([n for n, _engine in pages])
-        follows, later_notes = event_follows_numbers_dropped, (INVALID_FINAL_EMISSION_NOTE_PREFIX,)
+        follows = event_follows_numbers_dropped
+        # #1294: a run appends its words note after the drops note.
+        later_notes = (WORDS_MISSING_NOTE_PREFIX, INVALID_FINAL_EMISSION_NOTE_PREFIX)
     else:
         kind, detail = NUMBERS_DISAGREE_KIND, NUMBERS_DISAGREE_EVENT_DETAIL
         note = numbers_disagree_note([n for n, _engine in pages])
         follows = event_follows_numbers_disagree
-        later_notes = (NUMBERS_DROPPED_NOTE_PREFIX, INVALID_FINAL_EMISSION_NOTE_PREFIX)
+        later_notes = (
+            NUMBERS_DROPPED_NOTE_PREFIX,
+            WORDS_MISSING_NOTE_PREFIX,
+            INVALID_FINAL_EMISSION_NOTE_PREFIX,
+        )
 
     def recorded(record: dict) -> bool:
         changed = False
@@ -594,9 +669,10 @@ def _record_disagreement(
             # The existing event, moved to where a run has it. Its numbers are never
             # replaced; an event with none (an interrupted pass) is completed.
             event = events.pop(held)
-            if drops and data and not (event.get("data") or {}).get("dropped"):
+            listed = "missing" if words else "dropped"
+            if (drops or words) and data and not (event.get("data") or {}).get(listed):
                 event["data"] = data
-        elif drops and not data:
+        elif (drops or words) and not data:
             continue  # no persisted or confirmed list to write (surfaced by the caller)
         else:
             event = {
@@ -681,7 +757,12 @@ def refinalize_document(
     the document has been decided, so an inconsistency leaves the document untouched."""
     from socr.core.marks import Check
     from socr.core.result import PageOutput
-    from socr.core.verdict import engine_is_model_reading, page_dropped_numbers
+    from socr.core.verdict import (
+        engine_is_model_reading,
+        page_dropped_numbers,
+        page_missing_words,
+        page_word_check_record,
+    )
 
     skipped = Counter() if skipped is None else skipped
     pages_dir = doc_dir / "pages"
@@ -732,16 +813,21 @@ def refinalize_document(
         if done is None:
             # A page that already carries the clause: make its events whole and in a run's
             # order (see ``_repaired_number_events``). No page text changes.
+            shipped = PageOutput.from_dict(sidecar.get("winning_output") or {})
+            state = _page_state(sidecar, assessment.pages[page_num - 1])
             whole, why = _repaired_number_events(
                 sidecar,
-                page_dropped_numbers(
-                    PageOutput.from_dict(sidecar.get("winning_output") or {}),
-                    _page_state(sidecar, assessment.pages[page_num - 1]),
-                ),
+                page_dropped_numbers(shipped, state),
                 held_by_document.get(page_num),
+                page_missing_words(shipped, state),
             )
             if why:
                 why_by_page[page_num] = why
+            # #1294: a page the words check passes (or one an older run wrote) gets the
+            # check's record, as a run of this code writes it. Never replaced once there.
+            record = page_word_check_record(shipped, state)
+            if record is not None and "text_layer_words" not in sidecar:
+                whole = {**(whole if whole is not None else sidecar), "text_layer_words": record}
             if whole is not None:
                 repairs.append((path, whole))
             continue
@@ -753,13 +839,16 @@ def refinalize_document(
             raise RuntimeError(f"{fragment_path}: fragment is not its sidecar's text")
         heading = f"## Page {page_num}\n\n"
         doc_md = _swap_once(doc_md, heading + old_text, heading + output.text, md_paths[0])
+        state = _page_state(sidecar, assessment.pages[page_num - 1])
         new_sidecar = _updated_sidecar(
             sidecar,
             output,
             verdict,
-            page_dropped_numbers(output, _page_state(sidecar, assessment.pages[page_num - 1])),
+            page_dropped_numbers(output, state),
             held_by_document.get(page_num),
             why_by_page,
+            missing_words=page_missing_words(output, state),
+            words_record=page_word_check_record(output, state),
         )
         writes.append((fragment_path, output.text, path, new_sidecar))
         changes.append(
@@ -778,6 +867,10 @@ def refinalize_document(
                 ),
                 drops=next(
                     (c.result.value for c in verdict.clauses if c.check is Check.TEXT_LAYER_DROPS),
+                    "",
+                ),
+                words=next(
+                    (c.result.value for c in verdict.clauses if c.check is Check.TEXT_LAYER_WORDS),
                     "",
                 ),
             )
@@ -830,6 +923,7 @@ def refinalize_document(
                         else change.result
                     ),
                     **({"text_layer_drops": change.drops} if change.drops else {}),
+                    **({"text_layer_words": change.words} if change.words else {}),
                 },
                 "socr_source_digest": data["socr_source_digest"],
             }
@@ -868,6 +962,25 @@ def refinalize_document(
         }
         _record_disagreement(
             doc_dir, meta_path, meta, dropping, drops=True, data_by_page=data_by_page
+        )
+    # #1294: after #1218's, the order a run records them in.
+    missing = [
+        (int(sc["page_num"]), (sc.get("winning_output") or {}).get("engine") or "")
+        for sc in map(_read_json, sidecar_paths)
+        if _has_words(sc)
+    ]
+    if missing:
+        from socr.core.verdict import WORDS_MISSING_KIND
+
+        words_by_page = {
+            int(sc["page_num"]): e.get("data") or {}
+            for sc in map(_read_json, sidecar_paths)
+            if _has_words(sc)
+            for e in sc.get("audit_events") or []
+            if e.get("kind") == WORDS_MISSING_KIND
+        }
+        _record_disagreement(
+            doc_dir, meta_path, meta, missing, words=True, data_by_page=words_by_page
         )
     _recount_tables(doc_dir, meta_path, meta)
     return changes
