@@ -371,3 +371,16 @@ def test_a_native_token_with_an_affix_the_shipped_cell_lacks_is_refused():
     # the difference: the same affix on BOTH sides is a plain point repair
     new2, reps2, _ = run(words, md(GDP, ("Rate", ["1.0", "-7%", "3.0", "4.0"])))
     assert [(r.old, r.new) for r in reps2] == [("-7%", "-.7%")], reps2
+
+
+@pytest.mark.parametrize("printed", ["-.7,", "-.7."])
+def test_trailing_punctuation_on_the_printed_value_is_an_affix_and_refuses(printed):
+    """Fable 2: `num` swallowed a trailing `,` or `.`, so `-7` shipped as `-.7,`."""
+    words = page(("Net exports", [printed, "1.2", "3.4"]))
+    shipped = md(("Net exports", ["-7", "1.2", "3.4"]))
+    new, reps, refs = run(words, shipped)
+    assert reps == [] and new == shipped, (reps, refs)
+    assert refs and refs[0].why == (rbc.REFUSE_AFFIX,), refs
+    # the difference: without the trailing mark the same row is a plain point repair
+    _new, reps2, _ = run(page(("Net exports", ["-.7", "1.2", "3.4"])), shipped)
+    assert [(r.old, r.new) for r in reps2] == [("-7", "-.7")], reps2

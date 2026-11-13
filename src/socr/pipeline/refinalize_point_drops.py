@@ -250,7 +250,7 @@ def repair_page(
         new_sidecar["row_binding"] = {**records, **payloads}
 
     # The page's events: text-layer events kept, shrunk or removed; row-binding events rewritten;
-    # the repair events added where a run records them (before the row-binding ones).
+    # the repair events added where a run records them (after the page's other events).
     still_numbers = any(c.check is Check.TEXT_LAYER_NUMBERS for c in verdict.clauses)
     still_drops = any(c.check is Check.TEXT_LAYER_DROPS for c in verdict.clauses)
     dropped_data = numbers_dropped_event_data(page_num, page_dropped_numbers(final, p))
@@ -291,9 +291,8 @@ def rewrite_page_events(
     Only events of *page_num* (or without a ``page_num``: a sidecar's own list) are touched.
     The text-layer events of a clause the page no longer carries are removed; a ``drops`` event
     that remains gets the recomputed list.  A row-binding event takes its table's new payload.
-    ``table_point_repaired`` events replace any earlier ones of the same table and sit before the
-    page's first row-binding event, else after the page's last event (the order a run records
-    them in).  Idempotent."""
+    ``table_point_repaired`` events replace any earlier ones of the same table and sit after the
+    page's last event (the order a run records them in: once the page's final output is known).  Idempotent."""
     from socr.core.verdict import NUMBERS_DISAGREE_KIND, NUMBERS_DROPPED_KIND
     from socr.judge.table_verdict import ROW_BINDING_EVENT_KINDS, TABLE_POINT_REPAIRED_KIND
 
@@ -323,13 +322,8 @@ def rewrite_page_events(
         ):
             continue
         out.append(e)
-    at = next(
-        (n for n, e in enumerate(out) if mine(e) and e.get("kind") in ROW_BINDING_EVENT_KINDS),
-        None,
-    )
-    if at is None:
-        mine_at = [n for n, e in enumerate(out) if mine(e)]
-        at = (mine_at[-1] + 1) if mine_at else len(out)
+    mine_at = [n for n, e in enumerate(out) if mine(e)]
+    at = (mine_at[-1] + 1) if mine_at else len(out)
     return [*out[:at], *repair_events, *out[at:]]
 
 

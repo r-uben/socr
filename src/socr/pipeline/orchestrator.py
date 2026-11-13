@@ -9545,14 +9545,6 @@ class UnifiedPipeline:
 
         return layer_can_judge_tables(ps, out, page, native_only=bool(self.config.native_only))
 
-    @staticmethod
-    def _table_reading_that_ships(ps: PageState) -> PageOutput | None:
-        """The attempt whose table text ``finalized_page_record`` would ship, chosen with the
-        SAME predicates (D3 floor keep, then structure-class grid winner, else ``best_output``)."""
-        from socr.core.manifest import d3_floor_kept_model_output, structure_class_grid_winner
-
-        return d3_floor_kept_model_output(ps) or structure_class_grid_winner(ps) or ps.best_output
-
     def _repair_dropped_points(
         self, state: DocumentState, page_num: int, ps: PageState, bo: PageOutput | None
     ) -> int:
@@ -9563,14 +9555,14 @@ class UnifiedPipeline:
         marks: the verdict and the row-binding check then see the repaired bytes.  A CONTRADICTED
         table is never repaired (``propose_point_repairs``).  Returns the number of cells changed.
         A failure of the step leaves the text as the model wrote it (the check then marks it, as it
-        did before) and is logged."""
+        did before) and is logged.
+
+        The events are only BUFFERED (``ps.point_repair_events``): whether ``bo`` ships is decided
+        later, by selectors this method must not re-list.  ``_commit_point_repairs`` records them
+        once the page's final output is settled, for the repairs that output carries."""
         ps.point_repairs = {}
+        ps.point_repair_events = []
         if not self._row_binding_applies(ps, bo):
-            return 0
-        if self._table_reading_that_ships(ps) is not bo:
-            # The finalizer ships another attempt's table (D3 floor / structure class chose an
-            # older reading over ``best_output``): repairing ``bo`` would record, and emit an
-            # event for, bytes that never ship.
             return 0
         from socr.core.audit_log import AuditEvent
         from socr.tables.reconcile import find_table_blocks
@@ -9625,7 +9617,7 @@ class UnifiedPipeline:
             ]
             ps.point_repairs[table_id] = rows
             cells += len(rows)
-            state.events.append(
+            ps.point_repair_events.append(
                 AuditEvent(
                     page_num=page_num,
                     kind=TABLE_POINT_REPAIRED_KIND,
@@ -9640,6 +9632,43 @@ class UnifiedPipeline:
             )
         bo.text = repaired_text
         return cells
+
+    def _commit_point_repairs(
+        self, state: DocumentState, page_num: int, ps: PageState, shipped_text: str
+    ) -> int:
+        """#1282: record the repairs the page's FINAL output carries, drop the rest.
+
+        Called once, after the row-binding policy and the last ``finalized_page_record`` of the
+        page, before the fragment flush.  A repair counts only when every ``row_after`` of its
+        table is a line of the same-index table block of *shipped_text*; a page that ships native
+        text, a floor, a withheld-table marker or an older attempt carries none, so its buffered
+        events and its ``row_binding[...]["repairs"]`` evidence go.  Returns the repairs kept."""
+        from socr.tables.reconcile import find_table_blocks
+
+        pending, ps.point_repair_events = list(ps.point_repair_events), []
+        if not ps.point_repairs and not pending:
+            return 0
+        lines = (shipped_text or "").splitlines()
+        blocks = find_table_blocks(shipped_text or "")
+        kept: dict = {}
+        for table_id, reps in ps.point_repairs.items():
+            try:
+                idx = int(table_id.rsplit("-t", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            if idx >= len(blocks):
+                continue
+            block_lines = lines[blocks[idx].start : blocks[idx].end + 1]
+            if reps and all(r["row_after"] in block_lines for r in reps):
+                kept[table_id] = reps
+        for table_id, record in ps.row_binding.items():
+            if table_id not in kept and isinstance(record, dict):
+                record.pop("repairs", None)
+        for ev in pending:
+            if (ev.data or {}).get("table_id") in kept:
+                state.events.append(ev)
+        ps.point_repairs = kept
+        return sum(len(r) for r in kept.values())
 
     def _run_row_binding_check(
         self,
@@ -13164,6 +13193,10 @@ class UnifiedPipeline:
                             _record = finalized_page_record(
                                 state, page_num, _whole_doc_page_texts(state)
                             )
+
+                        # #1282: the repairs are recorded now that the page's final output is
+                        # known: only those whose repaired row is in the bytes that ship.
+                        self._commit_point_repairs(state, page_num, ps, _record.output.text or "")
 
                         # Strip any leading ## Page N marker so the provisional fragment
                         # body matches what assemble would produce (modulo

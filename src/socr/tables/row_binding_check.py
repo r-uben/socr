@@ -1203,9 +1203,10 @@ REFUSE_RIVAL_LINE = "another_line_prints_the_label_close_to_the_row"
 # A numeric token split into what stands before the number, the number and what follows it
 # (`-.7%` -> "", "-.7", "%").  The affixes of the shipped token and of the native one must be
 # equal: a repair changes the point and nothing else (review of #1282, case E: `-7` for `-.7%`).
+# The number ends on a digit, so a trailing `,` or `.` (`-.7,`) falls into the affix and refuses.
 _NUMBER_AFFIX = re.compile(
     r"(?P<pre>[^\d.\-+\u2212\u2013\u2014\u2012]*)"
-    r"(?P<num>[-+\u2212\u2013\u2014\u2012]?(?:\d[\d.,]*|\.\d[\d.,]*))"
+    r"(?P<num>[-+\u2212\u2013\u2014\u2012]?(?:\d(?:[\d.,]*\d)?|\.\d(?:[\d.,]*\d)?))"
     r"(?P<post>.*)",
     re.S,
 )
@@ -1495,7 +1496,9 @@ def propose_point_repairs(
                     _, _, n, printed_text = targets[k]
                     if _canon_number(printed_text.translate(_UNICODE_MINUS)) != n:
                         ok = False
-                    if _affixes(t) != _affixes(printed_text):
+                    # The shipped trailing-point form (`-2.` for `-.2`) is the dropped point itself,
+                    # not an affix; the PRINTED token has no such licence (`-.7,` refuses).
+                    if _affixes(t.rstrip(".")) != _affixes(printed_text):
                         affix_ok = False
                     subs.append((t, printed_text, k))
                     out_toks.append(printed_text)
