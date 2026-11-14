@@ -48,7 +48,10 @@ def _painted(doc: str, page_num: int, cache: dict, skipped: list):
     handle = cache[doc]
     if handle is None:
         return None
-    return BornDigitalDetector()._painted_layer_text(handle[page_num - 1])
+    painted = BornDigitalDetector()._painted_layer_text(handle[page_num - 1])
+    if painted is None and not any(row["doc"] == doc for row in skipped):
+        skipped.append({"doc": doc, "skipped": "painted glyph scan failed"})
+    return painted
 
 
 def _stage1():
@@ -89,7 +92,7 @@ def _stage1():
         if found:
             out["control_pages"].append((doc, md.name, dict(found)))
         painted, native = None, True
-        if "ootnote" in repaired:
+        if "ootnote" in repaired.lower():
             side = json.loads(md.with_suffix(".json").read_text())
             native = engine_ships_native_text(side.get("engine"))
             painted = _painted(doc, int(md.stem), cache, out["skipped"]) if native else None

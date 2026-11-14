@@ -47,6 +47,10 @@ _TABLE_CAPTION_RE = re.compile(r"^\s*(Table|TABLE)\s+([0-9]+[A-Za-z]?|[IVXLC]+)\
 # GH-994: a horizontal stroke is a drawn line within this many pt of level, or a filled
 # rect thinner than the second bound. Booktabs rules are hairlines; both are the cut-offs
 # the GH-994 census measured with.
+#: #1306: MuPDF's ``char_flags`` bits for a glyph that is inked (``FZ_STEXT_FILLED`` 16,
+#: ``FZ_STEXT_STROKED`` 32). Text drawn in render mode 3 has neither. A span without the key is
+#: taken as inked (kept, fail closed).
+_INKED_FLAGS = 16 | 32
 _HRULE_LINE_SLOPE_PT = 1.0
 _HRULE_RECT_MAX_HEIGHT_PT = 2.0
 
@@ -3476,7 +3480,8 @@ class BornDigitalDetector:
         The page's text read with ``TEXT_IGNORE_ACTUALTEXT`` (the glyphs the content stream
         draws, not the replacement text a tagged PDF attaches to them: the Fed's hidden
         footnote wrapper is such replacement text) and clipped to the page, minus spans whose
-        alpha is 0 (render mode 3 and fully transparent text both report 0). Not
+        alpha is 0 (fully transparent text) or that have neither the filled nor the stroked
+        ``char_flags`` bit (render mode 3 at any opacity). Not
         ``get_texttrace``: on PyMuPDF 1.27.2 it corrupts a refcount and kills the interpreter
         after a few hundred pages of the Fed corpus. A failure returns ``None``, logged: the
         caller keeps what it cannot show is hidden.
@@ -3494,7 +3499,10 @@ class BornDigitalDetector:
             for block in page.get_text("dict", flags=flags)["blocks"]:
                 for line in block.get("lines", ()):
                     for span in line["spans"]:
-                        if span.get("alpha", 255):
+                        # alpha is opacity; the filled / stroked bits say the glyph is
+                        # inked at all (render mode 3 has neither, at any opacity).
+                        inked = span.get("char_flags", _INKED_FLAGS) & _INKED_FLAGS
+                        if span.get("alpha", 255) and inked:
                             chars.append(span["text"])
             return painted_form(" ".join(chars))
         except Exception:

@@ -256,12 +256,34 @@ def test_an_attached_number_stays_a_separate_token() -> None:
     assert _strip(attached).text == f"rose 1 2 percent.\n1 {NOTE}"
 
 
+def test_a_wrapper_before_punctuation_leaves_no_space() -> None:
+    w = f"[Footnote 1. {NOTE} End footnote 1.]"
+    assert _strip(f"the rate{w}.\n1 {NOTE}").text == f"the rate.\n1 {NOTE}"
+    assert _strip(f"the rate {w}.\n1 {NOTE}").text == f"the rate.\n1 {NOTE}"
+    assert _strip(f"Growth{w} slowed\n1 {NOTE}").text == f"Growth slowed\n1 {NOTE}"
+    assert _strip(f"1{w} 2\n1 {NOTE}").text == f"1 2\n1 {NOTE}"
+    assert _strip(f"x {w} (y)\n1 {NOTE}").text == f"x (y)\n1 {NOTE}"
+
+
 def test_edge_and_adjacent_wrappers_keep_one_space_or_none() -> None:
     w = f"[Footnote 1. {NOTE} End footnote 1.]"
     assert _strip(f"{w} Starts the line.\n1 {NOTE}").text == f"Starts the line.\n1 {NOTE}"
     assert _strip(f"Ends the line. {w}\n1 {NOTE}").text == f"Ends the line.\n1 {NOTE}"
     two = f"a {w}{w} b\n1 {NOTE}"
     assert _strip(two).text == f"a b\n1 {NOTE}"
+
+
+@pytest.mark.parametrize("painted_n", ["01", "1"])
+def test_a_leading_zero_wrapper_painted_in_either_form_is_kept(painted_n: str) -> None:
+    """Astra round 3: the layer says ``Footnote 01.``, the printed line ``01 Note.``; the
+    frame is painted as ``01`` or ``1``. Either way it is visible, so it stays."""
+    w = f"[Footnote 01. {NOTE} End footnote 01.]"
+    page = f"policy rates.1 {w} More.\n01 {NOTE}"
+    painted = painted_form(
+        f"policy rates.1 [Footnote {painted_n}. {NOTE} End footnote {painted_n}.]"
+    )
+    assert _strip(page, painted).text == page
+    assert _strip(page, CLEAN).stripped, "setup: with no painted frame it is stripped"
 
 
 # ----------------------------------------------------------------------------- process()
@@ -641,6 +663,27 @@ def test_the_inline_strip_keeps_the_token_boundary_through_the_pipeline(
     assert "Growth slowed." in on and "Growthslowed" not in on
 
 
+@pytest.mark.parametrize("provider", [True, False])
+def test_a_leading_zero_wrapper_the_pdf_paints_is_kept_through_the_pipeline(
+    tmp_path: Path, monkeypatch, provider: bool
+) -> None:
+    w = f"[Footnote 01. {NOTE} End footnote 01.]"
+    lines = [f"policy rates.1 {w} On the other hand.", "more body text.", "", "", f"01 {NOTE}"]
+    _run(tmp_path, "off", monkeypatch, lines, provider=provider, guard=False)
+    _run(tmp_path, "on", monkeypatch, lines, provider=provider)
+    on = _page_text(tmp_path, "on")
+    assert "[Footnote 01." in on, "setup: the painted wrapper is in the shipped layer"
+    assert on == _page_text(tmp_path, "off")
+    assert "hidden_footnote_stripped" not in _kinds(_sidecar(tmp_path, "on"))
+
+
+def test_the_leading_zero_wrapper_drawn_invisibly_is_stripped(tmp_path: Path, monkeypatch) -> None:
+    w = f"[Footnote 01. {NOTE} End footnote 01.]"
+    lines = [["policy rates.", _hidden(w), "On the other hand."], "", "", f"01 {NOTE}"]
+    _run(tmp_path, "on", monkeypatch, lines, provider=False)
+    assert "[Footnote" not in _page_text(tmp_path, "on")
+
+
 def _guard(engine: str, painted: str | None, text: str):
     from socr.core.result import PageOutput, PageStatus
     from socr.core.state import PageState
@@ -699,3 +742,50 @@ def test_painted_glyphs_of_an_actualtext_wrapper_page_lack_the_frame(tmp_path: P
     drawn = _pdf(tmp_path / "d.pdf", [WRAPPER])
     with fitz.open(drawn) as doc:
         assert "footnote1." in BornDigitalDetector()._painted_layer_text(doc[0])
+
+
+def _tr3_pdf(path: Path, mode: int) -> Path:
+    """A page whose wrapper is drawn in render mode *mode* at full opacity."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 50), "placeholder", fontname="helv")
+    stream = "BT /helv 10 Tf 72 700 Td (policy rates.) Tj ET\n"
+    stream += f"BT /helv 10 Tf {mode} Tr 72 680 Td ({WRAPPER}) Tj ET\n"
+    doc.update_stream(page.get_contents()[0], stream.encode())
+    doc.save(path)
+    doc.close()
+    return path
+
+
+@pytest.mark.parametrize("mode,visible", [(3, False), (0, True)])
+def test_invisible_render_mode_text_is_not_painted_at_full_opacity(
+    tmp_path: Path, mode: int, visible: bool
+) -> None:
+    from socr.core.born_digital import BornDigitalDetector
+
+    pdf = _tr3_pdf(tmp_path / f"t{mode}.pdf", mode)
+    with fitz.open(pdf) as doc:
+        painted = BornDigitalDetector()._painted_layer_text(doc[0])
+    assert painted is not None
+    assert ("footnote1." in painted) is visible
+    assert "policyrates." in painted
+
+
+def test_a_span_without_ink_flags_is_not_painted_whatever_its_alpha() -> None:
+    """The filled / stroked bits are read in addition to alpha: a span with alpha 255 and
+    neither bit (what a render-mode-3 span can report) is not painted."""
+    from socr.core.born_digital import BornDigitalDetector
+
+    class _Page:
+        def get_text(self, kind, flags=0):
+            def span(text, flags):
+                return {"text": text, "alpha": 255, "char_flags": flags}
+
+            clear = {"text": "transparent", "alpha": 0, "char_flags": 16}
+            line = {
+                "spans": [span("shown", 16), span("stroked", 32), span("hiddenframe", 0), clear]
+            }
+            return {"blocks": [{"lines": [line]}]}
+
+    painted = BornDigitalDetector()._painted_layer_text(_Page())
+    assert painted == "shownstroked"

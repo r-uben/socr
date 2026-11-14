@@ -117,16 +117,24 @@ def painted_form(painted: str) -> str:
     return "".join((painted or "").split()).lower()
 
 
-def _frame_is_painted(painted: str, note: int) -> bool:
+def _frame_is_painted(painted: str, *numbers: str) -> bool:
     """True iff the page's painted glyphs draw the wrapper's ``Footnote N.`` opener or its
-    ``End [of] footnote N.`` closer. Hidden accessibility text is replacement text (PDF
-    ``/ActualText``) or invisible text (render mode 3); neither is painted ink, so neither
-    frame is in the painted glyphs. A visibly printed example has both."""
-    n = str(note)
-    return (
+    ``End [of] footnote N.`` closer, under ANY form of its number. Hidden accessibility text is
+    replacement text (PDF ``/ActualText``) or invisible text (render mode 3); neither is painted
+    ink, so neither frame is in the painted glyphs. A visibly printed example has both.
+
+    *numbers* are the opening and closing numbers as printed in the layer (``01``); each is
+    also tried normalised (``1``), so a page that paints ``Footnote 01.`` is seen as painted
+    whichever form the layer's text and the page agree on."""
+    forms = set()
+    for raw in numbers:
+        forms.add(raw)
+        forms.add(str(int(raw)))
+    return any(
         f"footnote{n}." in painted
         or f"endfootnote{n}." in painted
         or f"endoffootnote{n}." in painted
+        for n in forms
     )
 
 
@@ -178,7 +186,7 @@ def strip_hidden_footnotes(text: str, painted: str | None = None) -> FootnoteRes
                 kept.append(KeptFootnote(n_open, KEPT_PRINTED_NOTE_DIFFERS))
             else:
                 kept.append(KeptFootnote(n_open, KEPT_NO_PRINTED_COPY))
-        elif painted is None or _frame_is_painted(painted, n_open):
+        elif painted is None or _frame_is_painted(painted, m.group("n"), m.group("m")):
             kept.append(KeptFootnote(n_open, KEPT_NOT_EVIDENCED_HIDDEN))
         else:
             stripped.append(StrippedFootnote(n_open, m.group(), body, copies))
@@ -187,15 +195,30 @@ def strip_hidden_footnotes(text: str, painted: str | None = None) -> FootnoteRes
         return FootnoteResult(text, kept=tuple(kept))
     res = ""
     pos = 0
+    space_before = False
     for start, end in cut:
-        res += text[pos:start]
+        seg = text[pos:start]
+        res += seg
+        if seg:
+            space_before = seg[-1] in " \t"
         res = res.rstrip(" \t")
-        while end < len(text) and text[end] in " \t":
-            end += 1
-        # Both neighbours on this line: one space keeps them two tokens (``Growth[..] slowed``,
-        # ``1[..] 2``). A wrapper at either edge of its line leaves no separator to keep.
-        if res and not res.endswith("\n") and end < len(text) and text[end] != "\n":
+        stop = end
+        while stop < len(text) and text[stop] in " \t":
+            stop += 1
+        space_after = stop > end
+        end = stop
+        # A separator is kept only where the wrapper stood between two tokens: both neighbours
+        # are word characters (``Growth[..] slowed``, ``1[..] 2``, ``rate[..].`` stays ``rate.``),
+        # or it had space on both sides. A wrapper at either edge of its line leaves none to keep.
+        if (
+            res
+            and not res.endswith("\n")
+            and end < len(text)
+            and text[end] != "\n"
+            and ((res[-1].isalnum() and text[end].isalnum()) or (space_before and space_after))
+        ):
             res += " "
+        space_before = space_before or space_after
         pos = end
     res += text[pos:]
     words = " ".join(s.wrapper for s in stripped)

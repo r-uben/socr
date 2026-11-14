@@ -7557,7 +7557,8 @@ def _apply_damaged_layer_guard(output: PageOutput, p) -> PageOutput:
 
     The hidden footnote wrapper is removed only from the layer's own text (a native-text
     winner), only when the page analysis shows the PDF does not paint it, and only when the
-    page carries the printed note as a complete line; see ``damaged_layer.strip_hidden_footnotes``. Both are idempotent:
+    page carries the printed note as a complete line; see
+    ``damaged_layer.strip_hidden_footnotes``. Both are idempotent:
     a second pass over shipped text finds nothing, and then leaves the record of the first
     untouched, because the seam runs again at assemble over the text it already repaired.
     """
