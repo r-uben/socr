@@ -181,6 +181,10 @@ def count_document(doc_dir: Path) -> collections.Counter:
             c["labels.text_layer_numbers_fail_audit_passed_true"] += 1
         if status == "error" and mode == "hallucination":
             c["labels.error_hallucination"] += 1
+        if status == "error" and mode == "witness_disagrees":
+            c["labels.error_witness_disagrees"] += 1
+        if status == "error" and mode == "table_unverified_witness":
+            c["labels.error_table_unverified_witness"] += 1
 
         if status == "success":
             if _CTRL_RE.search(text):

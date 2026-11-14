@@ -220,7 +220,7 @@ class TestSourceEvidenceTableJudge:
         assert "source_evidence_table" in decision.reason
         assert output.audit_passed is False
         assert output.status == PageStatus.ERROR
-        assert output.failure_mode == FailureMode.HALLUCINATION
+        assert output.failure_mode == FailureMode.WITNESS_DISAGREES
         assert output.table_disputed  # carried to the ladder end, which ships it marked
         assert any(e.kind == "source_evidence_table_reject" for e in events)
 
@@ -317,7 +317,7 @@ class TestSourceEvidenceTableJudge:
         # Reject path: the inner page judge is not consulted. Promotion, if any,
         # is the ladder-end's job.
         assert decision.accept is False
-        assert output.failure_mode == FailureMode.HALLUCINATION
+        assert output.failure_mode == FailureMode.WITNESS_DISAGREES
         inner.assess.assert_not_called()
 
     def test_prose_without_tables_delegates_to_inner(self) -> None:

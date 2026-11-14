@@ -410,6 +410,10 @@ class PageState:
     #: way ``scanned_table_no_witness`` does, and like it is DERIVED on resume from the
     #: persisted winning ``failure_mode`` rather than given a sidecar key of its own.
     scanned_table_withheld_unconfirmed: bool = False
+    #: #1270: the scanned floor above was applied because the source-evidence witness could
+    #: not EXAMINE this page's table (``FailureMode.TABLE_UNVERIFIED_WITNESS``). Recorded
+    #: cause only, never control flow; DERIVED on resume like its two siblings.
+    scanned_table_witness_unverifiable: bool = False
     #: What this page has actually SPENT, as a recorded fact rather than a
     #: derivation (cold review rounds 4-5). Every site that journals an
     #: ``EngineResult`` for this page adds to it: each ladder rung ``route_page``

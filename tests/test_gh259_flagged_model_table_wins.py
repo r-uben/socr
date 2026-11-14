@@ -916,7 +916,12 @@ def test_gh90_scanned_evidence_floor_still_wins_over_a_flagged_model_table(
     assert "failed: unverifiable table" in winner.text, winner.text
     assert "$f^{(1\\to2)}$" not in winner.text, winner.text
     assert winner.status is PageStatus.ERROR, winner.status
-    assert winner.failure_mode is FailureMode.HALLUCINATION, winner.failure_mode
+    # #1270: the mode is WITNESS_DISAGREES, not the pre-split HALLUCINATION. ``scanned_table_
+    # evidence_failed`` is set only by the source-evidence gate, whose failure means a witness
+    # read the page and its numbers disagreed with the table; the other causes (no witness
+    # backend, withheld unconfirmed, witness could not examine it) have their own flags, none
+    # set here. The label deliberately does not say which reader is wrong.
+    assert winner.failure_mode is FailureMode.WITNESS_DISAGREES, winner.failure_mode
     # ...and the same is true of what actually reaches the .md.
     body = "\n\n".join(canonical_page_texts(state))
     assert "failed: unverifiable table" in body, body

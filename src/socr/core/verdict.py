@@ -178,6 +178,24 @@ _MODE_CLAUSES: dict[FailureMode, tuple[Check, CheckResult, str]] = {
         CheckResult.UNKNOWN,
         "this page's table is withheld until an independent reader confirms its cells",
     ),
+    #: #1270. FAIL: a second reader DID read this page's pixels and its numbers disagree
+    #: with the table. The wording must not say which reader is wrong: the witness is a
+    #: classical OCR engine and misreads dense tables, so this is not a finding against the
+    #: model (it was labelled ``hallucination`` until #1270, 85 of 90 pages).
+    FailureMode.WITNESS_DISAGREES: (
+        Check.SOURCE_EVIDENCE,
+        CheckResult.FAIL,
+        "a second reader of this page's image disagrees with its table numbers; "
+        "which reader is wrong is not decided",
+    ),
+    #: #1270. UNKNOWN: the second reader could not examine this table, so nothing was
+    #: contradicted and nothing was confirmed.
+    FailureMode.TABLE_UNVERIFIED_WITNESS: (
+        Check.SOURCE_EVIDENCE,
+        CheckResult.UNKNOWN,
+        "a second reader of this page's image could not examine its table, so the "
+        "table's numbers are unchecked",
+    ),
     FailureMode.MODEL_TABLE_OVER_FAILED_FLOOR: (
         Check.NATIVE_TABLE_VERIFIER,
         CheckResult.FAIL,

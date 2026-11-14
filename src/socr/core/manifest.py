@@ -71,6 +71,7 @@ from socr.core.result import (
     REJECTION_AMBIGUOUS_DEFERRED,
     REJECTION_JUDGE_ONLY,
     REJECTION_VERIFIER_ERROR,
+    WITNESS_REJECT_MODES,
     FailureMode,
     PageOutput,
     PageStatus,
@@ -796,7 +797,7 @@ def flagged_model_page_output(p) -> PageOutput | None:
     # A positively-rejected reading, not a flagged one: an ERROR output, or one
     # a floor already overwrote with a failure marker, is not evidence of
     # anything and must not displace the native reading.
-    if bo.status is PageStatus.ERROR or bo.failure_mode is FailureMode.HALLUCINATION:
+    if bo.status is PageStatus.ERROR or bo.failure_mode in WITNESS_REJECT_MODES:
         return None
     # The comparison being fixed is between two readings of a TABLE. If the
     # model emitted no grid at all on a table page it did not produce the thing
@@ -931,7 +932,7 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
         text = (out.text or "").strip()
         if not text or is_page_failed_marker(text):
             return False
-        if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
+        if out.status is PageStatus.ERROR or out.failure_mode in WITNESS_REJECT_MODES:
             return False
         return has_strict_table_grid(text)
 
@@ -998,7 +999,7 @@ def _grid_shaped_attempt(out: PageOutput | None) -> bool:
     text = (out.text or "").strip()
     if not text or is_page_failed_marker(text):
         return False
-    if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
+    if out.status is PageStatus.ERROR or out.failure_mode in WITNESS_REJECT_MODES:
         return False
 
     from socr.tables.reconcile import has_strict_table_grid
@@ -1037,7 +1038,7 @@ def _grid_reading_attempt(out: PageOutput | None) -> bool:
     text = (out.text or "").strip()
     if not text or is_page_failed_marker(text):
         return False
-    if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
+    if out.status is PageStatus.ERROR or out.failure_mode in WITNESS_REJECT_MODES:
         return False
 
     from socr.tables.reconcile import has_authored_table_grid
@@ -4319,6 +4320,20 @@ def _is_restored_prose_recovery(p, page_num: int) -> bool:
     return _is_prose_recovery_body(text, page_num)
 
 
+def _is_stored_pre_1270_floor(source: PageOutput | None, marker: str) -> bool:
+    """#1270: *source* is this floor's own saved output carrying the pre-split ``hallucination``.
+
+    Both halves: the stored mode, and the floor's failed-table marker in the saved text (a
+    live model attempt that merely audited as a hallucination does not carry it, so a live run
+    is always labelled by the witness flags above).
+    """
+    return (
+        source is not None
+        and source.failure_mode is FailureMode.HALLUCINATION
+        and marker in (source.text or "")
+    )
+
+
 def _restored_floor_body_holds(p, page_num: int) -> bool:
     """#1266 round 4 (Astra P0): may a words-less page REUSE its saved floor body as is?
 
@@ -5393,7 +5408,14 @@ def _select_page_output_tagged(
                 if getattr(p, "scanned_table_no_witness", False)
                 else FailureMode.TABLE_WITHHELD_UNCONFIRMED
                 if getattr(p, "scanned_table_withheld_unconfirmed", False)
+                else FailureMode.TABLE_UNVERIFIED_WITNESS
+                if getattr(p, "scanned_table_witness_unverifiable", False)
+                # #1270: a page whose own sidecar stored ``hallucination`` for THIS floor was
+                # written before the label was split. Resume does not re-label it: the stored
+                # mode is what that run recorded, and the page keeps it.
                 else FailureMode.HALLUCINATION
+                if _is_stored_pre_1270_floor(source, d3_marker)
+                else FailureMode.WITNESS_DISAGREES
             ),
         ), SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
     if p.is_born_digital and p.native_text:
