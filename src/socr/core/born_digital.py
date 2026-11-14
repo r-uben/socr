@@ -212,6 +212,12 @@ _GLUE_PUNCT = _OPENERS + _CLOSERS + _HYPHENS + "−"
 #: The one-letter English article. It is the only single letter that is a word, so it is
 #: the only one ``_is_printed_fraction`` has to tell apart from a variable.
 _ARTICLE = "a"
+#: Names that start a math operand in an equation. After a number they are the right-hand
+#: side of '=' ("2 = sin x"), never prose: "2 ¼ sin x" must not read as a printed fraction.
+#: A fixed list of standard function names, not corpus-tuned.
+_MATH_FUNCTIONS = frozenset({"sin", "cos", "tan", "log", "ln", "exp", "max", "min", "lim", "det"})
+#: Characters of a bare operator token ("x ¼ y + z", "x ¼ y 2").
+_OPERATOR_CHARS = frozenset("+-−*/^=<>×·±")
 
 
 def _is_plain_word(token: str) -> bool:
@@ -263,6 +269,26 @@ def _is_operator_shape(left_tok: str, right_tok: str) -> bool:
     )
 
 
+def _is_math_operand(right: list[str]) -> bool:
+    """True if the right-hand side after a number starts an equation operand.
+
+    A math function (``sin``, ``log``), a single-letter variable (``x``), or a vowel-free
+    compact variable followed by an operator or a number (``xy + 1``, ``xy 2``). Greek
+    and bracketed expressions are already not plain words, so they never reach this test.
+    """
+    if not right:
+        return False
+    word = _edge_piece(right[0], last=False).strip(_WORD_EDGE_PUNCT)
+    if word.lower() in _MATH_FUNCTIONS:
+        return True
+    if len(word) == 1 and _is_latin_word(word):
+        return True
+    if not (_is_compact_variable(word) and _is_vowel_free(word)) or len(right) < 2:
+        return False
+    nxt = right[1].strip(_WORD_EDGE_PUNCT)
+    return _is_number(nxt) or bool(nxt) and set(nxt) <= _OPERATOR_CHARS
+
+
 def _is_number(token: str) -> bool:
     word = token.strip(_WORD_EDGE_PUNCT).lstrip(_NUMBER_SIGNS)
     return bool(word) and all(ch.isdigit() or ch in ".," for ch in word)
@@ -304,6 +330,8 @@ def _is_printed_fraction(line: str, i: int) -> bool:
     * L is a number: printed iff a ``%``, a word or the end of the line follows
       (``1 ¼ percent``, ``8 ½%``, ``is 2 ½`` + wrapped ``percent``). A line never ends on
       the '=' of ``2 ¼``: mojibake '=' sits between two operands.
+      A math function, a one-letter variable or a vowel-free variable before an operator or
+      number after the glyph is an operand: ``2 ¼ sin x``, ``1 ¼ x + y`` are operator.
     * L is the article "a": printed iff a word follows and the word after that is a word
       or absent (``a ¼ point cut``). ``a ¼ sin x`` ends on a variable: operator.
     * L and R are both compact (at most two letters, or no vowel) and one is vowel-free
@@ -344,6 +372,8 @@ def _is_printed_fraction(line: str, i: int) -> bool:
     if not (left_tok or right_tok) or _is_number(right_tok):
         return False
     if _is_number(left_tok):
+        if _is_math_operand(right):
+            return False  # "2 ¼ sin x", "1 ¼ x + y": the '=' of an equation
         return percent or not right_tok or _is_plain_word(right_tok)
     if left_tok.lower() == _ARTICLE:
         return _is_plain_word(right_tok) and (len(right) < 2 or _is_plain_word(right[1]))

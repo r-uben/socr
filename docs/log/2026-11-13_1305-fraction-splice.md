@@ -148,3 +148,29 @@ resume of a fraction-only page).
 
 Round 3 (cubic + astra recheck): Fed lane re-measured on the final rule: 403 leave, 5 stay
 (same 5). References recall on the final rule: 209,519 pages, 1751 old-flagged, 1750 still flagged (same single Spanish "7½ Hz" page leaves).
+
+## Follow-up: a math function after a number is an operand (Kimi recheck of PR #1310)
+
+Blocker: a corrupted `2 = sin x` decodes as `2 ¼ sin x`. A number on the left plus a plain
+word on the right (`sin`) took the numeric-LHS prose shortcut (`1 ¼ percent`), so the damaged
+'=' shipped as '¼'.
+
+Fix: in the numeric-LHS branch of `_is_printed_fraction`, a right-hand side that starts a math
+operand is an operator first (`_is_math_operand`): a name in `_MATH_FUNCTIONS` (sin cos tan log
+ln exp max min lim det), a one-letter Latin variable, or a vowel-free compact variable followed
+by an operator token or a number (`2 ¼ xy + 1`). Greek and bracketed right sides were already
+not plain words, so they were operator before. Unchanged: `1 ¼ percent`, `8 ½%`, `2 ½ million`,
+`2 ½ to 3 percent` (`to` has a vowel), `a ¼ point`. Pinned in `_VERDICTS`: `2 ¼ sin x`,
+`3 ¼ log y`, `1 ¼ x + y`, `2 ¼ xy + 1` operator; the existing fraction rows stay.
+
+Residual: a vowel-free word before a number or operator (`2 ½ by 4`) reads as operator. A false
+operator costs a crop, no content.
+
+Guard seen to fail (mutant copy of src and tests outside the repo, `socr.__file__` inside the
+copy, anchor count 1): the `_is_math_operand` check removed -> 3 failed (`2 ¼ sin x`,
+`3 ¼ log y`, `2 ¼ xy + 1`). `1 ¼ x + y` still passes in the mutant: a one-letter right side
+was already not a plain word, so it is pinned as a regression row, not a mutant killer.
+
+Re-measured on the final rule: Fed lane 408 pages (81 docs): 403 leave, 5 stay (same 5, the
+2020-07-29 transcript-presentation-materials p23, p26-p29).
+References recall: 209,519 pages, 1751 old-flagged, 1750 still flagged (same single Spanish "7½ Hz" page leaves).

@@ -51,6 +51,9 @@ _VERDICTS = [
     # printed: after an article or word, before a word
     ("the Committee raised rates by a ¼ percentage point cut in rates today", True),
     ("a ¼ point cut", True),
+    ("8 ½%", True),
+    ("2 ½ million", True),
+    ("2 ½ to 3 percent", True),
     ("the ½ share of output", True),
     ("raised it ¼ percentage point", True),
     # printed: hyphen compound, bracketed series
@@ -99,6 +102,10 @@ _VERDICTS = [
     ("y ¼ sin x and then the model holds up", False),
     ("the state-of-the-art model y ¼ x holds", False),
     ("rate ¼ 3", False),
+    ("2 ¼ sin x", False),
+    ("3 ¼ log y", False),
+    ("1 ¼ x + y", False),
+    ("2 ¼ xy + 1", False),
 ]
 _PRINTED = [line for line, printed in _VERDICTS if printed]
 _OPERATOR = [line for line, printed in _VERDICTS if not printed]
