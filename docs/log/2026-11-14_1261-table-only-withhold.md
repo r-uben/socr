@@ -1,7 +1,7 @@
 # #1261 / #1208 (plan B2): withhold the table, not the page
 
-Status: partial. The prose of 116 pages comes back; the done bar (words missing on ERROR pages
-<= 94,011) is NOT met: 154,351 -> 144,614. Reaching it needs a protective gate relaxed, which this
+Status: partial. The prose of 79 pages comes back; the done bar (words missing on ERROR pages
+<= 94,011) is NOT met: 154,351 -> 146,965. Reaching it needs a protective gate relaxed, which this
 ticket's binding conditions forbid. Evidence and the numbers that would decide it are below.
 
 ## What was measured first (before any gate moved)
@@ -115,31 +115,30 @@ y-banding, the layer's own order keeps them apart).
 
 ## Result on the cached run
 
-* Pages changed: 116 (order gate refusals 136 -> 20), all of them among the 1,175 pages whose old
-  arm reproduces the run. Words recovered: 9,737 (10,388 on the previous revision and 11,643 on
-  the first; the difference is what the continuation walk and the row-spread rules cost).
-  `textlayer.words_missing.error`: 154,351 -> 144,614. No page gained missing words.
+* Pages changed: 79 (order gate refusals 136 -> 57), all of them among the 1,175 pages whose old
+  arm reproduces the run. Words recovered: 7,386 (9,737 on round 3, 10,388 on round 2 and 11,643
+  on the first; the difference is what the span rule costs: a paragraph under a table ships only
+  when it is closed). `textlayer.words_missing.error`: 154,351 -> 146,965. No page gained missing words.
 * Leak diff, row level (multiset: a line the new arm ships once more than the old arm counts).
   On every changed page the old arm refused with `order_gate`, i.e. shipped only the marker, so
-  every value line the new arm ships is new. 381 new lines carry a digit (67 pages); 67 of them
-  are the neutral `[N lines withheld]` marks (the digit is the count), leaving 314 content lines.
+  every value line the new arm ships is new. 362 new lines carry a digit (72 pages); 7 of them
+  are the neutral `[N lines withheld]` marks (the digit is the count), leaving 355 content lines.
   The listing is the replay output (`new_value_lines`, written by `2026-11-14_1261-measure.py`;
   the output is not committed, rerun the script). Content lines whose tokens are at least half
-  numerals: 0. Lines with two or more numerals and at most six tokens: 5, all running heads
-  ("MONETARY POLICY REPORT: JULY 2024 47") or a dated sentence ("June 14-15, 2022, meeting
-  participants"). The rest are sentences, footnote text and running heads whose words outnumber
+  numerals: 0. Lines with two or more numerals and at most six tokens: 0 (round 3 had 5 running
+  heads). The rest are sentences, footnote text and running heads whose words outnumber
   their numerals: the keep-sentences class the floor already ships on the pages it recovered
   before. Lines without a two-letter word on the changed pages: 0. (The previous revision's
   "450 lines, 73 pages" counted those marks too.)
   No box content ships by construction (the shipped set excludes every band meeting a box), and
-  the continuation walk withholds every line in a box's span until a sentence.
-* Not measured: whether any of the 314 lines is a table footnote that a reader would want
+  the span rule withholds every line in a box's span that is not part of a closed paragraph.
+* Not measured: whether any of the 355 lines is a table footnote that a reader would want
   withheld; they are not table rows. Whether the walk fires on the corpus is not separated from
   the other rules: the replay shows only the result.
 
 ## What the done bar needs (owner decision)
 
-The target 94,011 needs about 50,600 more words (144,614 - 94,011). Remaining reasons, by words owed:
+The target 94,011 needs about 52,900 more words (146,965 - 94,011). Remaining reasons, by words owed:
 `box_unsane` 38,597 (267 pages), no-detection pages with a TR-3 failed region but no detector box
 31,737 (300), `structure_outside` 13,225 (116). Each is a protective gate:
 
@@ -157,7 +156,7 @@ record gap, left for its ticket (a new durable event must restore on resume).
 
 ## Tests and mutants
 
-`tests/test_gh1261_native_order_floor.py` (18 tests): fallback on/off difference with exact
+`tests/test_gh1261_native_order_floor.py` (29 tests after round 4): fallback on/off difference with exact
 recovered prose and order; same-words subset check against the bands body; structure-outside and
 box-sanity gates (recorded reasons); order gate on the fallback; rotation, prior OCR, scan;
 shared-baseline line, loose value line, table-syntax line; floor credential and repeat selection;
@@ -194,3 +193,35 @@ the rows, the sentence below ships), Fable's 60 pt cell-gap row (difference agai
 without the loose cell). Mutants (src and tests copied outside the repo, `socr.__file__` asserted
 inside the copy, anchor count asserted 1): the walk stops at a numeral-free band (2 tests fail);
 no spread (3 fail). Both killed.
+
+Review round 4 (PR #1324): Astra showed a word count does not establish a table boundary
+(`Pension liabilities for retired employees` then `Total pension obligation` / `12 million
+dollars`; `Coverage for all employees included` / `Yes`: both shipped, a longer label reopens
+every leak a threshold closes). The sentence-count stop (`_is_sentence`,
+`_NATIVE_ORDER_SENTENCE_MIN_WORDS`) and the walk are removed. The rule is now per layer line:
+within the horizontal span of any detected box, and in the band of any numerals-withheld line, a
+line ships ONLY if its layer block (`w[5]` of `get_text("words")`) (a) has every line shippable
+(no word inside a box, no numerals, table-syntax or shredded line), (b) has at least two layer
+lines, and (c) its last line ends in sentence-final punctuation (`.`, `?`, `!`, then optional
+closing quotes or brackets: `_SENTENCE_FINAL_RE`). Every other line in the span is withheld, on
+the whole page (no walk, so nothing to stop early). A shredded-math line (cubic P1) makes (a)
+fail for its block, so it cannot release the lines after it. Outside every span the earlier rules
+apply unchanged. Clause (a)'s "no word inside a box" is implied by the shipped-words filter
+(the partition withholds every box), so it is not a separate check. The spread of numerals
+withholding and the walk collapse into this one predicate. Marks: a withheld run is a table run
+when it holds a line in a box or in a box's span; a run withheld only through a numerals band
+gets the neutral mark, as before.
+Cost: a single-line paragraph, or a paragraph whose last line does not end in a stop (a heading
+followed by text, a list), directly in a table's column is withheld under a mark: 9,737 -> 7,386
+words recovered, 116 -> 79 pages. The previous 116 included pages whose only recovered prose was
+exactly such lines. The fixtures that used one-line blocks in the left column now use real
+two-line paragraphs (`insert_text` with a newline keeps them in one layer block).
+Tests added: Astra's two long-label reproductions, each as separate-block lines and as one
+block, through `table_floor_text_for_source` (nothing of the table ships; difference against
+the same page without the rows); a real two-line paragraph after a table ships; a one-line
+block, a block without a final stop, and a block holding a shredded-math line in a span are
+withheld, with the same words shipping outside every span (difference); a closing quote after
+the stop counts. Mutants (src and tests copied outside the repo, `socr.__file__` asserted inside
+the copy, anchor count asserted 1): drop (a) (1 test fails), drop (b) (1 fails), drop (c)
+(8 fail). All three killed. The full replay was rerun with
+`docs/log/2026-11-14_1261-measure.py` (output directory redirected to a scratch copy).

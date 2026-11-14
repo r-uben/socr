@@ -47,6 +47,9 @@ RIGHT = [
     "A third right sentence follows after that.",
 ]
 LEFT_TAIL = "Tail of the left column after the table."
+#: Prose inside a table's horizontal span ships only as a closed paragraph (two or more layer
+#: lines of one block, the last ending in a full stop), so the tail is one.
+LEFT_TAIL_LINES = (LEFT_TAIL, "Its second line closes the page.")
 RIGHT_TAIL = "Tail of the right column."
 SHARES_BASELINE = "Right text on a grid baseline."
 GRID = [("Measure", "2003", "2004"), ("Real GDP", "2.6", "4.1"), ("Final sales", "2.4", "4.0")]
@@ -56,12 +59,11 @@ GRID_TOKENS = ("Measure", "Real", "GDP", "Final", "sales", "2.6", "4.1", "2.4", 
 
 def _columns(page, *, extra=None) -> None:
     """Column-major: the whole left column, then the whole right one, in stream order."""
-    for i, text in enumerate(LEFT):
-        page.insert_text((72, 60 + i * 16), text, fontsize=9)
+    page.insert_text((72, 60), "\n".join(LEFT), fontsize=9)
     for r, row in enumerate(GRID):
         for c, cell in enumerate(row):
             page.insert_text((76 + c * 50, 130 + r * 16), cell, fontsize=9)
-    page.insert_text((72, 260), LEFT_TAIL, fontsize=9)
+    page.insert_text((72, 260), "\n".join(LEFT_TAIL_LINES), fontsize=9)
     if extra:
         extra(page)
     for i, text in enumerate(RIGHT):
@@ -107,7 +109,7 @@ def test_the_fallback_returns_the_prose_in_the_layers_order(tmp_path: Path, monk
     assert _whole_page(off), off
     assert not _whole_page(on)
     assert BORN_DIGITAL_KEEP_SENTENCES_FLAG.format(page_num=1) in on
-    assert _own_lines(on) == [*LEFT, LEFT_TAIL, *RIGHT, RIGHT_TAIL], _own_lines(on)
+    assert _own_lines(on) == [*LEFT, *LEFT_TAIL_LINES, *RIGHT, RIGHT_TAIL], _own_lines(on)
     for token in GRID_TOKENS:
         assert token not in on, f"table content {token!r} shipped"
     assert SHARES_BASELINE not in on, "a sentence on a table row's baseline shipped"
@@ -122,12 +124,11 @@ def test_every_word_the_fallback_ships_is_a_word_the_bands_body_would_ship(
     from socr.core.manifest import native_prose_floor_text
 
     def one_column(page) -> None:
-        for i, text in enumerate(LEFT):
-            page.insert_text((72, 60 + i * 16), text, fontsize=9)
+        page.insert_text((72, 60), "\n".join(LEFT), fontsize=9)
         for r, row in enumerate(GRID):
             for c, cell in enumerate(row):
                 page.insert_text((76 + c * 50, 130 + r * 16), cell, fontsize=9)
-        page.insert_text((72, 260), LEFT_TAIL, fontsize=9)
+        page.insert_text((72, 260), "\n".join(LEFT_TAIL_LINES), fontsize=9)
 
     _state, ps = _build(tmp_path, one_column, [GRID_BOX])
     bands = native_prose_floor_text(ps, 1, marker_line=MARKER, png_ref=PNG, keep_sentences=True)
@@ -242,6 +243,9 @@ def test_a_layer_line_holding_shipped_and_withheld_words_is_withheld_whole(
         (142.0, 60.0, 160.0, 70.0, "of", 0, 0, 2),
         (162.0, 60.0, 190.0, 70.0, "the", 0, 0, 3),
         (192.0, 60.0, 230.0, 70.0, "page", 0, 0, 4),
+        (72.0, 40.0, 100.0, 50.0, "Second", 0, 1, 0),
+        (102.0, 40.0, 140.0, 50.0, "line", 0, 1, 1),
+        (142.0, 40.0, 190.0, 50.0, "ends.", 0, 1, 2),
         (72.0, 62.0, 100.0, 72.0, "Sales", 1, 0, 0),
         (80.0, 130.0, 110.0, 140.0, "12.5", 1, 0, 1),
         (80.0, 150.0, 110.0, 160.0, "13.5", 2, 0, 0),
@@ -264,7 +268,7 @@ def test_the_floor_credential_holds_and_a_second_selection_is_byte_identical(
     first = _winning_page_output(_s, 1)
     second = _winning_page_output(_s, 1)
     assert first.text == second.text
-    assert _own_lines(first.text) == [*LEFT, LEFT_TAIL, *RIGHT, RIGHT_TAIL]
+    assert _own_lines(first.text) == [*LEFT, *LEFT_TAIL_LINES, *RIGHT, RIGHT_TAIL]
     assert first.table_floor_body is True and table_floor_credential_holds(first)
 
 
@@ -272,8 +276,7 @@ def _column_pdf(path: Path) -> Path:
     fitz = pytest.importorskip("fitz")
     doc = fitz.open()
     page = doc.new_page()
-    for i, text in enumerate(LEFT):
-        page.insert_text((72, 60 + i * 16), text)
+    page.insert_text((72, 60), "\n".join(LEFT))
     rows = [["Real GDP", "2.6", "4.1"], ["Previous", "2.9", "3.9"], ["Final sales", "2.4", "4.0"]]
     for r, cells in enumerate(rows):
         for c, cell in enumerate(cells):
@@ -282,7 +285,7 @@ def _column_pdf(path: Path) -> Path:
         page.draw_line(fitz.Point(76, 116 + r * 22), fitz.Point(226, 116 + r * 22))
     for c in range(4):
         page.draw_line(fitz.Point(76 + c * 50, 116), fitz.Point(76 + c * 50, 116 + 3 * 22))
-    page.insert_text((72, 260), LEFT_TAIL)
+    page.insert_text((72, 260), "\n".join(LEFT_TAIL_LINES))
     for i, text in enumerate(RIGHT):
         page.insert_text((330, 60 + i * 16), text)
     page.insert_text((330, 260), RIGHT_TAIL)
@@ -309,7 +312,7 @@ def test_process_in_both_provider_states_and_a_real_restore(tmp_path: Path, monk
         assert on_meta["failure_mode"] == off_meta["failure_mode"], "route differs between arms"
         assert on != off, f"{tag}: the toggle changed nothing"
         # The written fragment joins a paragraph's lines: compare the word sequence.
-        want = " ".join([*LEFT, LEFT_TAIL, *RIGHT, RIGHT_TAIL]).split()
+        want = " ".join([*LEFT, *LEFT_TAIL_LINES, *RIGHT, RIGHT_TAIL]).split()
         assert " ".join(_own_lines(on)).split() == want, _own_lines(on)
         assert not _own_lines(off), "the off arm shipped prose"
         for token in ("Real", "GDP", "2.6", "4.1", "Final"):
@@ -368,6 +371,9 @@ def test_a_layer_line_that_parses_as_table_syntax_is_withheld(tmp_path: Path) ->
         (152.0, 60.0, 170.0, 70.0, "of", 0, 0, 2),
         (172.0, 60.0, 200.0, 70.0, "the", 0, 0, 3),
         (202.0, 60.0, 240.0, 70.0, "page", 0, 0, 4),
+        (72.0, 40.0, 100.0, 50.0, "Second", 0, 1, 0),
+        (102.0, 40.0, 140.0, 50.0, "line", 0, 1, 1),
+        (142.0, 40.0, 190.0, 50.0, "ends.", 0, 1, 2),
         (72.0, 80.0, 150.0, 90.0, "| Name | Remark |", 1, 0, 0),
         (72.0, 100.0, 150.0, 110.0, "|---|---|", 2, 0, 0),
         (72.0, 120.0, 150.0, 130.0, "| Alpha | beta |", 3, 0, 0),
@@ -422,7 +428,7 @@ def test_table_rows_clipped_out_of_the_box_do_not_ship_as_prose(
     for cell in (*CLIPPED_LABELS, *CLIPPED_VALUES, "12", "80"):
         assert cell not in body, f"clipped table row shipped: {cell!r}"
     ref = structure_class_floor_text(base, 1)
-    assert _own_lines(body) == _own_lines(ref) == [*LEFT, LEFT_TAIL, *RIGHT, RIGHT_TAIL]
+    assert _own_lines(body) == _own_lines(ref) == [*LEFT, *LEFT_TAIL_LINES, *RIGHT, RIGHT_TAIL]
 
 
 def test_a_line_that_continues_a_box_is_withheld_but_the_prose_after_it_ships(
@@ -462,13 +468,13 @@ def test_a_table_row_beside_prose_is_not_diluted_by_the_prose(tmp_path: Path) ->
         *_words_line(["Left", "column", "sentence", "is", "here"], 300.0, 72.0, 0),
         *_words_line(["Real", "GDP", "2.3"], 300.0, 330.0, 1),
         *_words_line(["2.5"], 300.0, 450.0, 2),
-        *_words_line(["Other", "words", "stay", "put", "here"], 320.0, 72.0, 3),
+        *_words_line(["Other", "words", "stay", "put", "here."], 320.0, 72.0, 0, line=1),
     ]
     ps.detected_table_bboxes = [(500.0, 500.0, 520.0, 520.0)]
     body = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
     assert body is not None
     assert "Real" not in body and "2.3" not in body and "2.5" not in body
-    assert "Left column sentence is here" in body and "Other words stay put here" in body
+    assert "Left column sentence is here" in body and "Other words stay put here." in body
 
 
 def test_a_line_with_no_word_of_two_letters_is_withheld(tmp_path: Path) -> None:
@@ -585,7 +591,7 @@ def test_a_split_table_row_beside_prose_ships_no_fragment(tmp_path: Path) -> Non
                 for k, (texts, x0) in enumerate(cells)
                 for w in _words_line(texts, 300.0, x0, 1 + k)
             ],
-            *_words_line(["Other", "words", "stay", "put", "here"], 340.0, 72.0, 9),
+            *_words_line(["Other", "words", "stay", "put", "here."], 340.0, 72.0, 0, line=1),
         ]
         ps.detected_table_bboxes = [(500.0, 500.0, 520.0, 520.0)]
         out = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
@@ -601,4 +607,148 @@ def test_a_split_table_row_beside_prose_ships_no_fragment(tmp_path: Path) -> Non
     for frag in ("Real", "GDP", "2.3", "2.5"):
         assert frag not in with_cell, f"row fragment shipped: {frag!r}"
     assert "Policy path stays steady here" in with_cell
-    assert "Other words stay put here" in with_cell
+    assert "Other words stay put here." in with_cell
+
+
+# ---------------------------------------------------------------------------
+# review round 4 on PR #1324: a word count is not a table boundary; only a closed paragraph
+# ships inside a span
+# ---------------------------------------------------------------------------
+
+LONG_LABEL = "Pension liabilities for retired employees"
+LONG_CATEGORICAL = "Coverage for all employees included"
+
+
+def _long_label_rows(page) -> None:
+    """Astra round 4, 1: a five-word-plus stub label above numeric rows, in the box's span."""
+    page.insert_text((76, 182), LONG_LABEL, fontsize=9)
+    page.insert_text((76, 206), "Total pension obligation", fontsize=9)
+    page.insert_text((230, 206), "12 million dollars", fontsize=9)
+
+
+def _long_label_one_block(page) -> None:
+    page.insert_text((76, 182), f"{LONG_LABEL}\nTotal pension obligation", fontsize=9)
+    page.insert_text((230, 206), "12 million dollars", fontsize=9)
+
+
+def _long_categorical(page) -> None:
+    """Astra round 4, 2."""
+    page.insert_text((76, 190), LONG_CATEGORICAL, fontsize=9)
+    page.insert_text((230, 190), "Yes", fontsize=9)
+
+
+@pytest.mark.parametrize(
+    ("extra", "cells"),
+    [
+        (_long_label_rows, ("Pension", "Total", "12", "million", "dollars")),
+        (_long_label_one_block, ("Pension", "Total", "12", "million", "dollars")),
+        (_long_categorical, ("Coverage", "employees", "Yes")),
+    ],
+    ids=["long-label-rows", "long-label-one-block", "long-categorical"],
+)
+def test_a_long_label_is_not_a_sentence_and_ships_nothing(tmp_path: Path, extra, cells) -> None:
+    """DIFFERENCE: the same page without the rows ships the same lines. Through the public
+    entry point as well as the body."""
+    _s, withrows = _build(
+        tmp_path, lambda pg: _columns(pg, extra=extra), [CLIPPED_BOX], name="l.pdf"
+    )
+    _b, base = _build(tmp_path, _columns, [CLIPPED_BOX], name="m.pdf")
+    body = table_floor_text_for_source(
+        withrows,
+        1,
+        withrows.native_text,
+        prose_recovery=True,
+        geometry_floor=True,
+        chart_floor_offered=False,
+        refusals=[],
+    )
+    ref = M._native_order_prose_body(base, 1, marker_line=MARKER, png_ref=PNG)
+    assert body is not None and ref is not None
+    for cell in cells:
+        assert cell not in body, f"table text shipped: {cell!r}"
+    assert _own_lines(body) == _own_lines(ref)
+
+
+def _span_words(rows: list[tuple[list[str], float, int, int]]) -> list[tuple]:
+    """(texts, y, block, line) rows at x=72, inside GRID_BOX's horizontal span."""
+    filler = _words_line(["Other", "column", "keeps", "the", "page", "trusted"], 400.0, 330.0, 9)
+    return [
+        *[w for texts, y, block, line in rows for w in _words_line(texts, y, 72.0, block, line)],
+        *filler,
+    ]
+
+
+def _in_span_body(ps, rows) -> str:
+    ps.native_words = _span_words(rows)
+    ps.detected_table_bboxes = [GRID_BOX]
+    body = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
+    assert body is not None
+    return body
+
+
+def _off_span_body(ps, rows) -> str:
+    """The same words, in a box far from them: the span rule does not apply."""
+    ps.native_words = _span_words(rows)
+    ps.detected_table_bboxes = [(500.0, 500.0, 520.0, 520.0)]
+    body = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
+    assert body is not None
+    return body
+
+
+CLOSED = [
+    (["First", "line", "of", "a", "paragraph"], 200.0, 0, 0),
+    (["Last", "line", "ends", "here."], 216.0, 0, 1),
+]
+
+
+def test_a_closed_two_line_paragraph_after_a_table_still_ships(tmp_path: Path) -> None:
+    """(a)+(b)+(c) all hold: it ships in the span."""
+    _s, ps = _build(tmp_path, _columns, [GRID_BOX])
+    body = _in_span_body(ps, CLOSED)
+    assert "First line of a paragraph\nLast line ends here." in body
+
+
+def test_a_one_line_block_in_a_span_is_withheld_whatever_it_ends_with(tmp_path: Path) -> None:
+    """(b). DIFFERENCE: the same line outside every span ships."""
+    _s, ps = _build(tmp_path, _columns, [GRID_BOX])
+    rows = [(["One", "closed", "sentence", "ends", "here."], 200.0, 0, 0)]
+    assert "One closed sentence ends here." not in _in_span_body(ps, rows)
+    assert "One closed sentence ends here." in _off_span_body(ps, rows)
+
+
+def test_a_block_without_a_final_stop_in_a_span_is_withheld(tmp_path: Path) -> None:
+    """(c): two layer lines of one block, the last a stub label with no final punctuation.
+    DIFFERENCE: the same words outside every span ship."""
+    _s, ps = _build(tmp_path, _columns, [GRID_BOX])
+    rows = [
+        (["Pension", "liabilities", "for", "retired", "employees"], 200.0, 0, 0),
+        (["Total", "pension", "obligation"], 216.0, 0, 1),
+    ]
+    assert "Pension" not in _in_span_body(ps, rows)
+    assert "Pension liabilities for retired employees" in _off_span_body(ps, rows)
+
+
+def test_a_block_holding_a_withheld_line_ships_none_of_its_lines_in_a_span(
+    tmp_path: Path,
+) -> None:
+    """(a), and the cubic P1 shape: a shredded-math line (no word of two letters) cannot release
+    the lines after it. DIFFERENCE: outside every span the good lines of the block ship."""
+    _s, ps = _build(tmp_path, _columns, [GRID_BOX])
+    rows = [
+        (["t"], 200.0, 0, 0),
+        (["Table", "labels", "follow", "the", "math"], 216.0, 0, 1),
+        (["Last", "line", "ends", "here."], 232.0, 0, 2),
+    ]
+    inside = _in_span_body(ps, rows)
+    assert "Table labels" not in inside and "Last line" not in inside
+    outside = _off_span_body(ps, rows)
+    assert "Table labels follow the math" in outside and "Last line ends here." in outside
+
+
+def test_a_closing_quote_after_the_full_stop_counts_as_final(tmp_path: Path) -> None:
+    _s, ps = _build(tmp_path, _columns, [GRID_BOX])
+    rows = [
+        (["She", "said", "the", "rate", "would", "hold"], 200.0, 0, 0),
+        (["and", "then", "she", "left", 'the "room."'], 216.0, 0, 1),
+    ]
+    assert "She said the rate would hold" in _in_span_body(ps, rows)
