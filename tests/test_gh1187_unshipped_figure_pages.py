@@ -1141,6 +1141,10 @@ def test_the_document_status_turns_on_this_lane_alone(tmp_path: Path, monkeypatc
     changing only whether the PDF holds a figure the page names, and requires the status to
     move with it.
     """
+    # #1251: the control reading is judge-approved, and a judge's approval alone is not a check.
+    # Its independent check is the page's own layer: the words check runs and passes (no word of
+    # the layer is missing from the control reading), in BOTH arms, so it cannot be what differs.
+    monkeypatch.setattr("socr.tables.layer_words.missing_words", lambda *a, **k: [])
     _s1, _t1, with_fig, _o1 = _process(tmp_path, monkeypatch, "dirty", draw_figure=False)
     clean_body = _PROSE  # names no figure at all, so the lane never fires
     monkeypatch.setattr(_Engine, "BODY", clean_body)

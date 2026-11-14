@@ -166,7 +166,19 @@ def test_detect_on_an_undamaged_document_sets_no_load_error(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_the_other_pages_are_processed_and_the_bad_page_is_failed(tmp_path):
+def test_the_other_pages_are_processed_and_the_bad_page_is_failed(tmp_path, monkeypatch):
+    # #1251: the undamaged run's pages are judge-approved model readings, and a judge's approval
+    # alone is not a check; without the words check the whole undamaged document would end
+    # AUDIT_FAILED like the damaged one and the status difference below would vanish. Its
+    # independent check is the layer's words (the fixture's lines repeat on every page, so a real
+    # reference would be empty furniture; its words are given here), none of which is missing.
+    from socr.tables.layer_words import WordReference
+
+    monkeypatch.setattr(
+        "socr.tables.layer_words.word_reference_from_page",
+        lambda page, **kw: WordReference("coefficient significant percent"),
+    )
+    monkeypatch.setattr("socr.tables.layer_words.missing_words", lambda *a, **k: [])
     _, _, out_bad, bad = _run(tmp_path, BAD_INDEX, "bad")
     _, _, out_ok, ok = _run(tmp_path, None, "ok")
     dd_bad, dd_ok = _doc_dir(out_bad), _doc_dir(out_ok)

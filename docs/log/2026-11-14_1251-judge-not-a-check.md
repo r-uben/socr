@@ -141,52 +141,67 @@ uncapped anchor count == 1 asserted before editing, all KILLED by the new tests)
 | numbers NOT_RUN counts as evidence | `test_numbers_that_did_not_pass_are_no_evidence[NOT_RUN]` |
 | a stale digest is accepted | `test_a_pass_computed_on_other_text_is_no_evidence_for_this_text` |
 
-## Existing tests this change fails (NOT edited; coordinator ruling needed)
+## Existing tests this change failed, and the coordinator's rulings (applied)
 
-Full suite: 11 fail after the side-file rename (was 14).
+Eleven existing tests failed. Rulings, as applied:
 
-Group 1, the rule's own effect. Each builds a model-read page, accepted by a fixed judge, on a
-rotated or otherwise layer-less fixture where no words are owed, and asserts it is clean SUCCESS.
-Under the rule that page has only the approval, so it gets the clause:
+1. **Judge-accepted control pages with no independent check** (subject is something else; every
+   assertion kept, only the control page's evidence added): `test_gh1013...::test_fields_set_by_
+   verification_survive_to_the_ship` (the harness passes the layer's words; the reading carries
+   them), `test_gh1185_text_layer_numbers_e2e` (the page also prints a prose line, different on
+   every page because text repeated on every page is furniture the words check does not owe; the
+   reading carries it), `test_gh1187...::test_the_document_status_turns_on_this_lane_alone` (the
+   words check runs and passes in both arms), `test_gh881...::test_the_other_pages_are_processed_
+   and_the_bad_page_is_failed` (the fixture's lines repeat on every page, so a real reference is
+   empty; the words are given), `test_gh987...::test_short_circuited_pages_are_reprocessed_...`
+   (the layer owes "text for", at a place of its own per page).
+   Two refinalize-equality tests (`test_gh1294...::test_refinalize_turns_an_old_run_into_...`, and
+   the two refinalize tests of gh1185) build their "old run" by patching a check out of the
+   current code; the patched run is also a run before #1251, so `_judge_only_clauses` is patched
+   out of it too (a run before #1294 or #1185 had no page_judge clause either). Without that the
+   old run is demoted by the new clause and carries its mark line, which a real old run does not.
+2. **The offline tools apply the clause.** `core.verdict.with_judge_only_clause` is the one
+   predicate (accepted model reading, no #1181 clause, `independent_page_evidence`) evaluated on
+   `reconcile_pass_trace` of the sidecar's old trace plus the tool's recomputed checks, stamped
+   with the text it ships. A page that gains another clause drops the judge-only one (a live run
+   gives it only to a page nothing else marks; the seam re-chooses the mode). Wired into
+   `socr-refinalize-own-text`, `-point-drops` and `-unshipped-figures`;
+   `socr-refinalize-prior-ocr` goes through `finalized_page_record`, the live seam, so it has it.
+   Test: `tests/test_gh1251_refinalize_judge_clause.py` (12): an old run (code before #1251, no
+   layer evidence) refinalized equals the run of this code (sidecar, body, document md, document
+   and root status), idempotent; the same old run on a page WITH evidence is left byte for byte;
+   the helper's table (words and numbers pass, digest of other text, no trace, other clause,
+   scope).
+3. **gh987 byte equality.** A page the breaker short-circuited made no judge call, so its
+   `judge_calls` reference legitimately differs from the slow run's: `judge_calls` is volatile in
+   those tests' `_shape` (only that key), with a comment.
 
-* `test_gh1013_rejudge_timed_out_candidate.py::test_fields_set_by_verification_survive_to_the_ship`
-* `test_gh1185_text_layer_numbers_e2e.py::test_the_reading_that_drops_the_point_is_marked_and_the_faithful_one_is_not`
-* `test_gh1185_text_layer_numbers_e2e.py::test_refinalize_then_resume_equals_a_run_of_this_code`
-* `test_gh1185_text_layer_numbers_e2e.py::test_a_disagreement_reaches_the_document_the_root_index_and_the_cli`
-* `test_gh1185_text_layer_numbers_e2e.py::test_refinalize_carries_a_disagreement_to_the_document_and_the_root_index`
-* `test_gh1187_unshipped_figure_pages.py::test_the_document_status_turns_on_this_lane_alone`
-* `test_gh1294_layer_words.py::test_refinalize_turns_an_old_run_into_what_a_run_of_this_code_writes`
-* `test_gh881_per_page_load_failure.py::test_the_other_pages_are_processed_and_the_bad_page_is_failed`
-  (the document note counts 4 untrusted pages, not 3)
+Mutants of this part (copies outside the repo, `socr.__file__` asserted inside the copy, anchor
+count == 1 before editing; all KILLED):
 
-Two of these are a real design question: the offline tools (`socr-refinalize-own-text`) do not
-apply this clause, so "refinalize an old run equals a run of this code" no longer holds for a
-judge-only page. Either the tools apply it too, or the equality tests exempt it.
+| mutant | killed by |
+| --- | --- |
+| own_text tool does not call the helper | `test_refinalize_turns_an_old_judge_only_page_into_what_this_code_writes` |
+| helper keeps the judge clause beside another | `test_helper_drops_the_clause_when_the_page_gains_another` |
+| helper adds the clause whatever the trace holds | `test_a_page_with_an_independent_check_is_left_alone_by_the_tool` and two helper tests |
+| helper ignores the scope (accepted model reading, SUCCESS) | the four `test_helper_is_scoped_...` cases |
 
-Group 2, the side-file name (fixed). The side file was first `NNNNN.judge.json`, which every
-`pages/*.json` glob (the gh987 helper `_sidecars`) parsed as a sidecar (`int('00001.judge')`). It is
-now `NNNNN.judge-calls` (no `.json` suffix), so no existing glob sees it. Six gh987 tests failed on
-that alone; three now pass. Two gh987 tests still fail for a different reason, a real design
-question:
+## Measured finding on the Fed run
 
-* `test_gh987_judge_breaker_e2e.py::test_wedged_judge_fails_pages_closed_exactly_like_a_slow_one_but_instantly`
-* `test_gh987_judge_breaker_e2e.py::test_a_vllm_judge_is_probed_with_a_generation_not_its_listing`
-
-They require every sidecar of a breaker run to equal the slow-judge run. A page short-circuited by
-the breaker never reached the judge, so it has no judge call and no `judge_calls` reference; the
-slow run's page has one. Recording a call that did not happen would be false, so the sidecar
-differs by exactly the `judge_calls` key. The test's `_shape` needs to treat `judge_calls` as
-volatile, or the breaker must record a synthetic `circuit_open` call (coordinator ruling).
-
-The third, `test_short_circuited_pages_are_reprocessed_on_resume_when_the_judge_is_healthy`,
-asserts a judge-accepted control page is `_passed`; it is Group 1 (control page has no own layer).
-
-Totals now: 11 existing tests fail (Group 1: 8 listed above plus the gh987 control; Group 2: 2),
-counted by file in the list above.
+On the Fed run C3 demotes **0 of 43** judge-approved qwen SUCCESS pages: all 43 have the words
+check and the numbers check at PASS on the shipped text (table above). The 9 gold-defective pages
+that are still silent (7 `lost_text`, 1 `lost_figure`, 1 untyped) are invisible to every
+text-layer check: what is lost is text or figures that exist in the page IMAGE, not words the page's
+own text layer says are missing. Marking them needs an image-level reader (a model or a pixel
+comparison of the page against the reading), not another layer comparison. C3 as ruled cannot
+reach them and is a fail-closed guard for pages the layer checks cannot reach.
 
 ## Not done
 
 * The native-engine relabel (brief item 5): untouched, per Fable (`core/manifest.py:2528` retires a
   credentialed stand-in on `page_judge_completed and not audit_passed`).
 * `judge_model` stamping on unjudged pages (carbon F-B-008) is a C2 item and is not changed here.
-* The offline refinalize tools do not add the clause (see above).
+* `socr-refinalize-boilerplate` does not rewrite a verdict at all (it strips a preamble and keeps
+  the verdict as it stands), so it does not add the clause; a preamble-stripped judge-only page is
+  not demoted by it. `-point-drops` evaluates the clause on the old row-binding entries (its own
+  new records are written after the verdict); only `-own-text` has an end to end test.

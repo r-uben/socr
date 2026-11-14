@@ -36,7 +36,11 @@ _DEADLINE = 0.2
 _JUDGE_HANG = 1.0
 _PAGES = 4
 BREAKER_EVENT = "judge_wedged_circuit_open"
-_VOLATILE = {"input_checksum", "timings_s"}
+# #1251: ``judge_calls`` is the sidecar's reference (path, digest, count) to the page's judge
+# replies. A page the breaker short-circuited made NO judge call, so it has no reference, while the
+# same page in the slow run has one (its timeout, recorded). Recording a call that did not happen
+# would be false, so the reference legitimately differs and is volatile here (only that field).
+_VOLATILE = {"input_checksum", "timings_s", "judge_calls"}
 
 
 def _pdf(tmp_path: Path, *, layer_numbers: bool = False) -> Path:
@@ -48,6 +52,10 @@ def _pdf(tmp_path: Path, *, layer_numbers: bool = False) -> Path:
             # The reading repeats "page N" eight times, and agreement counts occurrences,
             # so the layer carries the same eight occurrences.
             page.insert_text((60, 320), f"page {n + 1} " * 8, fontsize=9)
+            # #1251: a judge's acceptance alone is not a check, so the layer also owes words the
+            # reading carries ("text for"). The same word at the same place on every page is
+            # running furniture, which is not owed, so the line sits at a place of its own per page.
+            page.insert_text((60 + 80 * n, 360), "text for", fontsize=9)
         y = 80
         for _ in range(14):
             page.insert_text((60, y), f"Estimated coefficient 0.08{n} significant", fontsize=9)

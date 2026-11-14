@@ -128,6 +128,7 @@ def repair_page(
         page_dropped_numbers,
         text_layer_drops_clause,
         text_layer_numbers_clause,
+        with_judge_only_clause,
         with_text_layer_numbers_clause,
     )
     from socr.judge.table_verdict import TABLE_POINT_REPAIRED_KIND
@@ -179,6 +180,16 @@ def repair_page(
         extended = with_text_layer_numbers_clause(extended, numbers, output2, as_run, event_kinds)
     if drops is not None:
         extended = replace(extended, clauses=tuple(in_fresh_run_order((*extended.clauses, drops))))
+    # #1251: the page_judge clause as a live run derives it, from the trace this tool writes (the
+    # layer checks run again on the repaired text). A page that gained a clause loses it, as in a
+    # fresh run. The row-binding entries are the old ones (this tool's own records come later).
+    extended = with_judge_only_clause(
+        extended,
+        output2,
+        sidecar.get("checks"),
+        event_kinds,
+        recomputed=rerun_text_dependent_checks(output2, p, sidecar.get("checks")),
+    )
     if published.clauses and not extended.clauses:
         why = "the page would lose every clause it carries (a lifted mark; #1282 lifts none)"
         skipped[why] += 1

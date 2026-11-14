@@ -188,6 +188,7 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
         text_layer_drops_clause,
         text_layer_numbers_clause,
         text_layer_words_clause,
+        with_judge_only_clause,
         with_text_layer_numbers_clause,
     )
 
@@ -223,8 +224,6 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
                 clause = replace(clause, reason=PRIOR_OCR_UNMARKED_REASON)
         else:
             clause = text_layer_numbers_clause(output, p)
-    if clause is None and drops is None and words is None:
-        return None
     as_run = slot_reference_state(sidecar, output.page_num)
     extended = replace(published, page_num=output.page_num)
     if clause is not None:
@@ -235,6 +234,20 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
         extended = replace(extended, clauses=tuple(in_fresh_run_order((*extended.clauses, drops))))
     if words is not None:
         extended = replace(extended, clauses=tuple(in_fresh_run_order((*extended.clauses, words))))
+    # #1251: the page_judge clause a live run derives from the same trace this tool writes (the
+    # layer checks run again on the shipped text, below), so an old run becomes what a run of
+    # this code writes. A page that gained another clause loses it, as in a fresh run.
+    extended = with_judge_only_clause(
+        extended,
+        output,
+        sidecar.get("checks"),
+        event_kinds,
+        recomputed=rerun_text_dependent_checks(
+            output, _page_state(sidecar, pa), sidecar.get("checks")
+        ),
+    )
+    if extended == replace(published, page_num=output.page_num):
+        return None
     return apply_verdict_marks(output, p, output.page_num, published=extended)
 
 

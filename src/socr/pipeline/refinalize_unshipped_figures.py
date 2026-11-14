@@ -38,7 +38,12 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from socr.core.verdict import in_fresh_run_order, published_audit_passed, write_reconciled_trace
+from socr.core.verdict import (
+    in_fresh_run_order,
+    published_audit_passed,
+    with_judge_only_clause,
+    write_reconciled_trace,
+)
 from socr.figures.unshipped_figures import (
     CHART_SKELETON_KIND,
     EVENT_KINDS,
@@ -323,14 +328,16 @@ def refinalize_page(
         return None
     for name, value in decision.state_fields.items():
         setattr(p, name, value)
-    output, verdict = refinalize_unshipped_figure_page(
-        output,
-        p,
-        page_num,
-        published=_published_verdict(
+    # #1251: this lane's clause is another clause on the page, so a page_judge clause an earlier
+    # pass wrote is dropped (a live run gives the judge-only clause to a page nothing else marks).
+    published = with_judge_only_clause(
+        _published_verdict(
             sidecar, page_num, clause_records(page_num, decision.unlocated, decision.kind)
         ),
+        output,
+        sidecar.get("checks"),
     )
+    output, verdict = refinalize_unshipped_figure_page(output, p, page_num, published=published)
     return output, verdict, decision
 
 

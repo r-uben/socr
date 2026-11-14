@@ -2156,9 +2156,74 @@ def _judge_only_clauses(
         stamp_text_digest(o.entry, text)
         for o in pass_trace_outcomes(output, p, event_kinds, providers_available=True)
     ]
+    return _judge_only_clause_on(entries, text)
+
+
+def _judge_only_clause_on(entries: Iterable[TraceEntry], text: str) -> tuple[VerdictClause, ...]:
+    """The one clause, when *entries* (a pass trace) hold no independent evidence on *text*."""
     if independent_page_evidence(entries, text):
         return ()
     return (VerdictClause(Check.PAGE_JUDGE, CheckResult.UNKNOWN, SCOPE_PAGE, JUDGE_ONLY_REASON),)
+
+
+def is_judge_only_clause(clause: VerdictClause) -> bool:
+    return clause.check is Check.PAGE_JUDGE and clause.reason == JUDGE_ONLY_REASON
+
+
+def with_judge_only_clause(
+    published: PageVerdict,
+    output: PageOutput,
+    old_checks: Any,
+    event_kinds: frozenset[str] = frozenset(),
+    recomputed: tuple[TraceEntry, ...] = (),
+    row_binding_records: Any = None,
+) -> PageVerdict:
+    """*published* (the verdict an OFFLINE tool is about to write) with #1251's clause as a live
+    run of this code derives it, from the trace the tool will write.
+
+    The same predicate as :func:`_judge_only_clauses` (accepted model reading, no #1181 clause,
+    :func:`independent_page_evidence`), evaluated on :func:`reconcile_pass_trace` of
+    *old_checks* with the tool's *recomputed* checks and *row_binding_records*, stamped with the
+    text it ships. A sidecar with no readable trace has none to reconcile: the tool's own
+    *recomputed* outcomes are then the whole evidence, and with none the page has none.
+
+    A live run gives the clause only to a page the other checks leave SUCCESS. So when the
+    verdict carries any other clause the judge-only one is dropped (the page's mode is then
+    re-chosen by the seam, as a fresh run chooses it); when it carries none and the clause is
+    already there, or evidence exists, the verdict is returned as it stands (an offline tool
+    never lifts a mark).
+    """
+    text = output.text or ""
+    others = tuple(c for c in published.clauses if not is_judge_only_clause(c))
+    if others:
+        if len(others) == len(published.clauses):
+            return published
+        return replace(published, clauses=others)
+    if published.clauses:  # only the judge-only clause: already there
+        return published
+    if output.status is not PageStatus.SUCCESS:
+        return published
+    if not _is_model_reading(output) or not _judge_accepted(output):
+        return published
+    if _exact_pass_unjudged_outcome(output, event_kinds).clause is not None:
+        return published
+    reconciled = reconcile_pass_trace(
+        old_checks,
+        published,
+        row_binding_records=row_binding_records,
+        recomputed=recomputed,
+        text=text,
+    )
+    if reconciled is None:
+        entries = [stamp_text_digest(e, text) for e in recomputed]
+    else:
+        from socr.core.pass_trace import trace_from_dicts
+
+        entries = list(trace_from_dicts(reconciled) or ())
+    clauses = _judge_only_clause_on(entries, text)
+    if not clauses:
+        return published
+    return replace(published, clauses=clauses)
 
 
 # --- the pass trace (#1183) ---------------------------------------------------------------

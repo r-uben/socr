@@ -39,6 +39,8 @@ _OTHER_TEXT = "a DIFFERENT model read produced by the ladder in run 2, estimate 
 _NATIVE_TEXT = "native layer of the page with garbled symbols and enough words to count"
 # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
 _CONTROL_LAYER = "born-digital layer of the page: the estimate is 0.42 with n = 117 observations"
+#: The words the control layer owes the reading (all of them are in ``_MODEL_TEXT``).
+_CONTROL_LAYER_WORDS = "the estimate is with observations"
 
 
 @pytest.fixture(autouse=True)
@@ -103,6 +105,8 @@ class _Harness:
         self.judge_backend = config.pop("judge_backend", "heuristic")
         # #1185: the page's own text layer; empty unless a test passes one (default unchanged).
         self.own_layer_text = ""
+        # #1251: the words that layer owes the reading; empty = the words check did not run.
+        self.own_layer_words = ""
 
     def run(self, *, real_builder: bool = False):
         # A recorded AUDIT_FAILED document is skipped at the root index, so the real
@@ -137,6 +141,7 @@ class _Harness:
                     confidence=0.9,
                     needs_ocr_enhancement=True,
                     own_layer_text=self.own_layer_text,
+                    own_layer_word_reference=self.own_layer_words,
                 )
             ],
         )
@@ -330,10 +335,11 @@ def test_rejudge_candidate_stops_on_first_non_timeout_answer() -> None:
     assert j.n == 2
 
 
-def _timed_out_then(tmp_path, tag, mode, *, edit=None, identity=None, layer=""):
+def _timed_out_then(tmp_path, tag, mode, *, edit=None, identity=None, layer="", layer_words=""):
     """Run 1 times out; optionally edit the sidecar; run 2 uses ``mode``."""
     h = _Harness(tmp_path / tag)
     h.own_layer_text = layer  # #1185: "" for every caller that does not pass one
+    h.own_layer_words = layer_words  # #1251: likewise
     _run1_times_out(h)
     if edit is not None:
         side = h.sidecar()
@@ -442,8 +448,18 @@ def test_item4_shipped_bytes_hash_equals_judged_hash(tmp_path) -> None:
 def test_fields_set_by_verification_survive_to_the_ship(tmp_path, monkeypatch) -> None:
     """Label disclosure set on the judged snapshot must reach the shipped page (WARNING)."""
     calls = spy_agreement(monkeypatch)  # #1185: must be installed before the code under test runs
-    plain = _timed_out_then(tmp_path, "plain", "accept", layer=_CONTROL_LAYER)
-    flagged = _timed_out_then(tmp_path, "flagged", "accept_label_unverified", layer=_CONTROL_LAYER)
+    # #1251: a judge's acceptance alone is not a check, so the control page also has the layer's
+    # words, which the reading carries: the page is CHECKED by the layer, not by the judge.
+    plain = _timed_out_then(
+        tmp_path, "plain", "accept", layer=_CONTROL_LAYER, layer_words=_CONTROL_LAYER_WORDS
+    )
+    flagged = _timed_out_then(
+        tmp_path,
+        "flagged",
+        "accept_label_unverified",
+        layer=_CONTROL_LAYER,
+        layer_words=_CONTROL_LAYER_WORDS,
+    )
     for h in (plain, flagged):
         assert h.ocr_calls == [] and "rejudge_accepted" in _kinds(h)
         assert _MODEL_TEXT in h.shipped()
