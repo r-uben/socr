@@ -163,6 +163,8 @@ from socr.pipeline.agentic import (
 from socr.core.ollama_utils import probe_model_generation
 from socr.core.verdict import (
     NATIVE_TABLE_EXACT_PASS_KIND,
+    published_audit_passed,
+    pages_not_success_note as _pages_not_success_note,
     NUMBERS_DISAGREE_EVENT_DETAIL,
     NUMBERS_DISAGREE_KIND,
     INVALID_FINAL_EMISSION_NOTE_PREFIX,
@@ -857,6 +859,27 @@ def _derive_disposition_buckets(
 #: The full reason lives on the attempt in the audit log; the sidecar carries a compact
 #: pointer, so a reasoning-heavy judge cannot bloat every page file.
 ATTEMPT_SUMMARY_REASON_MAX_CHARS = 200
+
+
+def _pages_not_success(records: list, page_count: int) -> list[int]:
+    """#1244 C1: every page of 1..page_count without a FINAL record that publishes as SUCCESS.
+
+    The document-level invariant. A page with no record counts as incomplete, so a record
+    list that is empty or covers a subset can never read as a clean document (``all()`` over
+    such a list is vacuously true, which is the shape this exists to refuse). Every status
+    other than SUCCESS is incomplete: WARNING, ERROR, SKIPPED and PENDING alike, and so is a
+    SUCCESS page whose published ``audit_passed`` is false (``published_audit_passed``).
+    """
+    finished = {
+        rec.output.page_num
+        for rec in records
+        if rec.output.status == PageStatus.SUCCESS
+        # The PUBLISHED label, not only the status: a SUCCESS page whose sidecar publishes
+        # ``audit_passed=false`` (a FAIL clause, or an internal acceptance that is not True)
+        # is not a finished page, so the document must not read ``completed`` over it.
+        and published_audit_passed(rec.output.status, rec.output.audit_passed, rec.verdict)
+    }
+    return [n for n in range(1, page_count + 1) if n not in finished]
 
 
 def _attempts_summary(ps) -> list[dict]:
@@ -17805,7 +17828,14 @@ class UnifiedPipeline:
             # Keep the terminal disposition directly addressable for consumers
             # that inspect the sidecar without unpacking ``winning_output``.
             "failure_mode": winning_dict.get("failure_mode", "none"),
-            "audit_passed": winning_dict.get("audit_passed", False),
+            # #1244 C1: the PUBLISHED label, derived from status and the verdict. The
+            # internal winner-selection acceptance (#252) is ``winning_output.audit_passed``
+            # below and is what resume reads; this key is never read back for selection.
+            "audit_passed": published_audit_passed(
+                winning_dict.get("status", "missing"),
+                winning_dict.get("audit_passed", False),
+                record.verdict if record is not None else None,
+            ),
             # terminal: True when this is the definitive sidecar written at
             # assembly time; False for a provisional mid-run incremental
             # flush from PP-2 that may be superseded by the authoritative write.
@@ -21204,6 +21234,17 @@ class UnifiedPipeline:
             # document, for the same reason a withheld table is not.
             and not unshipped_figure_marked_pages
         )
+        # #697/#1244: the recovered-prose bucket was computed and reported but never gated.
+        pages_ok = pages_ok and not scanned_prose_recovered_pages
+        # #1244 C1: the invariant behind every bucket above. A document is clean only if
+        # EVERY page has a final record with status SUCCESS; the bucket list is an allowlist
+        # of known defects, so a new defect class would repeat the hole. ``pages_ok`` is
+        # recorded first so the reason is named only where no bucket already names one.
+        incomplete_only_pages: list[int] = []
+        _incomplete_pages = _pages_not_success(pre_records, state.handle.page_count)
+        if pages_ok and _incomplete_pages:
+            incomplete_only_pages = _incomplete_pages
+        pages_ok = pages_ok and not _incomplete_pages
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS
@@ -22414,6 +22455,8 @@ class UnifiedPipeline:
             cost=state.total_cost,
             audit_passed=status == DocumentStatus.SUCCESS,
         )
+        if incomplete_only_pages:
+            final_result.error = _pages_not_success_note(incomplete_only_pages)
         # GH-189 piece 7: the chart crops must reach ``figure_refs`` even with
         # ordinary figure extraction switched off, and ``final_result.figures``
         # is the carrier every terminal sidecar writer reads.
@@ -22930,6 +22973,11 @@ class UnifiedPipeline:
                     )
                     final_result.pages[0].text = final_text
                     self._save_markdown(state, final_text, output_dir)
+                # #1244 C1: the FINAL records are authoritative. A page the figure phase,
+                # the final-body guard or ``_preserve_chart_regions`` demoted after
+                # ``pre_records`` was read must carry up to the document status, the
+                # metadata and the CLI result, not only to its own sidecar.
+                _late_incomplete = _pages_not_success(final_records, state.handle.page_count)
             else:
                 logger.warning(
                     "GH-226 final-body guard: split yielded %d page(s), expected %d; "
@@ -22937,6 +22985,47 @@ class UnifiedPipeline:
                     len(final_bodies),
                     state.handle.page_count,
                 )
+                # #1244 C1: no final record exists to read, so FAIL CLOSED: every page is
+                # a page without a final record, hence incomplete. A document that was
+                # SUCCESS on the pre-figure records cannot stay completed on a body whose
+                # pages cannot be told apart.
+                _late_incomplete = _pages_not_success([], state.handle.page_count)
+                # The sidecars flushed above are terminal SUCCESS records of pages whose
+                # final body could not be confirmed. Demote them to provisional so the
+                # per-page resume gate (``_load_terminal_page``) reprocesses them instead
+                # of skipping a page this run could not vouch for.
+                for pnum in range(1, state.handle.page_count + 1):
+                    try:
+                        self._flush_page_sidecar(
+                            state,
+                            pnum,
+                            output_dir,
+                            terminal=False,
+                            extra_figures=list(getattr(final_result, "figures", []) or []),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "#1244 C1 [%s]: could not demote page %d sidecar (%s)",
+                            state.handle.path.name,
+                            pnum,
+                            exc,
+                        )
+            if _late_incomplete and final_result.status == DocumentStatus.SUCCESS:
+                _late_note = _pages_not_success_note(_late_incomplete)
+                final_result.status = DocumentStatus.AUDIT_FAILED
+                final_result.audit_passed = False
+                state.status = DocumentStatus.AUDIT_FAILED
+                final_result.error = (
+                    f"{final_result.error}; {_late_note}" if final_result.error else _late_note
+                )
+                self._write_metadata(
+                    state,
+                    final_result,
+                    output_dir,
+                    has_text,
+                    provisional=figure_phase_failed,
+                )
+                metadata_rewritten = True
 
         # GH-993: a final recount that differs from the one already persisted (a caption
         # table the figure phase added, a guard rewrite) must reach metadata.json, which

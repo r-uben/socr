@@ -36,7 +36,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from socr.core.verdict import in_fresh_run_order
+from socr.core.verdict import in_fresh_run_order, published_audit_passed
 from socr.figures.unshipped_figures import (
     CHART_SKELETON_KIND,
     EVENT_KINDS,
@@ -341,7 +341,9 @@ def _updated_sidecar(sidecar: dict, output, verdict, decision) -> dict:
     out.update(decision.state_fields)
     out["status"] = winning.get("status", "missing")
     out["failure_mode"] = winning.get("failure_mode", "none")
-    out["audit_passed"] = winning.get("audit_passed", False)
+    out["audit_passed"] = published_audit_passed(
+        out["status"], winning.get("audit_passed", False), verdict
+    )
     out["verdict"] = verdict.to_dict()
     out["winning_output"] = winning
     out["page_fingerprint"] = (

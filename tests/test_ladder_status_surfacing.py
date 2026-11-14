@@ -34,6 +34,7 @@ from socr.core.document import DocumentHandle
 from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
+from c1_support import assert_clean_or_only_unchecked
 
 
 def _make_pipeline(**overrides) -> UnifiedPipeline:
@@ -185,7 +186,7 @@ class TestPagesOkAndDocumentStatus:
 
         result = pipeline._phase_assemble(state, tmp_path)
 
-        assert result.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result, pages=(1,))  # #1244 C1: see c1_support
         assert not (result.error and "table_rejected" in result.error)
         assert not (result.error and "table_unverified" in result.error)
 

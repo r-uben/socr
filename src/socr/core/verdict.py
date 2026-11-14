@@ -340,6 +340,43 @@ class PageVerdict:
         )
 
 
+def pages_not_success_note(pages: list[int]) -> str:
+    """The named reason a document with otherwise clean buckets is still not COMPLETED."""
+    return (
+        "page(s) "
+        + ", ".join(str(n) for n in pages)
+        + " did not finish with status success and a passing audit"
+    )
+
+
+def published_audit_passed(
+    status: Any, accepted: Any, verdict: PageVerdict | dict[str, Any] | None
+) -> bool:
+    """The PUBLISHED ``audit_passed`` label of a page sidecar (#1244 C1).
+
+    True only when the page is SUCCESS, the winner-selection acceptance was an explicit
+    ``True``, and the verdict holds no FAIL clause. UNKNOWN clauses do not block: the
+    status ladder already demotes what an UNKNOWN stops being allowed to ship as SUCCESS,
+    and a WARNING or ERROR page is false regardless of its clauses.
+
+    ``accepted`` is the INTERNAL acceptance (``PageOutput.audit_passed``, the #252
+    winner-selection flag, persisted as ``winning_output.audit_passed``). It is an input
+    here and is never written back: resume (``_load_terminal_page``) and selection read
+    the internal value, readers of the top-level key read this derivation.
+    """
+    if getattr(status, "value", status) != PageStatus.SUCCESS.value or accepted is not True:
+        return False
+    if verdict is None:
+        return True
+    if isinstance(verdict, PageVerdict):
+        results = [c.result.value for c in verdict.clauses]
+    else:
+        results = [
+            str(c.get("result")) for c in (verdict.get("clauses") or []) if isinstance(c, dict)
+        ]
+    return CheckResult.FAIL.value not in results
+
+
 def _flag(p: Any, name: str) -> bool:
     return bool(getattr(p, name, False))
 

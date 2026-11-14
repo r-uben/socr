@@ -1811,6 +1811,19 @@ TEXT_LAYER_NUMBERS_1185_DIFFERENCES: list[ExpectedDiff] = [
     ),
 ]
 
+#: #1244 C1: the PUBLISHED sidecar ``audit_passed`` is derived (status SUCCESS and no FAIL clause),
+#: so a page demoted to WARNING by #1185 no longer publishes ``true``. The internal winner-selection
+#: acceptance (``winning_output.audit_passed``) is deliberately NOT in this list: it must not move.
+PUBLISHED_AUDIT_PASSED_1244_DIFFERENCES: list[ExpectedDiff] = [
+    ExpectedDiff(
+        path=("sidecars", f"p6_corpus/pages/{page:05d}.json", "audit_passed"),
+        old_value=True,
+        new_value=False,
+        description=f"#1244 C1: page {page} is WARNING, so its published audit_passed is derived false; the internal acceptance in winning_output is untouched.",
+    )
+    for page in (4, 5, 7)
+]
+
 EXPECTED_STAGE_C_DIFFERENCE_ENTRIES: list[ExpectedDiff] = [
     *BUCKET_DIFFERENCES,
     *STATE_EVENT_DIFFERENCES,
@@ -1828,6 +1841,7 @@ EXPECTED_STAGE_C_DIFFERENCE_ENTRIES: list[ExpectedDiff] = [
     *TABLE_FLOOR_BODY_1266_DIFFERENCES,
     *NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES,
     *TEXT_LAYER_NUMBERS_1185_DIFFERENCES,
+    *PUBLISHED_AUDIT_PASSED_1244_DIFFERENCES,
 ]
 
 #: Exactly one entry per leaf path. The dict below would silently keep only the last entry
