@@ -700,6 +700,12 @@ def _unshipped_figure_clauses(p: Any) -> list[VerdictClause]:
     return clauses
 
 
+#: #1270 class 1: the mark of a page whose private-use codepoints are bullet or dingbat glyphs
+#: (``private_use_bullets_only``: the scan found none in a maths-font span). It states only the
+#: glyphs; it makes no claim about maths fonts or about what else was checked.
+BULLET_GLYPHS_REASON = "private-use bullet or dingbat glyphs in this page's native text layer"
+
+
 def _native_glyph_clause(
     p: Any, output: PageOutput, provenance: Any = None
 ) -> VerdictClause | None:
@@ -738,6 +744,13 @@ def _native_glyph_clause(
         # so it errs toward keeping the warning. Measured: 7 corpus pages with a qwen winner
         # were being told their mathematics is unrecovered PUA while a model reading ships.
         return None
+    if _flag(p, "private_use_bullets_only"):
+        # #1270 class 1: the scan found no private-use codepoint in a maths-font span, so the
+        # claim "unrecovered mathematics" is not established. Same check, result and scope as
+        # for any other private-use page (the page keeps its status): only the words change.
+        return VerdictClause(
+            Check.NATIVE_GLYPHS, CheckResult.FAIL, SCOPE_PAGE, BULLET_GLYPHS_REASON
+        )
     return VerdictClause(
         Check.NATIVE_GLYPHS,
         CheckResult.FAIL,
@@ -1423,6 +1436,20 @@ NO_NUMBER_LAYER_HAS_SOME_REASON = (
     "reading drops are not checked: #1218)"
 )
 DAMAGED_LAYER_PREFIX = "this page's text layer is damaged, and it does not confirm: "
+#: #1270 class 3: the layer the detector refused for its SHAPE alone (a contents page's dot
+#: leaders, spaced digits, few characters) after every damage check it skipped had run and
+#: passed. Its wording is the TRUE one: not damaged, not shown to be the whole page.
+SHAPE_REFUSED_LAYER_PREFIX = (
+    "this page's text layer was refused as a scan for its shape (not found damaged), and the "
+    "reading disagrees with it, which may be the layer's fault: "
+)
+#: Agreement with that layer. Reworded, never removed: no independent page-scope evidence exists
+#: for such a page, and agreement on the numbers the reading kept says nothing about the ones it
+#: dropped.
+SHAPE_REFUSED_LAYER_AGREES_REASON = (
+    "the reading's numbers agree with this page's text layer, which was refused as a scan for its "
+    "shape (not found damaged); no check covers what the reading omits"
+)
 #: The reading agrees with a layer socr's page analysis refused or found damaged. Not a
 #: CHECK: the owner's ruling asks for the page's OWN born-digital text, and a refused layer
 #: may be an earlier OCR run's the analysis could not name (Argon, PR #1219 review: #961's
@@ -1458,6 +1485,18 @@ def _layer_is_damaged(p: Any) -> bool:
     # digit, a garbage ratio) or an earlier OCR run's; it is compared so a dispute is
     # NAMED, and the refusal is the damage finding either way.
     return not _flag(p, "is_born_digital") or any(_flag(p, f) for f in _DAMAGED_LAYER_FLAGS)
+
+
+def _layer_is_shape_refused(p: Any) -> bool:
+    """#1270 class 3: refused as a scan for a shape reason ONLY, shown clean, and carrying none
+    of the digit-damage findings. ``layer_refused_for_shape_alone`` is set by the detector only
+    after every check its early return skipped has run and passed. ``_DAMAGED_LAYER_FLAGS`` are
+    read again here so a flag set later still wins. WORDING only: it never removes a mark."""
+    return (
+        not _flag(p, "is_born_digital")
+        and _flag(p, "layer_refused_for_shape_alone")
+        and not any(_flag(p, f) for f in _DAMAGED_LAYER_FLAGS)
+    )
 
 
 #: How socr's OWN quoted notes open, exactly: every quote opener socr emits (marks.py,
@@ -1599,11 +1638,20 @@ def text_layer_numbers_outcome(
         )
         return _found(VerdictClause(check, CheckResult.UNKNOWN, SCOPE_PAGE, reason))
     if _layer_is_damaged(p):
-        reason = (
-            DAMAGED_LAYER_PREFIX + describe_disputes(record)
-            if record.disputed
-            else DAMAGED_LAYER_AGREES_REASON
-        )
+        if _layer_is_shape_refused(p):
+            # #1270 class 3: the TRUE wording for a layer refused for its shape alone. Reworded,
+            # never removed (see SHAPE_REFUSED_LAYER_AGREES_REASON).
+            reason = (
+                SHAPE_REFUSED_LAYER_PREFIX + describe_disputes(record)
+                if record.disputed
+                else SHAPE_REFUSED_LAYER_AGREES_REASON
+            )
+        else:
+            reason = (
+                DAMAGED_LAYER_PREFIX + describe_disputes(record)
+                if record.disputed
+                else DAMAGED_LAYER_AGREES_REASON
+            )
         return _found(VerdictClause(check, CheckResult.UNKNOWN, SCOPE_PAGE, reason))
     if record.disputed and any(_flag(p, f) for f in _COSMETIC_LAYER_FLAGS):
         return _found(

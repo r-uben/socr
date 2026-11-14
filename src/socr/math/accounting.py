@@ -51,7 +51,7 @@ because its callers run inside repeated page finalization.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 #: The audit-event kind naming detected math-glyph damage that survived into the
 #: shipped page. One per affected page.
@@ -80,10 +80,17 @@ class UnresolvedMathDetail:
     regions_total: int
     regions_covered: int
     residual_pua: int
+    #: #1270 class 1: no private-use codepoint on the page is mathematics (bullets, dingbats).
+    #: The detail then says that, not that mathematics is unrecovered.
+    bullets_only: bool = False
 
     @property
     def detail(self) -> str:
         """The audit-event / note prose. Deterministic: no counts of runs or time."""
+        if self.bullets_only:
+            found = "private-use bullet or dingbat glyphs in this page's native text layer"
+            # Claim they ship only when private-use characters are in the shipped text.
+            return f"{found} ship in the page text" if self.residual_pua else found
         return (
             "born-digital native text shipped with unmapped math glyphs "
             "(private-use codepoints, weak ToUnicode) that no retained recovery "
@@ -167,6 +174,23 @@ def missing_coverage_witnesses(evidence: dict | None, text: str) -> list[str]:
 
 
 def unresolved_math_detail(
+    *,
+    has_unmapped_math_glyphs: bool,
+    evidence: dict | None,
+    text: str,
+    bullets_only: bool = False,
+) -> UnresolvedMathDetail | None:
+    """:func:`_unresolved_math_detail` with #1270's wording for a page whose private-use
+    codepoints are all bullets (the finding, the status and the clearing rules are unchanged)."""
+    detail = _unresolved_math_detail(
+        has_unmapped_math_glyphs=has_unmapped_math_glyphs, evidence=evidence, text=text
+    )
+    if detail is not None and bullets_only:
+        return replace(detail, bullets_only=True)
+    return detail
+
+
+def _unresolved_math_detail(
     *,
     has_unmapped_math_glyphs: bool,
     evidence: dict | None,

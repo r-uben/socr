@@ -7542,6 +7542,7 @@ def _apply_unresolved_math_guard(
         has_unmapped_math_glyphs=bool(getattr(p, "has_unmapped_math_glyphs", False)),
         evidence=getattr(p, "math_recovery_evidence", None),
         text=output.text or "",
+        bullets_only=bool(getattr(p, "private_use_bullets_only", False)),
     )
     if detail is None:
         return output
