@@ -159,9 +159,17 @@ def test_digit_drop_is_not_a_point_drop():
     assert reps == [] and refs[0].why == ("pair:digit_dropped",), (reps, refs)
 
 
-def test_sign_difference_refuses():
+def test_sign_difference_refuses_without_a_minus_in_the_table():
+    # #1282 step 2 (owner ruling D1) allows a sign repair, under extra conditions
+    # (tests/test_gh1282_sign_repair.py).  This one has no other negative value in the table.
     words = page(GDP, ("Japan", ["-.7", "1.2", "3.4"]))
     _, reps, refs = run(words, md(GDP, ("Japan", [".7", "1.2", "3.4"])))
+    assert reps == [] and refs[0].why == (rbc.REFUSE_SIGN_NO_MINUS_EVIDENCE,), (reps, refs)
+
+
+def test_a_sign_and_a_digit_difference_in_one_cell_refuses():
+    words = page(GDP, ("Japan", ["-.7", "1.2", "3.4"]))
+    _, reps, refs = run(words, md(GDP, ("Japan", ["8", "1.2", "3.4"])))
     assert reps == [] and refs[0].why == ("pair:sign_differs",), (reps, refs)
 
 

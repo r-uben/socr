@@ -80,6 +80,12 @@ def _page_repairs(stem: str):
     return doc, page, text, new, repaired, refused, regions
 
 
+def _row_has_a_sign_repair(reps, r) -> bool:
+    """A row with a flipped minus is repaired whole (its dropped points too): the point-only rule
+    refused such a row, so the 308-page list never had its cells."""
+    return any(o.md_line == r.md_line and o.kind == "sign" for o in reps)
+
+
 def test_the_cells_reproduce_on_the_shipping_pages_and_the_contradicted_ones_do_not():
     shipping_cells = 0
     shipping_pages = 0
@@ -87,7 +93,10 @@ def test_the_cells_reproduce_on_the_shipping_pages_and_the_contradicted_ones_do_
     for stem, rows in sorted(_expected().items()):
         doc, _page, text, new, repaired, _refused, _regions = _page_repairs(stem)
         got = Counter(
-            (r.label, r.col, r.old, r.new, r.native_line) for _i, reps in repaired for r in reps
+            (r.label, r.col, r.old, r.new, r.native_line)
+            for _i, reps in repaired
+            for r in reps
+            if not _row_has_a_sign_repair(reps, r)  # those rows are pinned by the test below
         )
         want = Counter(
             (r["row_label"], int(r["column"]), r["old"], r["new"], int(r["native_line"]))
@@ -163,3 +172,57 @@ def test_the_repaired_cell_is_the_pdfs_own_string():
                 seen += 1
         doc.close()
     assert seen > 0
+
+
+# The sign repairs (#1282 step 2) the 308 pages yield, each checked by hand against the rendered
+# page image (2026-11-13): `(page stem, label, column, old, new)`.  Every one is the printed value.
+# p085's `Previous Tealbook` row also gets its two dropped points (cols 6 and 9): that row used to be
+# refused whole because of its flipped minus, and its three cells are all printed as written.
+SIGN_REPAIRS = {
+    (
+        "fed-meetings-2008-2008-12-2008-12-16-greenbook-part1__p034",
+        "Unit labor costs",
+        6,
+        ".2",
+        "-.2",
+    ),
+    (
+        "fed-meetings-2010-2010-06-2010-06-23-tealbook-parta__p085",
+        "Previous Tealbook",
+        6,
+        "-2.",
+        "-.2",
+    ),
+    (
+        "fed-meetings-2010-2010-06-2010-06-23-tealbook-parta__p085",
+        "Previous Tealbook",
+        7,
+        "-.8",
+        ".8",
+    ),
+    (
+        "fed-meetings-2010-2010-06-2010-06-23-tealbook-parta__p085",
+        "Previous Tealbook",
+        9,
+        "-5.",
+        "-.5",
+    ),
+    ("fed-meetings-2017-2017-06-2017-06-14-tealbook-parta__p130", "Japan", 3, ".3", "-.3"),
+    ("fed-meetings-2017-2017-12-2017-12-13-tealbook-parta__p125", "Japan", 0, ".1", "-.1"),
+    ("fed-meetings-2017-2017-12-2017-12-13-tealbook-parta__p125", "Japan", 1, ".3", "-.3"),
+    ("fed-meetings-2017-2017-12-2017-12-13-tealbook-parta__p125", "China", 0, ".6", "-.6"),
+}
+
+
+def test_the_sign_repairs_on_the_real_pages_are_the_hand_checked_ones():
+    got = set()
+    for stem in sorted(_cases()):
+        doc, _page, _text, _new, repaired, _refused, _regions = _page_repairs(stem)
+        got |= {
+            (stem, r.label, r.col, r.old, r.new)
+            for _i, reps in repaired
+            for r in reps
+            if _row_has_a_sign_repair(reps, r)
+        }
+        doc.close()
+    assert got == SIGN_REPAIRS

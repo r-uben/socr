@@ -9578,7 +9578,11 @@ class UnifiedPipeline:
         try:
             from socr.core.pdf import open_pdf
             from socr.tables.locate import locate_tables
-            from socr.tables.row_binding_check import propose_page_point_repairs
+            from socr.tables.row_binding_check import (
+                propose_page_point_repairs,
+                repair_event_detail,
+                repair_row_dict,
+            )
 
             with open_pdf(state.handle.path) as doc:
                 if page_num < 1 or page_num > doc.page_count or doc[page_num - 1] is None:
@@ -9605,21 +9609,7 @@ class UnifiedPipeline:
         for table_index, reps in repaired:
             table_id = f"p{page_num}-t{table_index}"
             start = blocks[table_index].start
-            rows = [
-                {
-                    "table_line": r.md_line,  # within the table block: stable across the marks above the page
-                    "label": r.label,
-                    "col": r.col,
-                    "old": r.old,
-                    "new": r.new,
-                    "native_line": r.native_line,
-                    "printed_label": r.printed_label,
-                    "agreeing_values": r.agreeing_values,
-                    "n_values": r.n_values,
-                    "row_after": text_lines[start + r.md_line],
-                }
-                for r in reps
-            ]
+            rows = [repair_row_dict(r, text_lines[start + r.md_line]) for r in reps]
             ps.point_repairs[table_id] = rows
             cells += len(rows)
             ps.point_repair_events.append(
@@ -9627,11 +9617,7 @@ class UnifiedPipeline:
                     page_num=page_num,
                     kind=TABLE_POINT_REPAIRED_KIND,
                     engine=bo.engine or "",
-                    detail=(
-                        f"table {table_id}: {len(rows)} cell(s) restored from the page's text "
-                        "layer (the model dropped the decimal point): "
-                        + ", ".join(f"{r['old']} -> {r['new']}" for r in rows)
-                    ),
+                    detail=repair_event_detail(table_id, rows),
                     data={"table_id": table_id, "rows": rows},
                 )
             )

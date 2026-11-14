@@ -131,6 +131,8 @@ def repair_page(
         effective_outcome,
         layer_can_judge_tables,
         propose_page_point_repairs,
+        repair_event_detail,
+        repair_row_dict,
         row_evidence_dicts,
         table_payload,
     )
@@ -205,31 +207,13 @@ def repair_page(
         rows_data = None
         if reps:
             start = blocks[idx].start
-            rows_data = [
-                {
-                    "table_line": r.md_line,
-                    "label": r.label,
-                    "col": r.col,
-                    "old": r.old,
-                    "new": r.new,
-                    "native_line": r.native_line,
-                    "printed_label": r.printed_label,
-                    "agreeing_values": r.agreeing_values,
-                    "n_values": r.n_values,
-                    "row_after": lines[start + r.md_line],
-                }
-                for r in reps
-            ]
+            rows_data = [repair_row_dict(r, lines[start + r.md_line]) for r in reps]
             cells.extend((table_id, r.label, r.old, r.new) for r in reps)
             repair_events.append(
                 {
                     "kind": TABLE_POINT_REPAIRED_KIND,
                     "engine": output.engine or "",
-                    "detail": (
-                        f"table {table_id}: {len(rows_data)} cell(s) restored from the page's text "
-                        "layer (the model dropped the decimal point): "
-                        + ", ".join(f"{r['old']} -> {r['new']}" for r in rows_data)
-                    ),
+                    "detail": repair_event_detail(table_id, rows_data),
                     "data": {"table_id": table_id, "rows": rows_data},
                 }
             )
