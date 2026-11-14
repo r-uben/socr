@@ -211,14 +211,26 @@ def test_the_predicate_does_not_read_the_judges_reason() -> None:
 @pytest.mark.parametrize(
     "out",
     [
-        pytest.param(_out(accepted=False), id="the judge refused"),
-        pytest.param(_out(accepted=None), id="no acceptance recorded"),
-        pytest.param(_out(outcome=""), id="no judge outcome"),
-        pytest.param(_out(engine="native"), id="not a model reading"),
+        pytest.param(_out(), id="judge accepted, outcome completed"),
+        pytest.param(_out(outcome=""), id="empty judge outcome (the crop-patched re-judge)"),
+        pytest.param(_out(accepted=None, outcome=""), id="no judge field at all"),
+        pytest.param(_out(accepted=False), id="the judge did not accept"),
     ],
 )
-def test_only_a_judge_accepted_model_reading_is_in_scope(out: PageOutput) -> None:
-    assert _judge_only(out, _p(own_layer_word_reference="")) == []
+def test_the_predicate_keys_on_the_absence_of_evidence_not_on_the_judge_fields(
+    out: PageOutput,
+) -> None:
+    """Ruling (Fable 2): ANY model reading that would ship SUCCESS needs the independent evidence.
+    With the layer's words it is clean whatever the judge fields say; without them it is marked
+    whatever the judge fields say."""
+    assert [c.reason for c in _judge_only(out, _p(own_layer_word_reference=""))] == [
+        JUDGE_ONLY_REASON
+    ]
+    assert silent_success_clauses(out, _p()) == ()
+
+
+def test_a_reading_that_is_not_a_model_reading_is_out_of_scope() -> None:
+    assert _judge_only(_out(engine="native"), _p(own_layer_word_reference="")) == []
 
 
 def test_a_cloud_reading_is_in_scope_and_the_wording_does_not_name_who_judged() -> None:
@@ -557,11 +569,16 @@ def test_an_altered_side_file_is_not_restored_and_says_so(
     (tmp_path / "00001.judge-calls").write_text('[{"outcome": "verdict"}]', encoding="utf-8")
     ref = {"path": "00001.judge-calls", "sha256": "sha256:other", "count": 1}
     with caplog.at_level("WARNING"):
-        got = UnifiedPipeline._load_page_judge_calls(tmp_path, 1, ref)
-    assert got == [] and "could not be restored" in caplog.text
+        calls, lost, _prior = UnifiedPipeline._load_page_judge_calls(tmp_path, 1, ref)
+    assert calls == [] and "could not be restored" in caplog.text
+    assert lost is not None and lost["ref"] == ref, "the reference is kept to be flagged, not lost"
     good = {"path": "00001.judge-calls", "sha256": sha256_text('[{"outcome": "verdict"}]')}
-    assert UnifiedPipeline._load_page_judge_calls(tmp_path, 1, good) == [{"outcome": "verdict"}]
-    assert UnifiedPipeline._load_page_judge_calls(tmp_path, 2, good) == []
+    assert UnifiedPipeline._load_page_judge_calls(tmp_path, 1, good) == (
+        [{"outcome": "verdict"}],
+        None,
+        None,
+    )
+    assert UnifiedPipeline._load_page_judge_calls(tmp_path, 2, good)[0] == []
 
 
 def test_the_deadline_hit_is_a_call_without_a_reply() -> None:

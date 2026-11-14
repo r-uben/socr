@@ -46,6 +46,21 @@ def _no_words_check(monkeypatch):
 
 
 PAGES = 4
+#: #1251: one word of its own per page, at a place of its own (a line repeated on every page is
+#: furniture the words check does not owe, so without it the run that reads the whole document
+#: owes nothing and the check would not run). The stub reading is a faithful copy of the page's
+#: layer (`_page_layer_text`), so the REAL words check runs and passes on every undamaged page,
+#: whether or not the document-wide furniture scan succeeded (it fails in the damaged run).
+_PAGE_WORDS = ("heterogeneity", "robustness", "specification", "instrument")
+_LINES_PER_PAGE = 14
+
+
+def _page_layer_text(p: int) -> str:
+    """The text `_pdf` prints on page *p* (one-based), as a faithful reading of it."""
+    lines = [f"Page {p} coefficient 0.082 significant at 1 percent"] * _LINES_PER_PAGE
+    return "\n".join([*lines, _PAGE_WORDS[p - 1]])
+
+
 BAD_INDEX = 1  # zero-based: page 2
 BAD_PAGE = BAD_INDEX + 1
 
@@ -55,11 +70,12 @@ def _pdf(path: Path) -> Path:
     for p in range(PAGES):
         page = doc.new_page()
         y = 80
-        for _ in range(14):
+        for _ in range(_LINES_PER_PAGE):
             page.insert_text(
                 (60, y), f"Page {p + 1} coefficient 0.082 significant at 1 percent", fontsize=9
             )
             y += 16
+        page.insert_text((60 + 100 * p, 400), _PAGE_WORDS[p], fontsize=9)
     doc.save(str(path))
     doc.close()
     return path
@@ -112,7 +128,12 @@ def _pipeline(**overrides) -> UnifiedPipeline:
     pipe._resolve_judge_model = lambda: ""
     pipe._resolve_crop_vlm_model = lambda: None
     pipe._run_engine_on_pages = lambda state, nums, nat, eng, phase, profile=None, **kw: [
-        PageOutput(page_num=p, text=f"ocr {p}", status=PageStatus.SUCCESS, engine="qwen")
+        PageOutput(
+            page_num=p,
+            text=_page_layer_text(p),
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+        )
         for p in nums
     ]
     return pipe
@@ -166,22 +187,18 @@ def test_detect_on_an_undamaged_document_sets_no_load_error(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_the_other_pages_are_processed_and_the_bad_page_is_failed(tmp_path, monkeypatch):
+def test_the_other_pages_are_processed_and_the_bad_page_is_failed(tmp_path):
     # #1251: the undamaged run's pages are judge-approved model readings, and a judge's approval
     # alone is not a check; without the words check the whole undamaged document would end
-    # AUDIT_FAILED like the damaged one and the status difference below would vanish. Its
-    # independent check is the layer's words (the fixture's lines repeat on every page, so a real
-    # reference would be empty furniture; its words are given here), none of which is missing.
-    from socr.tables.layer_words import WordReference
-
-    monkeypatch.setattr(
-        "socr.tables.layer_words.word_reference_from_page",
-        lambda page, **kw: WordReference("coefficient significant percent"),
-    )
-    monkeypatch.setattr("socr.tables.layer_words.missing_words", lambda *a, **k: [])
+    # AUDIT_FAILED like the damaged one and the status difference below would vanish. Their
+    # independent check is the layer's words, and it is the REAL check (nothing stubs it): the
+    # reading carries the page's own word, so the check passes (asserted on the trace below).
     _, _, out_bad, bad = _run(tmp_path, BAD_INDEX, "bad")
     _, _, out_ok, ok = _run(tmp_path, None, "ok")
     dd_bad, dd_ok = _doc_dir(out_bad), _doc_dir(out_ok)
+    for n in range(1, PAGES + 1):
+        words = [e for e in _sidecar(dd_ok, n)["checks"] if e["check"] == "text_layer_words"]
+        assert [e["result"] for e in words] == ["PASS"], (n, words)
 
     # The difference: the same document, damaged or not. Without the per-page
     # catch the damaged run raised out of _phase_analyze and wrote nothing.

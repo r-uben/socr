@@ -1823,6 +1823,10 @@ WORDS_TABLE_WITHHELD_REASON = (
     "socr withheld a table on this page, so the words missing from it are missing by design"
 )
 WORDS_PASS_REASON = "every word this page's own text layer prints is on the page"
+#: #1251: the PASS entry names how much it compared, so a pass on four words reads as one.
+WORDS_PASS_COUNTED_REASON = (
+    WORDS_PASS_REASON + " (compared {compared} word(s); the page ships {shipped})"
+)
 WORDS_NONE_OWED_REASON = (
     "the page's own text layer owes no word to compare (a figure ships in place of its "
     "words, or no word remains after the exclusions): nothing was checked"
@@ -1904,9 +1908,16 @@ def _missing_words_outcome(
     # check does the same), and it is not a clause (the verdict is unchanged), so it is NOT_RUN.
     if _word_layer_is_damaged(p):
         return missing, _not_run(check, WORDS_LAYER_NOT_EVIDENCE_REASON)
-    if _words_owed(output, p) == 0:
+    owed = _words_owed(output, p)
+    if owed == 0:
         return missing, _not_applicable(check, WORDS_NONE_OWED_REASON)
-    return missing, _passed(check, reason=WORDS_PASS_REASON)
+    from socr.tables.layer_words import word_tokens
+
+    shipped_words = sum(word_tokens(shipped).values())
+    return missing, _passed(
+        check,
+        reason=WORDS_PASS_COUNTED_REASON.format(compared=owed, shipped=shipped_words),
+    )
 
 
 def text_layer_words_outcome(output: PageOutput, p: Any) -> CheckOutcome:
@@ -2120,34 +2131,29 @@ def independent_page_evidence(entries: Iterable[TraceEntry], text: str) -> bool:
     )
 
 
-def _judge_accepted(output: PageOutput) -> bool:
-    """The page judge COMPLETED and accepted this reading (typed fields, never the reason)."""
-    from socr.core.result import JUDGE_OUTCOME_COMPLETED
-
-    return output.judge_outcome == JUDGE_OUTCOME_COMPLETED and output.judge_accepted is True
-
-
 def _judge_only_clauses(
     output: PageOutput, p: Any, event_kinds: frozenset[str]
 ) -> tuple[VerdictClause, ...]:
-    """``page_judge=UNKNOWN`` on a model reading whose acceptance is the page judge's alone.
+    """``page_judge=UNKNOWN`` on a model reading that would ship SUCCESS with no independent check.
 
     #1251. Every defective model page the four auditors found had been judged faithful by a
     model call on the same page, so the acceptance carries no information: it may warn or reject
-    (untouched), it does not confirm. The predicate is the ABSENCE of independent evidence on the
-    shipped text (:func:`independent_page_evidence`), evaluated from the checks' own outcomes, so
-    it does not read the judge's reason. Fires on a page still SUCCESS, or on one this clause
-    itself demoted (every later pass derives it again, like #1181's).
+    (untouched), it does not confirm. The predicate keys on the ABSENCE of evidence, not on any
+    judge field: ANY model reading that would ship SUCCESS (an accepted judge outcome, an empty
+    one, a crop-patched re-judge, no judge field at all) needs the digest-verified independent
+    evidence on the shipped text (:func:`independent_page_evidence`), or it gets the clause. It
+    reads no judge reason. Fires on a page still SUCCESS, or on one this clause itself demoted
+    (every later pass derives it again, like #1181's).
 
-    Not fired when the page was accepted without a judge (#1181 owns that), and not on a page the
-    judge did not accept: those carry their own refusal clause.
+    Not fired when #1181 owns the page (its table-exact accept without a judge). A page the
+    judge refused is not SUCCESS and carries its own refusal clause.
     """
     if not (
         output.status is PageStatus.SUCCESS
         or output.failure_mode is FailureMode.READING_UNCORROBORATED
     ):
         return ()
-    if not _is_model_reading(output) or not _judge_accepted(output):
+    if not _is_model_reading(output):
         return ()
     if _exact_pass_unjudged_outcome(output, event_kinds).clause is not None:
         return ()
@@ -2203,7 +2209,7 @@ def with_judge_only_clause(
         return published
     if output.status is not PageStatus.SUCCESS:
         return published
-    if not _is_model_reading(output) or not _judge_accepted(output):
+    if not _is_model_reading(output):
         return published
     if _exact_pass_unjudged_outcome(output, event_kinds).clause is not None:
         return published
@@ -2221,6 +2227,36 @@ def with_judge_only_clause(
 
         entries = list(trace_from_dicts(reconciled) or ())
     clauses = _judge_only_clause_on(entries, text)
+    if not clauses:
+        return published
+    return replace(published, clauses=clauses)
+
+
+def resumed_verdict_with_judge_only_clause(
+    published: PageVerdict,
+    output: PageOutput,
+    replay: tuple[TraceEntry, ...] | None,
+    event_kinds: frozenset[str] = frozenset(),
+) -> PageVerdict:
+    """A resumed page's *published* verdict, with #1251's clause when the trace it will WRITE
+    holds no independent evidence of the text it ships.
+
+    A terminal resumed page takes its published verdict (:func:`build_page_verdict`), and an
+    EMPTY published verdict on a SUCCESS page used to win over the trace. The trace written for
+    that page is *replay* (the entries its sidecar carries; none when the sidecar recorded no
+    trace, which writes every slot NOT_RUN), each PASS kept only when it names the text that
+    ships (:func:`verify_pass_digests`). So the clause is derived from that written trace, the
+    same predicate a live run applies, and a missing, stale or wrong-text PASS in a sidecar
+    cannot ship SUCCESS. Every other published clause is kept as it stands: a verdict that
+    carries any clause is returned unchanged (the page is already demoted and marked).
+    """
+    if published.clauses or output.status is not PageStatus.SUCCESS:
+        return published
+    if not _is_model_reading(output):
+        return published
+    if _exact_pass_unjudged_outcome(output, event_kinds).clause is not None:
+        return published
+    clauses = _judge_only_clause_on(replay or (), output.text or "")
     if not clauses:
         return published
     return replace(published, clauses=clauses)

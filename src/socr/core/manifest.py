@@ -86,6 +86,7 @@ from socr.core.verdict import (
     build_page_verdict,
     build_pass_trace,
     marks_to_write,
+    resumed_verdict_with_judge_only_clause,
 )
 from socr.core.state import DocumentState, PageState, layer_is_admissible_evidence
 
@@ -7987,11 +7988,20 @@ def _select_and_finalize_page(
     _page_event_kinds = frozenset(
         getattr(ev, "kind", "") for ev in state.events if getattr(ev, "page_num", None) == page_num
     )
+    # #1251: a resumed page's published verdict is completed from the trace this pass will
+    # WRITE (its replay, digest-verified), never trusted when empty over a trace with no evidence.
+    _published = getattr(p, "published_verdict", None)
+    _replay = getattr(p, "published_checks", None)
+    _replay = _replay if isinstance(_replay, tuple) else None
+    if _published is not None:
+        _published = resumed_verdict_with_judge_only_clause(
+            _published, output, _replay, _page_event_kinds
+        )
     output, verdict = _apply_verdict_marks(
         output,
         p,
         page_num,
-        published=getattr(p, "published_verdict", None),
+        published=_published,
         # #1145 slice 3: the KINDS of this page's audit events, which is where the lanes
         # record what they did. ``state.events`` is document-level, so the page's own are
         # filtered here with the same predicate the sidecar writer uses (``ev.page_num``).
@@ -8110,8 +8120,6 @@ def _select_and_finalize_page(
     # #1183: the pass trace, from the FINAL bytes and verdict. A terminal page restored from a
     # sidecar that carries a trace replays it unchanged; one whose sidecar predates the trace
     # states every check NOT_RUN. Only a page this run read computes its checks.
-    _replay = getattr(p, "published_checks", None)
-    _replay = _replay if isinstance(_replay, tuple) else None
     checks = build_pass_trace(
         output,
         p,

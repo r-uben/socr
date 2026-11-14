@@ -44,14 +44,14 @@ socr's source, so a resume on new code re-OCRs every page).
 
 from __future__ import annotations
 
-from socr.core.page_files import page_sidecar_paths
-
 import argparse
 import json
 import sys
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
+
+from socr.core.page_files import page_sidecar_paths
 from socr.core.verdict import (
     PageVerdict,
     published_audit_passed,

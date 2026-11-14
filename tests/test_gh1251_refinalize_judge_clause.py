@@ -189,15 +189,27 @@ def test_helper_drops_the_clause_when_the_page_gains_another() -> None:
 
 @pytest.mark.parametrize(
     "kw",
-    [
-        {"judge_accepted": False},
-        {"judge_accepted": None},
-        {"engine": "native"},
-        {"judge_outcome": "page_judge_verifier_error"},
-        {"status": PageStatus.WARNING},
-    ],
+    [{"engine": "native"}, {"status": PageStatus.WARNING}],
+    ids=["not a model reading", "not SUCCESS"],
 )
-def test_helper_is_scoped_to_an_accepted_model_reading_still_success(kw) -> None:
+def test_helper_is_scoped_to_a_model_reading_still_success(kw) -> None:
     assert with_judge_only_clause(PageVerdict(page_num=1), _output(**kw), []) == PageVerdict(
         page_num=1
     )
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"judge_accepted": False},
+        {"judge_accepted": None},
+        {"judge_outcome": "page_judge_verifier_error"},
+        {"judge_outcome": "", "judge_accepted": None},
+    ],
+    ids=["refused", "no acceptance", "other outcome", "no judge field"],
+)
+def test_helper_keys_on_the_absence_of_evidence_not_on_the_judge_fields(kw) -> None:
+    """Ruling (Fable 2): a model reading still SUCCESS with no evidence gets the clause whatever
+    its judge fields say."""
+    got = with_judge_only_clause(PageVerdict(page_num=1), _output(**kw), [])
+    assert [c.reason for c in got.clauses] == [JUDGE_ONLY_REASON]

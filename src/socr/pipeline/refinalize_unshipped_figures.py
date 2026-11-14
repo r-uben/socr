@@ -28,8 +28,6 @@ Run it as ``socr-refinalize-unshipped-figures <out_dir> --pdf-dir <dir> [--dry-r
 
 from __future__ import annotations
 
-from socr.core.page_files import page_sidecar_paths
-
 import argparse
 import json
 import re
@@ -38,6 +36,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from socr.core.page_files import page_sidecar_paths
 from socr.core.verdict import (
     in_fresh_run_order,
     published_audit_passed,
@@ -548,9 +547,8 @@ def refinalize_document(
     manifest_path = doc_dir / "manifest.json"
     if manifest_path.is_file():
         from socr.core.cache import BlobStore
-        from socr.core.result import PageOutput
-
         from socr.core.manifest import page_asset_refs
+        from socr.core.result import PageOutput
 
         manifest = _read_json(manifest_path)
         store = BlobStore(doc_dir / "cache")

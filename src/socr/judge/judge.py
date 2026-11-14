@@ -88,7 +88,13 @@ class JudgeReplyTruncatedError(RuntimeError):
     judge defect, and only a timeout may license #713's credentialed stand-in.
     A truncated reply is never parsed -- ``_extract_json``'s first-``{``-to-
     last-``}`` fallback could otherwise read a verdict out of a fragment.
+
+    ``raw`` is the (cut) reply, kept for the audit record of the call (#1251); it is never parsed.
     """
+
+    def __init__(self, message: str, raw: str = "") -> None:
+        super().__init__(message)
+        self.raw = raw
 
 
 #: #713: exception TYPES that mean the PAGE judge never returned a verdict
@@ -188,14 +194,18 @@ JUDGE_CALL_DEADLINE = "deadline_exceeded"
 
 
 def page_judge_prompt_sha256() -> str:
-    """SHA-256 of the page-judge prompt template (the same digest the run manifest records as
-    ``page_judge_prompt_digest``), or a marker when the file is unreadable."""
+    """SHA-256 of the page-judge prompt template, read at call time: THE prompt identity, shared by
+    the run manifest (``page_judge_prompt_digest``, which keys the resume ledger) and every
+    judge-call record, so the two can never describe different prompts. An unreadable template
+    yields a unique marker, never a digest, so nothing resumes on a prompt nobody could read."""
     import hashlib
 
     try:
         return hashlib.sha256(load_judge_prompt().encode("utf-8")).hexdigest()
     except OSError:
-        return "unreadable-page-judge-prompt"
+        import uuid
+
+        return f"unreadable-page-judge-prompt:{uuid.uuid4().hex}"
 
 
 def judge_call_record(
@@ -238,7 +248,23 @@ def judge_call_record(
             "type": type(error).__name__,
             "message": str(error)[:JUDGE_CALL_ERROR_MAX_CHARS],
         }
+        # A reply that did not parse is still a reply: the backend returned it and the parser
+        # refused it, so the full text is kept (the exception's own message is a cut excerpt).
+        raw_reply = getattr(error, "raw", None)
+        if isinstance(raw_reply, str):
+            record["reply"] = raw_reply
+            record["reply_chars"] = len(raw_reply)
     return record
+
+
+class JudgeReplyUnparseableError(ValueError):
+    """A judge's reply could not be read as a verdict. Carries the FULL reply as ``raw``: the
+    backend did return it, and the audit record of the call keeps it (#1251). A ``ValueError``,
+    as the parse failures always were, so no existing handler changes."""
+
+    def __init__(self, message: str, raw: str) -> None:
+        super().__init__(message)
+        self.raw = raw
 
 
 class Judge(Protocol):
@@ -271,8 +297,15 @@ def _extract_json(text: str) -> dict:
 
 
 def parse_verdict(text: str) -> JudgeVerdict:
-    """Parse a model response into a JudgeVerdict, coercing/validating fields."""
-    data = _extract_json(text)
+    """Parse a model response into a JudgeVerdict, coercing/validating fields.
+
+    A reply that cannot be read raises :class:`JudgeReplyUnparseableError` holding the reply."""
+    try:
+        data = _extract_json(text)
+        if not isinstance(data, dict):
+            raise ValueError(f"judge output is not a JSON object: {text[:200]!r}")
+    except ValueError as exc:
+        raise JudgeReplyUnparseableError(str(exc), raw=text) from exc
     faithful = bool(data.get("faithful", False))
     issues = [str(i) for i in data.get("issues", []) or []]
     try:

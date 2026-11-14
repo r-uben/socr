@@ -607,7 +607,7 @@ def _record_verdict(page: Page, v: Verdict, rep: Report) -> None:
 
 CANONICAL_PAGE_FILE_RE = re.compile(r"(\d{5})\.(json|md)")
 #: #1251: ``NNNNN.judge-calls``, the page judge's calls (``core.page_files``): not a page file.
-JUDGE_CALLS_FILE_RE = re.compile(r"\d{5}\.judge-calls")
+JUDGE_CALLS_FILE_RE = re.compile(r"\d{5}\.judge-calls(\.unrestored)?")
 
 
 @dataclass

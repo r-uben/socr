@@ -28,8 +28,6 @@ Run it as ``socr-refinalize-prior-ocr <out_dir> [--dry-run]``.
 
 from __future__ import annotations
 
-from socr.core.page_files import page_sidecar_paths
-
 import argparse
 import json
 import re
@@ -37,6 +35,8 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+
+from socr.core.page_files import page_sidecar_paths
 from socr.core.pass_trace import trace_to_dicts
 from socr.core.verdict import published_audit_passed
 
@@ -253,9 +253,9 @@ def _with_readings_judged(
     floor pages), and exactly one reading may match -- a resumed or retried document holds
     several, and another reading of the same page standing in for this one could judge a
     table reading as prose."""
-    from socr.pipeline.orchestrator import ATTEMPT_SUMMARY_REASON_MAX_CHARS
     from socr.core.manifest import reading_holds_a_table
     from socr.core.result import PageOutput
+    from socr.pipeline.orchestrator import ATTEMPT_SUMMARY_REASON_MAX_CHARS
 
     rows = sidecar.get("attempts_summary") or []
     if _judged(sidecar):

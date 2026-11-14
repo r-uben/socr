@@ -23,8 +23,6 @@ Resume after ``re_ocr`` demotions uses two gates:
 
 from __future__ import annotations
 
-from socr.core.page_files import page_sidecar_paths
-
 import argparse
 import json
 import sys
@@ -32,6 +30,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from socr.core.page_files import page_sidecar_paths
 from socr.core.verdict import PageVerdict, write_reconciled_trace
 
 LOG_NAME = "refinalized_boilerplate.json"

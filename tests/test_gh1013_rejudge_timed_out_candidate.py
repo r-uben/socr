@@ -38,9 +38,10 @@ _MODEL_TEXT = "model read of the page: the estimate is 0.42 with n = 117 observa
 _OTHER_TEXT = "a DIFFERENT model read produced by the ladder in run 2, estimate 0.43"
 _NATIVE_TEXT = "native layer of the page with garbled symbols and enough words to count"
 # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
-_CONTROL_LAYER = "born-digital layer of the page: the estimate is 0.42 with n = 117 observations"
-#: The words the control layer owes the reading (all of them are in ``_MODEL_TEXT``).
-_CONTROL_LAYER_WORDS = "the estimate is with observations"
+_CONTROL_LAYER = "the estimate is 0.42 with n = 117 observations"
+#: #1251: the words the control layer owes the reading are ALL of its words: the real words check
+#: compares exactly the layer's text, and ``_MODEL_TEXT`` carries every one of them.
+_CONTROL_LAYER_WORDS = _CONTROL_LAYER
 
 
 @pytest.fixture(autouse=True)
@@ -465,6 +466,9 @@ def test_fields_set_by_verification_survive_to_the_ship(tmp_path, monkeypatch) -
         assert _MODEL_TEXT in h.shipped()
     # #1185: the control reading was compared against its own layer and agreed.
     assert_agreed_on(calls, "0.42 with n = 117")
+    # #1251: and the REAL words check passed on it (the check that stands in for the judge).
+    words = [e for e in plain.sidecar()["checks"] if e["check"] == "text_layer_words"]
+    assert [e["result"] for e in words] == ["PASS"], words
     assert plain.sidecar()["winning_output"]["engine"] == "qwen"  # still a model reading
     # Differ in exactly the verification annotation.
     assert plain.sidecar()["winning_output"]["status"] == "success"

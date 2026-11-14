@@ -1053,13 +1053,16 @@ class VLMPageJudge:
         # page's side file holds it. ``None`` keeps the judge usable standalone.
         self._record_call = record_call
 
-    def _record(self, record: dict) -> None:
+    def _record(self, page_num: int, build_record: Callable[[], dict]) -> None:
+        """Hand one call record to the recorder. The record is BUILT in here, inside the same
+        fail-open boundary as the hand-over: a failure to build or keep it must never decide a
+        verdict, replace a judge's own exception, or fail the page."""
         if self._record_call is None:
             return
         try:
-            self._record_call(record)
-        except Exception as exc:  # a record failure must never decide a verdict
-            logger.warning("page-judge call record failed on p%s: %s", record.get("page"), exc)
+            self._record_call(build_record())
+        except Exception as exc:
+            logger.warning("page-judge call record failed on p%s: %s", page_num, exc)
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
         from socr.judge.judge import (
@@ -1076,23 +1079,25 @@ class VLMPageJudge:
             verdict = self._judge.judge(image_path, output.text)
         except Exception as exc:
             self._record(
-                judge_call_record(
+                output.page_num,
+                lambda exc=exc: judge_call_record(
                     page_num=output.page_num,
                     outcome=JUDGE_CALL_TIMEOUT if is_page_judge_timeout(exc) else JUDGE_CALL_ERROR,
                     judge=self._judge,
                     reading=output.text,
                     error=exc,
-                )
+                ),
             )
             raise
         self._record(
-            judge_call_record(
+            output.page_num,
+            lambda: judge_call_record(
                 page_num=output.page_num,
                 outcome=JUDGE_CALL_VERDICT,
                 judge=self._judge,
                 reading=output.text,
                 verdict=verdict,
-            )
+            ),
         )
         return AcceptDecision(
             accept=bool(verdict.faithful),

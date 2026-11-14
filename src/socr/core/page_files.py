@@ -11,6 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 
 JUDGE_CALLS_SUFFIX = ".judge-calls"
+#: A judge-calls file that could not be read back, moved aside (kept) when new calls replace it.
+JUDGE_CALLS_UNRESTORED_SUFFIX = ".unrestored"
 
 
 def judge_calls_path(pages_dir: Path, page_num: int) -> Path:
