@@ -483,7 +483,9 @@ def test_splice_replaces_only_exact_corrupt_substring():
     assert r"P(A \text{ or } B) = P(A) + P(B)" in out
     assert "syntax only, non-authoritative" in out
     assert "![Corrupt equation crop](equations/crop.png)" in out
-    assert "¼" not in out and "ð" not in out
+    # #1305: the native line is never deleted; the candidate sits after it.
+    assert out.index(_EQ) < out.index("![Corrupt equation crop]") < out.index("P(A \\text")
+    assert "equation candidate, unverified" in out
 
 
 @pytest.mark.parametrize(
@@ -571,7 +573,12 @@ def test_identical_source_occurrences_align_and_replace_independently():
     assert second.source_aligned is True
     assert "![Corrupt equation crop](equations/first.png)" in out
     assert "![Corrupt equation crop](equations/second.png)" in out
-    assert _EQ not in out
+    assert out.count(_EQ) == 2  # #1305: both native lines are kept
+    # each native occurrence precedes its OWN crop
+    first_native = out.index(_EQ)
+    second_native = out.index(_EQ, out.index("intervening prose"))
+    assert first_native < out.index("equations/first.png") < out.index("intervening prose")
+    assert second_native < out.index("equations/second.png")
     # Round 3 regression: each duplicate source consumes its OWN occurrence,
     # in page order -- not both matching str.replace's first occurrence.
     assert (

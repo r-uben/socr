@@ -1199,6 +1199,17 @@ REFUSE_NO_AGREEING = "no_agreeing_value"
 REFUSE_AFFIX = "token_affix_differs"
 REFUSE_SHARED_REGION = "region_shared_with_another_block"
 REFUSE_RIVAL_LINE = "another_line_prints_the_label_close_to_the_row"
+# Sign repair (#1282, plan A2 step 2): one refusal per extra condition.
+REFUSE_SIGN_GEOMETRY = "minus_not_attached_to_its_number_by_geometry"
+REFUSE_SIGN_NO_MINUS_EVIDENCE = "layer_shows_no_minus_in_this_table"
+REFUSE_SIGN_MIRROR = "mirror_row_prints_the_same_absolute_values"
+
+# The kinds of differing pair a repair may fix, one per cell (``_classify_pair``).  Both at once in
+# one cell is ``point_and_sign``: refused, never repaired.
+REPAIR_POINT = "point"
+REPAIR_SIGN = "sign"
+_REPAIRABLE_PAIRS = frozenset({"point_dropped", "sign_flipped"})
+_PAIR_TO_REPAIR_KIND = {"point_dropped": REPAIR_POINT, "sign_flipped": REPAIR_SIGN}
 
 # A numeric token split into what stands before the number, the number and what follows it
 # (`-.7%` -> "", "-.7", "%").  The affixes of the shipped token and of the native one must be
@@ -1256,11 +1267,35 @@ def point_dropped(shipped: str, native: str) -> bool:
     return _digits_apart_from_point(shipped) == _digits_apart_from_point(native)
 
 
+def _is_zero(canon: str) -> bool:
+    try:
+        return float(canon.lstrip("-")) == 0.0
+    except ValueError:
+        return False
+
+
+def sign_flipped(shipped: str, native: str) -> bool:
+    """Canonical *shipped* and *native* print the SAME digits, point included, and only the sign
+    differs (``-3.0`` / ``3.0``), and the value is not zero (``0``, ``0.0``, ``-0`` carry no sign).
+    A cell that is off in the point as well (``-3`` / ``.3``) is not a sign flip: one difference
+    per cell (#1282, plan A2 step 2)."""
+    if shipped.startswith("-") == native.startswith("-"):
+        return False
+    unsigned = shipped.lstrip("-")
+    return unsigned == native.lstrip("-") and not _is_zero(unsigned)
+
+
 def _classify_pair(shipped: str, native: str) -> str:
-    """Why a differing pair is or is not a point drop (for the refusal reasons)."""
+    """Why a differing pair is or is not a point drop or a sign flip (for the refusal reasons)."""
     if point_dropped(shipped, native):
         return "point_dropped"
     if shipped.startswith("-") != native.startswith("-"):
+        if sign_flipped(shipped, native):
+            return "sign_flipped"
+        if shipped.lstrip("-") == native.lstrip("-"):
+            return "sign_of_zero"
+        if _digits_apart_from_point(shipped) == _digits_apart_from_point(native):
+            return "point_and_sign"
         return "sign_differs"
     if "." in shipped and "." in native:
         ds, dn = _digit_run(shipped), _digit_run(native)
@@ -1287,6 +1322,40 @@ class PointRepair:
     printed_label: str
     agreeing_values: int
     n_values: int
+    kind: str = REPAIR_POINT  # REPAIR_POINT (a dropped point) or REPAIR_SIGN (a flipped minus)
+
+
+def repair_row_dict(r: PointRepair, row_after: str) -> dict:
+    """One repaired cell as the event and the sidecar record it (live step and offline tool)."""
+    return {
+        "table_line": r.md_line,  # within the table block: stable across the marks above the page
+        "label": r.label,
+        "col": r.col,
+        "old": r.old,
+        "new": r.new,
+        "kind": r.kind,
+        "native_line": r.native_line,
+        "printed_label": r.printed_label,
+        "agreeing_values": r.agreeing_values,
+        "n_values": r.n_values,
+        "row_after": row_after,
+    }
+
+
+def repair_event_detail(table_id: str, rows: list[dict]) -> str:
+    """The audit-event text of one table's repairs, naming what the model got wrong."""
+    kinds = {r["kind"] for r in rows}
+    what = (
+        "the model dropped the decimal point"
+        if kinds == {REPAIR_POINT}
+        else "the model flipped the minus sign"
+        if kinds == {REPAIR_SIGN}
+        else "the model dropped a decimal point or flipped a minus sign"
+    )
+    return (
+        f"table {table_id}: {len(rows)} cell(s) restored from the page's text layer ({what}): "
+        + ", ".join(f"{r['old']} -> {r['new']}" for r in rows)
+    )
 
 
 @dataclass(frozen=True)
@@ -1351,12 +1420,191 @@ def _rival_lines(r: _Row, hit: dict, page_cands: list[_Cand]) -> list[str]:
     return out
 
 
+def _carries_minus(text: str) -> bool:
+    """The printed word itself holds a minus glyph (hyphen-minus, U+2212, en dash, figure dash).
+    A parenthesised negative ``(0.3)`` does not: that is notation, never a sign evidence."""
+    return "-" in text.translate(_UNICODE_MINUS)
+
+
+# A detached glyph counts as sitting in a number's line band when its vertical extent, widened by this
+# fraction of the NUMBER's height, meets the number's extent.  Same constant and same reading as the line
+# builder's rule (a word joins a line when its centre is within LINE_CENTRE_TOL of a height of the line
+# centre): the builder asks about centres, this asks the same slack of the glyph's whole extent, because
+# a minus glyph is a thin box that the builder may place anywhere in the number's band or just outside it.
+# A glyph the builder put on a line of its own is exactly the case this check exists for.
+SIGN_BAND_TOL = LINE_CENTRE_TOL
+
+_RANGE_DASHES = "\u2013\u2014\u2012"  # en dash, em dash, figure dash: a minus or a range separator
+
+
+def _is_word_box(w, t) -> bool:
+    return w[0] == t.x0 and w[2] == t.x1 and str(w[4]) == t.text
+
+
+def _band_neighbours(words: list, t) -> list:
+    """The raw page *words* whose vertical extent, widened by ``SIGN_BAND_TOL`` of the height of *t*,
+    meets the vertical extent of word *t* (the same printed line band, or just outside it), other than
+    *t*, sorted by x.  Geometry only: word order is never used."""
+    slack = SIGN_BAND_TOL * (t.y1 - t.y0)
+    out = [
+        w
+        for w in words
+        if str(w[4]).strip()
+        and w[3] + slack >= t.y0
+        and w[1] - slack <= t.y1
+        and not _is_word_box(w, t)
+    ]
+    return sorted(out, key=lambda w: w[0])
+
+
+def _in_own_line(w, t) -> bool:
+    """The centre of raw word *w* lies inside the vertical extent of *t* (the strict reading)."""
+    return t.y0 <= (w[1] + w[3]) / 2 <= t.y1
+
+
+# A minus DRAWN in front of a number (a vector segment, absent from the page words) is no longer than the
+# number it signs: a table rule spans a column, a minus does not.  Length is measured in widths of the
+# number's own box, so no point size is assumed; "roughly horizontal" is a segment no taller than long.
+DRAWN_MINUS_MAX_NUMBER_WIDTHS = 1.0
+
+
+def _drawn_minus_candidates(drawn, t) -> list:
+    """The drawn boxes shaped like a minus before *t* (no longer than ``DRAWN_MINUS_MAX_NUMBER_WIDTHS``
+    of its width, no taller than long), as pseudo word boxes (a glyph ``-``)."""
+    limit = DRAWN_MINUS_MAX_NUMBER_WIDTHS * (t.x1 - t.x0)
+    return [
+        (b[0], b[1], b[2], b[3], "-")
+        for b in drawn
+        if 0 < b[2] - b[0] <= limit and (b[3] - b[1]) <= (b[2] - b[0])
+    ]
+
+
+def _detached_minus_attached(words: list, t, drawn=()) -> bool:
+    """Is a detached minus glyph (a word that is only ``-``) attached to the number word *t*, or
+    impossible to show NOT attached?  Every minus-only word in the (widened) band of *t* is tested; the
+    answer is True if ANY is attached.  A glyph is attached when it overlaps the number's box, when it
+    has no word on its left in the number's own line, or when it lies closer to *t* than to the word on
+    its own left (a glyph exactly midway cannot be shown NOT to be attached, so it counts as attached
+    and the caller refuses).  The distance rule reads x positions only, never word order.
+
+    *drawn* are vector boxes (reading frame): those shaped like a minus and inside the same band are
+    candidates exactly like glyph words, but they are never a "word on its left"."""
+    band = _band_neighbours(words, t)
+    slack = SIGN_BAND_TOL * (t.y1 - t.y0)
+    marks = [
+        m
+        for m in band
+        if _is_detached_sign(str(m[4])) and "-" in str(m[4]).translate(_UNICODE_MINUS)
+    ] + [
+        d
+        for d in _drawn_minus_candidates(drawn or (), t)
+        if d[3] + slack >= t.y0 and d[1] - slack <= t.y1
+    ]
+    for m in marks:
+        if m[2] > t.x0 and m[0] < t.x1:  # the boxes overlap: ambiguous, so attached
+            return True
+        if m[0] >= t.x0:  # to the right of the number
+            continue
+        before = [w for w in band if w is not m and w[2] <= m[0] and _in_own_line(w, t)]
+        if not before:
+            return True
+        gap_to_number = t.x0 - m[2]
+        gap_to_previous = m[0] - max(w[2] for w in before)
+        if gap_to_number <= gap_to_previous:
+            return True
+    return False
+
+
+def _unary_dash(words: list, t) -> bool:
+    """Is the minus glyph of the printed word *t* UNARY: the word starts with the dash (any dash:
+    hyphen-minus, en, em, figure, U+2212), so it is not glued to a number on its left, and the nearest
+    word on its left in the number's own band is not a number?  ``2.3 -2.6`` and ``2.3 \u20132.6`` are
+    range-shaped: the dash may separate the two numbers instead of signing the second, and nothing in
+    the row or the table can say which.  Refused, whatever the dash glyph."""
+    if "-" not in t.text.lstrip()[:1].translate(_UNICODE_MINUS):
+        return False
+    left = [w for w in _band_neighbours(words, t) if w[2] <= t.x0 and _in_own_line(w, t)]
+    if not left:
+        return True
+    m = max(left, key=lambda w: w[2])
+    return _canon_number(str(m[4]).translate(_UNICODE_MINUS)) is None
+
+
+def _sign_attached_by_geometry(
+    words: list, c: _Cand, aidx: list[int], cell: int, native: str, drawn: list | None = ()
+) -> bool:
+    """Plan A2 step 2: is the minus (or its absence) of text-layer value *cell* settled by the
+    geometry of the layer?  The layer's value is negative (a minus would be ADDED): its own word must
+    carry the minus glyph (a ``(0.3)`` is notation, not evidence) and the dash must be unary
+    (:func:`_unary_dash`); a range-shaped token is refused.  The layer's value is positive (a minus
+    would be REMOVED): no detached minus glyph may be attached to it (the layer would then print
+    ``- 3.0`` and the model's ``-3.0`` would be right), and no drawn minus either: a short, roughly
+    horizontal vector segment (*drawn*, reading frame) attached the same way is a minus the text
+    layer cannot show.  ``drawn=None`` means the drawings could not be read: removal is refused.
+    Never by word order."""
+    w = c.line.words[aidx[cell]]
+    if native.startswith("-"):
+        return _carries_minus(w.text) and _unary_dash(words, w)
+    if drawn is None:
+        return False
+    return not _detached_minus_attached(words, w, drawn)
+
+
+def _layer_encodes_minus(
+    c: _Cand,
+    aidx: list[int],
+    mism: list,
+    lines: list[_Line],
+    bound_rows: list[tuple[int, set[str]]],
+) -> bool:
+    """Plan A2 step 2: the layer provably encodes minus signs in this table: at least one OTHER
+    value, negative in the layer as a glyph on its word, agrees with the shipped one.  Looked for
+    on the row's own agreeing values and on every BOUND row of the table (``bound_rows``: native
+    line index and the canonical values the row shipped)."""
+    off = {k for k, _, _ in mism}
+    for k, i in enumerate(aidx):
+        w = c.line.words[i]
+        if k not in off and w.num is not None and w.num.startswith("-") and _carries_minus(w.text):
+            return True
+    for line_index, shipped in bound_rows:
+        for w in lines[line_index].words:
+            if (
+                w.num is not None
+                and w.num.startswith("-")
+                and w.num in shipped
+                and _carries_minus(w.text)
+            ):
+                return True
+    return False
+
+
+def _mirror_rows(r: _Row, hit: dict, page_cands: list[_Cand]) -> list[str]:
+    """Plan A2 step 2: page lines other than *hit* that carry the row's ABSOLUTE values at every
+    position, whatever their label and however far away (a ``Previous`` / ``Revision`` / ``Change``
+    row mirrors the row above it with the opposite sign: sign is one bit, and a mirror is common).
+    Label-agnostic on purpose: it is a superset of "the same label, or a Previous / Revision /
+    Change-type row", so no vocabulary of row names is needed."""
+    absolute = [n.lstrip("-") for n in r.numbers]
+    out: list[str] = []
+    for c in page_cands:
+        for aidx, anums in _alignments(c, len(r.numbers)):
+            if _value_word_keys(c, aidx) & hit["words"]:
+                continue
+            if [n.lstrip("-") for n in anums] == absolute:
+                lead = aidx[0]
+                out.append(f"{_printed_label(c, lead)!r}: {' '.join(anums)}")
+    return out
+
+
 def propose_point_repairs(
     words: list,
     region: tuple[float, float, float, float] | None,
     table_markdown: str,
+    drawn: list | None = (),
 ) -> tuple[str, list[PointRepair], list[PointRefusal]]:
-    """``(repaired_markdown, repairs, refusals)`` for one table block.
+    """``(repaired_markdown, repairs, refusals)`` for one table block.  *drawn* are the page's vector
+    boxes in the reading frame (``None``: unreadable, so no minus is removed); see
+    :func:`_sign_attached_by_geometry`.
 
     A model that drops a printed decimal point ships ``-7`` for ``-.7``.  The row then equals no
     native line, so the binder calls it UNVERIFIABLE.  A shipped data row is repaired only when
@@ -1416,7 +1664,8 @@ def propose_point_repairs(
                 mism = [(k, s, n) for k, (s, n) in enumerate(pairs) if s != n]
                 if not mism:
                     continue
-                kinds = {_classify_pair(s, n) for _, s, n in mism}
+                pair_kind = {k: _classify_pair(s, n) for k, s, n in mism}
+                kinds = set(pair_kind.values())
                 printed = _printed_label(c, aidx[0])
                 label_ok = bool(r.label.strip()) and _labels_exact(r.label, printed, strict=True)
                 agree = len(pairs) - len(mism)
@@ -1428,21 +1677,26 @@ def propose_point_repairs(
                     "agree": agree,
                     "mism": [(k, s, n, c.line.words[aidx[k]].text) for k, s, n in mism],
                     "kinds": kinds,
+                    "pair_kind": pair_kind,
+                    "cand": c,
+                    "aidx": aidx,
+                    "mismatches": mism,
                     "words": _value_word_keys(c, aidx),
                 }
                 if (
-                    kinds == {"point_dropped"}
+                    kinds
+                    <= _REPAIRABLE_PAIRS  # condition 2: every difference is a point drop OR a sign flip
                     and label_ok  # condition 2 (label)
                     and agree >= MIN_AGREEING_VALUES  # condition 3
                 ):
                     hits.append(rec)
-                elif kinds == {"point_dropped"} or (label_ok and len(mism) <= MAX_RIVAL_MISMATCHES):
+                elif kinds <= _REPAIRABLE_PAIRS or (label_ok and len(mism) <= MAX_RIVAL_MISMATCHES):
                     near.append(rec)
         if not hits:
             if near:
                 why: set[str] = set()
                 for n in near:
-                    if n["kinds"] != {"point_dropped"}:
+                    if not n["kinds"] <= _REPAIRABLE_PAIRS:
                         why.add("pair:" + ",".join(sorted(n["kinds"])))
                     elif not n["label_ok"]:
                         why.add(REFUSE_LABEL)
@@ -1462,6 +1716,30 @@ def propose_point_repairs(
         if rivals:  # condition 7
             refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_RIVAL_LINE,), rivals[0]))
             continue
+        if "sign_flipped" in h["kinds"]:  # the sign conditions (plan A2 step 2)
+            flipped = [m for m in h["mismatches"] if h["pair_kind"][m[0]] == "sign_flipped"]
+            if not all(
+                _sign_attached_by_geometry(words, h["cand"], h["aidx"], k, n, drawn)
+                for k, _, n in flipped
+            ):
+                refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_SIGN_GEOMETRY,)))
+                continue
+            bound_rows = [
+                (e.native_line, {_canon_number(v) for v in e.values})
+                for e in base.rows
+                if e.verdict is RowVerdict.BOUND and e.native_line is not None
+            ]
+            if not _layer_encodes_minus(h["cand"], h["aidx"], h["mismatches"], lines, bound_rows):
+                refusals.append(
+                    PointRefusal(r.line_index, r.label, (REFUSE_SIGN_NO_MINUS_EVIDENCE,))
+                )
+                continue
+            mirrors = _mirror_rows(r, h, page_cands)
+            if mirrors:
+                refusals.append(
+                    PointRefusal(r.line_index, r.label, (REFUSE_SIGN_MIRROR,), mirrors[0])
+                )
+                continue
         if h["line"] in claimed:  # condition 4 (one-to-one)
             refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_CLAIMED,)))
             continue
@@ -1496,11 +1774,15 @@ def propose_point_repairs(
                     _, _, n, printed_text = targets[k]
                     if _canon_number(printed_text.translate(_UNICODE_MINUS)) != n:
                         ok = False
+                    # A sign is one glyph of the cell: a cell holding other tokens beside the number
+                    # (a detached `-`, `n.a.`) is not edited by token (`- 7` would become `- -7`).
+                    if h["pair_kind"][k] == "sign_flipped" and len(cell.split()) != 1:
+                        ok = False
                     # The shipped trailing-point form (`-2.` for `-.2`) is the dropped point itself,
                     # not an affix (ONE terminal period only: `-7..` still refuses); the PRINTED token has no such licence (`-.7,` refuses).
                     if _affixes(t.removesuffix(".")) != _affixes(printed_text):
                         affix_ok = False
-                    subs.append((t, printed_text, k))
+                    subs.append((t, printed_text, k, _PAIR_TO_REPAIR_KIND[h["pair_kind"][k]]))
                     out_toks.append(printed_text)
                 else:
                     out_toks.append(t)
@@ -1535,7 +1817,7 @@ def propose_point_repairs(
             continue
         md = trial
         base = after  # later rows are judged against the repaired table
-        for old, new, col in subs:
+        for old, new, col, kind in subs:
             repairs.append(
                 PointRepair(
                     r.line_index,
@@ -1547,6 +1829,7 @@ def propose_point_repairs(
                     h["printed"],
                     h["agree"],
                     len(r.numbers),
+                    kind,
                 )
             )
     return "\n".join(md), repairs, refusals
@@ -1614,6 +1897,38 @@ def check_page_row_binding(
     return results, rotation
 
 
+def _drawn_boxes(page, rotation: int) -> list | None:
+    """The boxes of every drawn path item of *page* in the reading frame (same pivot and rotation as
+    the words), or ``None`` when the drawings cannot be read."""
+    from socr.tables.reconstruct import _drawing_item_bbox, _rotate_point, _words_center
+
+    try:
+        drawings = page.get_drawings()
+        cx, cy = _words_center(list(page.get_text("words"))) or (0.0, 0.0)
+    except Exception:
+        return None
+    out = []
+    for d in drawings:
+        for item in d.get("items") or []:
+            b = _drawing_item_bbox(item)
+            if b is None:
+                continue
+            if rotation:
+                pts = [
+                    _rotate_point(x, y, cx, cy, rotation)
+                    for x in (b[0], b[2])
+                    for y in (b[1], b[3])
+                ]
+                b = (
+                    min(p[0] for p in pts),
+                    min(p[1] for p in pts),
+                    max(p[0] for p in pts),
+                    max(p[1] for p in pts),
+                )
+            out.append(b)
+    return out
+
+
 def propose_page_point_repairs(
     page, markdown: str, regions_raw: list[tuple[float, float, float, float]] | None = None
 ) -> tuple[str, list[tuple[int, list[PointRepair]]], list[tuple[int, list[PointRefusal]]]]:
@@ -1629,7 +1944,8 @@ def propose_page_point_repairs(
     block against the union (a superset only adds ambiguity), but a repair WRITES a number: with
     two blocks over one region, the other table's line with the same label can be the only hit and
     its value lands in this table (review of #1282, finding 1)."""
-    words, (boxes, union), _rotation = _page_frame(page, regions_raw)
+    words, (boxes, union), rotation = _page_frame(page, regions_raw)
+    drawn = _drawn_boxes(page, rotation)
     md_lines = markdown.splitlines()
     kept = markdown.splitlines(keepends=True)  # the page's own line endings survive a repair
     blocks = find_table_blocks(markdown)
@@ -1641,7 +1957,7 @@ def propose_page_point_repairs(
     for i, b in enumerate(blocks):
         region = boxes[i] if len(boxes) == len(blocks) else union
         new, reps, refs = propose_point_repairs(
-            words, region, "\n".join(md_lines[b.start : b.end + 1])
+            words, region, "\n".join(md_lines[b.start : b.end + 1]), drawn
         )
         if refs:
             refused.append((i, refs))
