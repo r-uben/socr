@@ -348,7 +348,8 @@ class TestProcessDifference:
 
         # #1244 C1: both control pages are unchecked model readings, so the status no longer
         # separates the arms; the named table_unverified reason below does.
-        assert_clean_or_only_unchecked(result_lift)
+        assert_clean_or_only_unchecked(result_lift, pages=(1,))
+        assert result_hold.status is not DocumentStatus.SUCCESS
         assert "table_unverified" in (result_hold.error or "")
         assert "table_unverified" not in (result_lift.error or "")
         assert "table_rejected" not in (result_lift.error or "")
@@ -414,7 +415,8 @@ class TestProcessDifference:
 
         # #1244 C1: both control pages are unchecked model readings, so the status no longer
         # separates the arms; the named table_unverified reason below does.
-        assert_clean_or_only_unchecked(result_lift)
+        assert_clean_or_only_unchecked(result_lift, pages=(1,))
+        assert result_held.status is not DocumentStatus.SUCCESS
         assert "table_unverified" in (result_held.error or "")
         assert "table_unverified" not in (result_lift.error or "")
 
@@ -469,7 +471,9 @@ class TestProcessDifference:
 
         # #1244 C1: both control pages are unchecked model readings, so the status no longer
         # separates the arms; the named table_unverified reason below does.
-        assert_clean_or_only_unchecked(result_off)
+        assert_clean_or_only_unchecked(result_off, pages=(1,))
+        assert "table_unverified" not in (result_off.error or "")
+        assert result_on.status is not DocumentStatus.SUCCESS
         assert "table_unverified" in (result_on.error or "")
 
 

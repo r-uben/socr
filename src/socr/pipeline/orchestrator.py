@@ -847,20 +847,33 @@ ATTEMPT_SUMMARY_REASON_MAX_CHARS = 200
 
 
 def _pages_not_success(records: list, page_count: int) -> list[int]:
-    """#1244 C1: every page of 1..page_count without a FINAL record of status SUCCESS.
+    """#1244 C1: every page of 1..page_count without a FINAL record that publishes as SUCCESS.
 
     The document-level invariant. A page with no record counts as incomplete, so a record
     list that is empty or covers a subset can never read as a clean document (``all()`` over
     such a list is vacuously true, which is the shape this exists to refuse). Every status
-    other than SUCCESS is incomplete: WARNING, ERROR, SKIPPED and PENDING alike.
+    other than SUCCESS is incomplete: WARNING, ERROR, SKIPPED and PENDING alike, and so is a
+    SUCCESS page whose published ``audit_passed`` is false (``published_audit_passed``).
     """
-    status_by_page = {rec.output.page_num: rec.output.status for rec in records}
-    return [n for n in range(1, page_count + 1) if status_by_page.get(n) != PageStatus.SUCCESS]
+    finished = {
+        rec.output.page_num
+        for rec in records
+        if rec.output.status == PageStatus.SUCCESS
+        # The PUBLISHED label, not only the status: a SUCCESS page whose sidecar publishes
+        # ``audit_passed=false`` (a FAIL clause, or an internal acceptance that is not True)
+        # is not a finished page, so the document must not read ``completed`` over it.
+        and published_audit_passed(rec.output.status, rec.output.audit_passed, rec.verdict)
+    }
+    return [n for n in range(1, page_count + 1) if n not in finished]
 
 
 def _pages_not_success_note(pages: list[int]) -> str:
     """The named reason a document with otherwise clean buckets is still not COMPLETED."""
-    return "page(s) " + ", ".join(str(n) for n in pages) + " did not finish with status success"
+    return (
+        "page(s) "
+        + ", ".join(str(n) for n in pages)
+        + " did not finish with status success and a passing audit"
+    )
 
 
 def _attempts_summary(ps) -> list[dict]:
@@ -22733,22 +22746,6 @@ class UnifiedPipeline:
                 # ``pre_records`` was read must carry up to the document status, the
                 # metadata and the CLI result, not only to its own sidecar.
                 _late_incomplete = _pages_not_success(final_records, state.handle.page_count)
-                if _late_incomplete and final_result.status == DocumentStatus.SUCCESS:
-                    _late_note = _pages_not_success_note(_late_incomplete)
-                    final_result.status = DocumentStatus.AUDIT_FAILED
-                    final_result.audit_passed = False
-                    state.status = DocumentStatus.AUDIT_FAILED
-                    final_result.error = (
-                        f"{final_result.error}; {_late_note}" if final_result.error else _late_note
-                    )
-                    self._write_metadata(
-                        state,
-                        final_result,
-                        output_dir,
-                        has_text,
-                        provisional=figure_phase_failed,
-                    )
-                    metadata_rewritten = True
             else:
                 logger.warning(
                     "GH-226 final-body guard: split yielded %d page(s), expected %d; "
@@ -22756,6 +22753,27 @@ class UnifiedPipeline:
                     len(final_bodies),
                     state.handle.page_count,
                 )
+                # #1244 C1: no final record exists to read, so FAIL CLOSED: every page is
+                # a page without a final record, hence incomplete. A document that was
+                # SUCCESS on the pre-figure records cannot stay completed on a body whose
+                # pages cannot be told apart.
+                _late_incomplete = _pages_not_success([], state.handle.page_count)
+            if _late_incomplete and final_result.status == DocumentStatus.SUCCESS:
+                _late_note = _pages_not_success_note(_late_incomplete)
+                final_result.status = DocumentStatus.AUDIT_FAILED
+                final_result.audit_passed = False
+                state.status = DocumentStatus.AUDIT_FAILED
+                final_result.error = (
+                    f"{final_result.error}; {_late_note}" if final_result.error else _late_note
+                )
+                self._write_metadata(
+                    state,
+                    final_result,
+                    output_dir,
+                    has_text,
+                    provisional=figure_phase_failed,
+                )
+                metadata_rewritten = True
 
         # GH-993: a final recount that differs from the one already persisted (a caption
         # table the figure phase added, a guard rewrite) must reach metadata.json, which

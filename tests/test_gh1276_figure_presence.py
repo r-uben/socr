@@ -585,8 +585,10 @@ def test_process_ships_the_crop_and_the_page_without_ticks_differs_only_by_it(
     assert (
         side_on["winning_output"]["audit_passed"] == side_off["winning_output"]["audit_passed"]
     ), "audit_passed is not touched"
-    if side_on["status"] != "success":
-        assert side_on["audit_passed"] is False
+    assert side_on["status"] == "warning"
+    assert side_off["status"] == "success"
+    assert side_on["audit_passed"] is False
+    assert side_off["audit_passed"] is True
 
 
 def test_resume_restores_the_crop_the_record_and_the_mark(tmp_path: Path, monkeypatch) -> None:

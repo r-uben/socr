@@ -129,11 +129,15 @@ def _fix_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orch, "_pages_not_success", lambda records, page_count: [])
 
 
-def _demote(monkeypatch: pytest.MonkeyPatch, *, page: int, when: str) -> None:
-    """Demote ``page`` to WARNING in the ``pre`` records, the ``final`` ones, or both.
+def _demote(monkeypatch: pytest.MonkeyPatch, *, page: int, when: str, how: str = "status") -> None:
+    """Demote ``page`` in the ``pre`` records, the ``final`` ones, or both.
 
-    The text is untouched: only the status the record carries changes, which is exactly what a
-    late guard (figure phase, final-body guard, chart-region pass) does.
+    ``how`` is ``status`` (WARNING), ``fail_clause`` (status stays SUCCESS, the verdict gains a
+    FAIL clause), ``internal`` (status stays SUCCESS, the internal acceptance is False) or
+    ``recovered`` (WARNING plus the typed recovered-prose flag).
+
+    The text is untouched: only the label inputs the record carries change, which is exactly
+    what a late guard (figure phase, final-body guard, chart-region pass) does.
     """
     import socr.core.manifest as manifest
 
@@ -147,18 +151,46 @@ def _demote(monkeypatch: pytest.MonkeyPatch, *, page: int, when: str) -> None:
             for rec in records:
                 if rec.output.page_num == page:
                     demoted = copy.copy(rec.output)
-                    demoted.status = PageStatus.WARNING
+                    verdict = rec.verdict
+                    if how in ("status", "recovered"):
+                        demoted.status = PageStatus.WARNING
+                    if how == "recovered":
+                        demoted.scanned_prose_recovered = True
+                    if how == "internal":
+                        demoted.audit_passed = False
+                    if how == "fail_clause":
+                        verdict = PageVerdict(
+                            page_num=page,
+                            clauses=(VerdictClause(Check.NATIVE_COVERAGE, CheckResult.FAIL),),
+                        )
                     rec = FinalizedPageRecord(
                         output=demoted,
                         disposition=rec.disposition,
                         selection_provenance=rec.selection_provenance,
-                        verdict=rec.verdict,
+                        verdict=verdict,
                     )
                 out.append(rec)
             return out
         return records
 
     monkeypatch.setattr(manifest, "finalized_page_records", patched)
+
+
+def _split_one_page_too_many_in_assemble(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ONLY ``_phase_assemble``'s final-body split yield page_count + 1 bodies."""
+    import sys
+
+    import ocr_output_contract as contract
+
+    real = contract.split_native_pages
+
+    def patched(text):
+        bodies = real(text)
+        if sys._getframe(1).f_code.co_name == "_phase_assemble":
+            return [*bodies, "an extra body"]
+        return bodies
+
+    monkeypatch.setattr(contract, "split_native_pages", patched)
 
 
 def _process(
@@ -170,7 +202,8 @@ def _process(
     accept: bool = True,
     pages_read: list[int] | None = None,
     fix: bool = True,
-    demote: tuple[int, str] | None = None,
+    demote: tuple[int, str] | tuple[int, str, str] | None = None,
+    split_extra_page: bool = False,
 ):
     from socr.core.config import EngineType, PipelineConfig
     from socr.core.providers import PROFILE_QWEN_LOCAL
@@ -179,7 +212,11 @@ def _process(
         if not fix:
             _fix_off(m)
         if demote is not None:
-            _demote(m, page=demote[0], when=demote[1])
+            _demote(
+                m, page=demote[0], when=demote[1], how=demote[2] if len(demote) > 2 else "status"
+            )
+        if split_extra_page:
+            _split_one_page_too_many_in_assemble(m)
         m.setattr(
             orch,
             "get_engine",
@@ -273,10 +310,10 @@ def test_a_demoted_page_stops_the_document_reading_completed(
     assert _metadata(tmp_path / "on")["status"] != DocumentStatus.SUCCESS.value
     assert "page(s) 2 did not finish with status success" in (on.error or "")
     assert on.audit_passed is False
-    if base.status is DocumentStatus.SUCCESS:
-        # Without the fix the demotion is invisible at the document level.
-        assert off.status is DocumentStatus.SUCCESS
-        assert on.status is not off.status
+    # Without the fix the demotion is invisible at the document level: the fix-off arm equals
+    # the undemoted baseline, whatever that is, and the fix-on arm differs from it.
+    assert off.status is base.status
+    assert on.status is not base.status
     # Labels only: the shipped text and winner selection of every page are identical.
     assert _doc_md(tmp_path / "on") == _doc_md(tmp_path / "off") == _doc_md(tmp_path / "base")
     for page in (1, 2):
@@ -303,8 +340,7 @@ def test_the_fix_changes_no_selection_on_a_document_with_no_demotion(
         assert _selection(_sidecar(tmp_path / "on", page)) == _selection(
             _sidecar(tmp_path / "off", page)
         )
-    if off.status is DocumentStatus.SUCCESS:
-        assert on.status is DocumentStatus.SUCCESS
+    assert on.status is off.status
 
 
 @pytest.mark.parametrize("provider", [True, False])
@@ -359,3 +395,112 @@ def test_resume_eligibility_is_unchanged_by_the_label(tmp_path, monkeypatch, acc
         assert after["audit_passed"] is False
     else:
         assert 1 in reads[True]
+
+
+# ---------------------------------------------------------------------------
+# The invariant uses the PUBLISHED label; a body that does not split fails closed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("provider", [True, False])
+@pytest.mark.parametrize("how", ["fail_clause", "internal"])
+@pytest.mark.parametrize("when", ["pre", "final"])
+def test_a_success_page_that_publishes_false_blocks_completed(
+    tmp_path, monkeypatch, provider, how, when
+) -> None:
+    """Status stays SUCCESS on the page, but its published audit_passed is false (a FAIL clause,
+    or an internal acceptance that is not True): the document is not completed, and the named
+    reason says page 2. Difference against the same run with the fix off and with no demotion."""
+    pdf = _prose_pdf(tmp_path / "doc.pdf")
+    base = _process(tmp_path / "base", pdf, monkeypatch, provider=provider)
+    off = _process(
+        tmp_path / "off", pdf, monkeypatch, provider=provider, fix=False, demote=(2, when, how)
+    )
+    on = _process(tmp_path / "on", pdf, monkeypatch, provider=provider, demote=(2, when, how))
+
+    assert _sidecar(tmp_path / "on", 2)["status"] == "success"
+    if when == "final":
+        # The sidecar is written from the final records, so only there does it publish false.
+        assert _sidecar(tmp_path / "on", 2)["audit_passed"] is False
+    assert off.status is base.status
+    assert on.status is not base.status
+    assert on.status is DocumentStatus.AUDIT_FAILED
+    assert "page(s) 2 did not finish with status success" in (on.error or "")
+    assert "page(s) 1" not in (on.error or "")
+    assert _metadata(tmp_path / "on")["status"] != DocumentStatus.SUCCESS.value
+    assert _doc_md(tmp_path / "on") == _doc_md(tmp_path / "off")
+
+
+@pytest.mark.parametrize("provider", [True, False])
+def test_a_body_that_does_not_split_fails_closed(tmp_path, monkeypatch, provider) -> None:
+    """The final split yields page_count + 1 bodies: no final record can be read, so every page
+    is without a final record and the document is not completed. The fix-off arm keeps the
+    baseline status."""
+    pdf = _prose_pdf(tmp_path / "doc.pdf")
+    base = _process(tmp_path / "base", pdf, monkeypatch, provider=provider)
+    off = _process(
+        tmp_path / "off", pdf, monkeypatch, provider=provider, fix=False, split_extra_page=True
+    )
+    on = _process(tmp_path / "on", pdf, monkeypatch, provider=provider, split_extra_page=True)
+
+    assert off.status is base.status
+    assert on.status is DocumentStatus.AUDIT_FAILED
+    assert on.status is not base.status
+    assert "page(s) 1, 2 did not finish with status success" in (on.error or "")
+    assert on.audit_passed is False
+    assert _metadata(tmp_path / "on")["status"] != DocumentStatus.SUCCESS.value
+
+
+@pytest.mark.parametrize("provider", [True, False])
+def test_a_recovered_prose_document_names_its_own_bucket_not_the_generic_reason(
+    tmp_path, monkeypatch, provider
+) -> None:
+    """A document with a recovered-prose page is demoted by that bucket, which names itself in
+    ``error``; the generic invariant note is only for documents no bucket names."""
+    pdf = _prose_pdf(tmp_path / "doc.pdf")
+    on = _process(
+        tmp_path / "on", pdf, monkeypatch, provider=provider, demote=(2, "pre", "recovered")
+    )
+    assert on.status is DocumentStatus.AUDIT_FAILED
+    assert "page(s) 2:" in (on.error or "")
+    assert "see scanned_prose_recovered in the page sidecar" in (on.error or "")
+    assert "did not finish with status success" not in (on.error or "")
+
+
+# ---------------------------------------------------------------------------
+# The control helper itself: it must fail on an unrelated demotion
+# ---------------------------------------------------------------------------
+
+
+def _result(status: DocumentStatus, error: str | None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(status=status, error=error)
+
+
+_NOTE = "page(s) 2 did not finish with status success and a passing audit"
+
+
+def test_the_control_helper_accepts_only_the_designed_unchecked_demotion() -> None:
+    from c1_support import assert_clean_or_only_unchecked as check
+
+    check(_result(DocumentStatus.SUCCESS, None), pages=(1, 2))
+    check(_result(DocumentStatus.AUDIT_FAILED, _NOTE), pages=(1, 2))
+    check(
+        _result(DocumentStatus.AUDIT_FAILED, f"{_NOTE}; page(s) 2: an own note"),
+        pages=(2,),
+        other_notes=("an own note",),
+    )
+    # A page outside the fixture's design, a note it does not carry, a failed document, and an
+    # AUDIT_FAILED with no C1 note are each an unrelated demotion.
+    with pytest.raises(AssertionError):
+        check(_result(DocumentStatus.AUDIT_FAILED, _NOTE), pages=(1,))
+    with pytest.raises(AssertionError):
+        check(
+            _result(DocumentStatus.AUDIT_FAILED, f"{_NOTE}; page(s) 2: withheld table"),
+            pages=(2,),
+        )
+    with pytest.raises(AssertionError):
+        check(_result(DocumentStatus.ERROR, _NOTE), pages=(2,))
+    with pytest.raises(AssertionError):
+        check(_result(DocumentStatus.AUDIT_FAILED, "page(s) 2: withheld table"), pages=(2,))

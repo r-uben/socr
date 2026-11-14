@@ -554,6 +554,7 @@ def _run(tmp_path: Path, monkeypatch, tag: str, *, accept: bool, route_live: boo
     events = json.loads(logs[0].read_text())["events"] if logs else []
     return {
         "status": result.status,
+        "error": result.error or "",
         "side": side,
         "text": text,
         "kinds": sorted({e.get("kind") for e in events if e.get("page_num") == 1}),
@@ -624,12 +625,17 @@ def test_the_flag_the_retention_and_the_mark_appear_only_with_the_route(
     # does, so only the accepted arm discriminates and only it is asserted both ways.
     from socr.core.result import DocumentStatus
 
-    assert live["status"] is not DocumentStatus.SUCCESS
+    assert live["status"] is DocumentStatus.AUDIT_FAILED
     # #1244 C1: main's own page is an unchecked model reading (WARNING, ``text_layer_numbers``
-    # UNKNOWN), so its document is no longer SUCCESS either and the status cannot discriminate
-    # the arms. The difference is the retained-layer event pinned above, which only the flag adds.
+    # UNKNOWN), so its document is AUDIT_FAILED too and the status cannot discriminate the arms.
+    # The difference is the retained-layer event pinned above, which only the flag adds, and on
+    # the accepted arm the reason text: main is named by the generic C1 note, the flagged run by
+    # its bucket (no generic note).
+    assert main["status"] is DocumentStatus.AUDIT_FAILED
     if accept:
-        assert main["status"] in (DocumentStatus.SUCCESS, DocumentStatus.AUDIT_FAILED)
+        assert "did not finish with status success" in main["error"]
+        assert "did not finish with status success" not in live["error"]
+        assert live["error"] != main["error"], "the reason text does not separate the arms"
 
 
 # ---------------------------------------------------------------------------

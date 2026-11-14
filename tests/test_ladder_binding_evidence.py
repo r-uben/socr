@@ -420,7 +420,7 @@ class TestProcessFlagDifference:
         ):
             result_off = pipeline_off.process(pdf_off, tmp_path / "off_out")
 
-        assert_clean_or_only_unchecked(result_off)  # #1244 C1: see c1_support
+        assert_clean_or_only_unchecked(result_off, pages=(1,))  # #1244 C1: see c1_support
         assert "table_rejected" not in (result_off.error or "")
 
         # -- flag on, no CLI rungs available: mechanical check alone -------
@@ -449,11 +449,14 @@ class TestProcessFlagDifference:
         assert "table_unverified" in (result_on.error or "")
         assert "table_rejected" not in (result_on.error or "")
 
-    def test_flag_on_no_native_words_ships_success(self, tmp_path: Path) -> None:
+    def test_flag_on_no_native_words_is_not_demoted_by_the_ladder(self, tmp_path: Path) -> None:
         """The ticket's no-native-words acceptance criterion at the full
         process() level: flag on, zero native text on the page, a real
-        (accepting) rung -- the page ships SUCCESS, not demoted."""
+        (accepting) rung -- the ladder does not demote the page (#1244 C1: the
+        document may still be AUDIT_FAILED because the page is an unchecked
+        model reading, which the assertions below name and bound)."""
         pdf_path = _no_native_words_pdf(tmp_path)
+        rung = _accept_rung()
         cfg = _make_config(table_judge_ladder=True)
         pipeline = _make_pipeline(cfg)
 
@@ -470,11 +473,16 @@ class TestProcessFlagDifference:
             # text contradicts that page, so the #1022 native-contradiction withhold would end it
             # WITHHELD; it is stubbed here and pinned in test_native_contradiction.py.
             patch.object(pipeline, "_withhold_contradicted_unverified_tables", return_value=None),
-            patch.object(pipeline, "_build_table_judge_rungs", return_value=[_accept_rung()]),
+            patch.object(pipeline, "_build_table_judge_rungs", return_value=[rung]),
         ):
             result = pipeline.process(pdf_path, tmp_path / "no_words_out")
 
-        assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support
+        # The injected accepting rung ran, so the ladder is what did not demote the page.
+        assert len(rung.calls) == 1, "the accepting table rung was not consulted"
+        # #1244 C1: the blank-PDF page is an unchecked model reading, so the document may be
+        # AUDIT_FAILED by that invariant alone (named, page 1), never by the ladder.
+        assert_clean_or_only_unchecked(result, pages=(1,))
+        assert "table_unverified" not in (result.error or "")
         assert "table_rejected" not in (result.error or "")
 
 

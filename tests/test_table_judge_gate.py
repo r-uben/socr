@@ -1065,7 +1065,9 @@ class TestProcessFlagDifference:
         ):
             result_off = pipeline_off.process(pdf_path, tmp_path / "off_out")
 
-        assert_clean_or_only_unchecked(result_off)  # #1244 C1: see c1_support
+        assert_clean_or_only_unchecked(
+            result_off, pages=(1,), other_notes=("untrusted tables on",)
+        )  # #1244 C1: see c1_support
         assert result_off.pages[0].failure_mode == FailureMode.NONE
         assert "table_rejected" not in (result_off.error or "")
 
@@ -1169,4 +1171,6 @@ class TestProcessFlagDifference:
         ):
             result = pipeline.process(pdf_path, tmp_path / "sentinel_out")
 
-        assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support
+        assert_clean_or_only_unchecked(
+            result, pages=(1,), other_notes=("untrusted tables on",)
+        )  # #1244 C1: see c1_support

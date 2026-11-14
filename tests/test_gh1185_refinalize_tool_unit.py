@@ -350,3 +350,26 @@ def test_the_table_counts_follow_the_demoted_page(tmp_path: Path, monkeypatch) -
     assert change.result == "FAIL"
     after = json.loads((doc / "metadata.json").read_text())["tables"]
     assert after["verified_text"] == 0 and after == count_from_sidecars(doc).to_dict()
+
+
+def test_a_rerun_rederives_the_published_audit_passed_of_a_page_it_already_marked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#1244 C1: a page that already carries the clause is not re-finalized, but its published
+    ``audit_passed`` is still derived (status WARNING -> false). Difference on one input: the
+    sidecar as an earlier pass left it (stale ``true``) versus the same sidecar left alone."""
+    old_out, old_v = _old_run(_success(), SimpleNamespace())
+    _with_analysis(monkeypatch, tmp_path)
+    doc = _finished_doc(tmp_path, old_out, old_v, audit=True)
+    tool.refinalize_document(doc, tmp_path)
+    path = doc / "pages" / "00001.json"
+    marked = json.loads(path.read_text())
+    assert marked["status"] == "warning" and marked["audit_passed"] is False, "fixture premise"
+    nested = marked["winning_output"]["audit_passed"]
+
+    path.write_text(json.dumps({**marked, "audit_passed": True}))
+    tool.refinalize_document(doc, tmp_path)
+    repaired = json.loads(path.read_text())
+    assert repaired["audit_passed"] is False
+    assert repaired["winning_output"]["audit_passed"] == nested, "the internal flag is untouched"
+    assert repaired == marked

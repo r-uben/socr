@@ -528,9 +528,13 @@ def test_process_marks_a_skeleton_page_and_the_same_page_without_ticks_is_clean(
     assert "carry a chart's axis ticks" not in plain_error, (
         "a document whose only defect is the dropped chart must be named for it"
     )
-    assert not plain_error or "did not finish with status success" in plain_error, (
-        "the control document carries a note of its own"
-    )
+    # The control's allowed outcomes, as the metadata states them: completed with no note, or
+    # partial carrying the C1 note for page 1 and nothing else.
+    assert plain_meta.get("status") == "completed" or (
+        plain_meta.get("status") == "partial"
+        and plain_error == "page(s) 1 did not finish with status success and a passing audit"
+    ), plain_meta
+    assert skel_meta.get("status") == "partial"
 
 
 def test_the_cli_reports_a_skeleton_page(tmp_path: Path, monkeypatch, capsys) -> None:

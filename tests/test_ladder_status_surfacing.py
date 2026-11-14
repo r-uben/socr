@@ -186,7 +186,7 @@ class TestPagesOkAndDocumentStatus:
 
         result = pipeline._phase_assemble(state, tmp_path)
 
-        assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support
+        assert_clean_or_only_unchecked(result, pages=(1,))  # #1244 C1: see c1_support
         assert not (result.error and "table_rejected" in result.error)
         assert not (result.error and "table_unverified" in result.error)
 

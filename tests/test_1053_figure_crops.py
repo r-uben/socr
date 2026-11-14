@@ -533,8 +533,14 @@ def test_native_only_ships_inline_crops_and_demotes_the_document(
     # flagged for its own reason), so it is no longer a COMPLETED document. The pre-C1 form of
     # this line asserted ``on.status is not off.status``, which pinned the very hole C1 closes:
     # a document holding a WARNING page reading SUCCESS.
-    assert a["status"] != "success"
-    assert off.status is not DocumentStatus.SUCCESS
+    assert a["status"] == "warning"
+    assert off.status is DocumentStatus.AUDIT_FAILED
+    # The reason text is the difference: the crop route is named by its own bucket (no generic
+    # note), the neutralised arm is named only by the generic C1 note beside the shared
+    # informational line.
+    assert "page(s) 1: visual values not transcribed" in (on.error or "")
+    assert "did not finish with status success" not in (on.error or "")
+    assert "page(s) 1 did not finish with status success" in (off.error or "")
 
 
 def test_flagged_page_is_not_restored_from_the_ledger(tmp_path, monkeypatch) -> None:

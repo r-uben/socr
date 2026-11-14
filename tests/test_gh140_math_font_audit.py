@@ -41,7 +41,7 @@ import pytest
 
 fitz = pytest.importorskip("fitz")
 
-from socr.core.result import DocumentStatus, PageOutput, PageStatus  # noqa: E402
+from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus  # noqa: E402
 from socr.core.state import DocumentState, PageState  # noqa: E402
 from socr.math.accounting import (  # noqa: E402
     MATH_FONT_UNRECOVERED_KIND,
@@ -517,19 +517,31 @@ def test_covered_vs_uncovered_is_the_pinned_difference(tmp_path: Path) -> None:
     """Repo convention: pin the DIFFERENCE the change under test controls, not
     an absolute value that provider-dependent machinery could legitimately
     vary in CI. Here both runs are fully hermetic (provider ladder is an
-    explicit parameter), so the difference is exact: the event fires or not,
-    document status is unaffected either way (see the decision log)."""
-    _, covered_state, _, _ = _run(tmp_path, provider=True, tag="diff_covered")
-    _, uncovered_state, _, _ = _run(tmp_path, provider=False, tag="diff_uncovered")
-
+    explicit parameter), so the difference is exact: the math-font event fires or
+    not, and the math-font signal never moves the document status (see the
+    decision log). The covered run's document is AUDIT_FAILED for an unrelated
+    reason, its unverified equation (#1244 C1), asserted below."""
+    _, covered_state, covered_result, _ = _run(tmp_path, provider=True, tag="diff_covered")
+    _, uncovered_state, uncovered_result, _ = _run(tmp_path, provider=False, tag="diff_uncovered")
     assert _math_font_events(covered_state) == []
     assert len(_math_font_events(uncovered_state)) == 1
     # #1244 C1: the MATH-FONT signal still never moves the document (the uncovered arm stays
-    # SUCCESS). The covered arm's page is WARNING for a different reason, equation_fidelity
-    # (see ``test_a_fully_covered_page_is_not_held_to_the_math_font_signal`` above), and a
-    # document holding a non-SUCCESS page is no longer completed.
+    # SUCCESS, with no note). The covered arm's page is WARNING for a different reason: its
+    # equation was not verified (``equation_fidelity_unverified``, an UNKNOWN equation_fidelity
+    # clause, and no math-font clause or event), and a document holding a non-SUCCESS page is no
+    # longer completed, so the document carries the generic C1 note for page 1.
+    from socr.core.manifest import finalized_page_record
+
+    covered_page = finalized_page_record(covered_state, 1)
+    assert covered_page.output.status is PageStatus.WARNING
+    assert covered_page.output.failure_mode is FailureMode.EQUATION_FIDELITY_UNVERIFIED
+    assert [c.check.value for c in covered_page.verdict.clauses] == ["equation_fidelity"]
     assert uncovered_state.status is DocumentStatus.SUCCESS
+    assert uncovered_result.error is None
     assert covered_state.status is DocumentStatus.AUDIT_FAILED
+    assert (
+        covered_result.error == "page(s) 1 did not finish with status success and a passing audit"
+    )
 
 
 def test_a_pua_page_never_also_raises_the_math_font_event(tmp_path: Path) -> None:

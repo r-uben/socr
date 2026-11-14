@@ -273,10 +273,10 @@ def test_vector_drawn_text_is_flagged(tmp_path: Path, providers) -> None:
     # process() returns a one-page EngineResult (whole-doc text). Per-page
     # status lives on the sidecar; document status is the difference pin.
     assert on.status is DocumentStatus.AUDIT_FAILED
-    # #1244 C1: the off arm's page is WARNING for its own reason (a picture shipped without its
-    # values), so its document is no longer SUCCESS; what the coverage check adds is read off the
-    # page, not the document status.
-    assert_clean_or_only_unchecked(off)
+    # The off arm is a plain page with no defect of its own (asserted again below: SUCCESS, no
+    # coverage verdict): the document stays SUCCESS and the check is the whole difference.
+    assert off.status is DocumentStatus.SUCCESS
+    assert on.status is not off.status
     sidecar = next((tmp_path / "on").rglob("pages/00001.json"))
     rec = json.loads(sidecar.read_text())
     off_rec = json.loads(next((tmp_path / "off").rglob("pages/00001.json")).read_text())
@@ -346,10 +346,14 @@ def test_light_on_dark_vector_is_flagged(tmp_path: Path, providers) -> None:
     on = _run(_pipeline(check_text_coverage=True), pdf, tmp_path / "on", providers)
     off = _run(_pipeline(check_text_coverage=False), pdf, tmp_path / "off", providers)
     assert on.status is DocumentStatus.AUDIT_FAILED
-    # #1244 C1: the off arm's page is WARNING for its own reason (a picture shipped without its
-    # values), so its document is no longer SUCCESS; what the coverage check adds is read off the
-    # page, not the document status.
-    assert_clean_or_only_unchecked(off)
+    # #1244 C1: white lettering over a dark field is vector-drawn, so the off arm ships the figure
+    # without its values (``visual values not transcribed``): its page is WARNING for that reason,
+    # and its document is no longer SUCCESS. What the coverage check adds is read off the page.
+    assert_clean_or_only_unchecked(
+        off,
+        pages=(1,),
+        other_notes=("visual values not transcribed", "in-image text on these figures"),
+    )
     sidecar = next((tmp_path / "on").rglob("pages/00001.json"))
     rec = json.loads(sidecar.read_text())
     off_rec = json.loads(next((tmp_path / "off").rglob("pages/00001.json")).read_text())
@@ -531,10 +535,10 @@ def test_unknown_does_not_ship_success(tmp_path: Path) -> None:
         on = _run(on_pipe, pdf, tmp_path / "on", [PROFILE_QWEN_LOCAL])
     off = _run(off_pipe, pdf, tmp_path / "off", [PROFILE_QWEN_LOCAL])
     assert on.status is DocumentStatus.AUDIT_FAILED
-    # #1244 C1: the off arm's page is WARNING for its own reason (a picture shipped without its
-    # values), so its document is no longer SUCCESS; what the coverage check adds is read off the
-    # page, not the document status.
-    assert_clean_or_only_unchecked(off)
+    # The off arm is a clean text page; the render failure only exists in the on arm. The document
+    # stays SUCCESS without the check, so the check is the whole difference.
+    assert off.status is DocumentStatus.SUCCESS
+    assert on.status is not off.status
     sidecar = next((tmp_path / "on").rglob("pages/00001.json"))
     rec = json.loads(sidecar.read_text())
     off_rec = json.loads(next((tmp_path / "off").rglob("pages/00001.json")).read_text())
@@ -603,10 +607,14 @@ def test_chart_asset_flag_demotes_document(tmp_path: Path, providers) -> None:
     with patch.object(off_pipe, "_is_chart_asset_page", return_value=True):
         off = _run(off_pipe, pdf, tmp_path / "off", providers)
     assert on.status is DocumentStatus.AUDIT_FAILED
-    # #1244 C1: the off arm's page is WARNING for its own reason (a picture shipped without its
-    # values), so its document is no longer SUCCESS; what the coverage check adds is read off the
-    # page, not the document status.
-    assert_clean_or_only_unchecked(off)
+    # #1244 C1: ``_is_chart_asset_page`` is forced, so the chart ships as an image asset without
+    # its values (``visual values not transcribed``) and the off page is WARNING for that reason.
+    # What the coverage check adds is read off the page, not the document status.
+    assert_clean_or_only_unchecked(
+        off,
+        pages=(1,),
+        other_notes=("visual values not transcribed", "in-image text on these figures"),
+    )
     sidecar = next((tmp_path / "on").rglob("pages/00001.json"))
     rec = json.loads(sidecar.read_text())
     off_rec = json.loads(next((tmp_path / "off").rglob("pages/00001.json")).read_text())
@@ -833,10 +841,13 @@ def test_coverage_keeps_preexisting_failure_mode(tmp_path: Path, providers) -> N
         patch("socr.pipeline.orchestrator.minus_as_digit_suspect", return_value=True),
     ):
         on = _run(on_pipe, pdf, tmp_path / "on", providers)
-    # #1244 C1: the off arm's page is WARNING for its own reason (a picture shipped without its
-    # values), so its document is no longer SUCCESS; what the coverage check adds is read off the
-    # page, not the document status.
-    assert_clean_or_only_unchecked(off)
+    # #1244 C1: the chart is forced to an image asset in both arms, so the off page is WARNING
+    # for the shipped-without-values reason; the on arm differs by its failure mode (MINUS wins).
+    assert_clean_or_only_unchecked(
+        off,
+        pages=(1,),
+        other_notes=("visual values not transcribed", "in-image text on these figures"),
+    )
     assert on.status is DocumentStatus.AUDIT_FAILED
     sidecar = next((tmp_path / "on").rglob("pages/00001.json"))
     rec = json.loads(sidecar.read_text())

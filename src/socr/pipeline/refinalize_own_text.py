@@ -833,6 +833,18 @@ def refinalize_document(
             record = page_word_check_record(shipped, state)
             if record is not None and "text_layer_words" not in sidecar:
                 whole = {**(whole if whole is not None else sidecar), "text_layer_words": record}
+            # #1244 C1: re-derive the PUBLISHED audit_passed here too. A page an earlier pass
+            # (or a run from before the derivation) demoted keeps a stale ``true`` otherwise,
+            # because this path never goes through ``_updated_sidecar``.
+            if sidecar.get("terminal") is True:
+                published = published_audit_passed(
+                    sidecar.get("status"),
+                    (sidecar.get("winning_output") or {}).get("audit_passed", False),
+                    sidecar.get("verdict"),
+                )
+                current = whole if whole is not None else sidecar
+                if current.get("audit_passed") != published:
+                    whole = {**current, "audit_passed": published}
             if whole is not None:
                 repairs.append((path, whole))
             continue

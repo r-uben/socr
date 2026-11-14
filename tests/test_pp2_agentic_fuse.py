@@ -254,7 +254,7 @@ class TestByteIdentity:
         ):
             result = pipeline.process(pdf_path, tmp_path)
 
-        assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support
+        assert_clean_or_only_unchecked(result, pages=(1, 3))  # #1244 C1: see c1_support
         return result.markdown
 
     def test_final_md_matches_golden(self, tmp_path: Path) -> None:
@@ -311,7 +311,7 @@ class TestIncrementalFlush:
         with patch("socr.pipeline.orchestrator.get_engine", return_value=_gemini_engine_mock()):
             result = pipeline.process(pdf_path, tmp_path)
 
-        assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support
+        assert_clean_or_only_unchecked(result, pages=(2, 4))  # #1244 C1: see c1_support
 
         doc_dir = tmp_path / "mixed"
         pages_dir = doc_dir / "pages"
@@ -791,7 +791,7 @@ class TestEquationFlagsOff:
         ):
             result = pipeline.process(pdf_path, tmp_path)
 
-        assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support
+        assert_clean_or_only_unchecked(result, pages=(1,))  # #1244 C1: see c1_support
         assert not detect_calls, (
             f"_detect_and_crop_equations must not be called with detect_equations=False; "
             f"called for pages: {detect_calls}"

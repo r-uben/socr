@@ -121,7 +121,7 @@ class TestOrchestratorAgenticLane:
             assert call_count == 1, (
                 f"_phase_agentic call count mismatch for agentic={agentic_setting}: {call_count}"
             )
-            assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support
+            assert_clean_or_only_unchecked(result, pages=(1, 2))  # #1244 C1: see c1_support
             assert result.pages_processed == 2
 
     def test_fingerprint_excludes_dead_legacy_keys(self):
