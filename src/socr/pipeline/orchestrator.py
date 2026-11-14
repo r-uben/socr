@@ -18418,7 +18418,13 @@ class UnifiedPipeline:
             # aside (kept, once) and the reference says so.
             aside = path.with_name(path.name + JUDGE_CALLS_UNRESTORED_SUFFIX)
             kept = False
-            if path.exists() and not aside.exists():
+            if path.exists():
+                # Never overwrite an unreadable history that is already aside: a second one
+                # takes the next free name, so every history the sidecar refers to survives.
+                n = 1
+                while aside.exists():
+                    aside = path.with_name(f"{path.name}{JUDGE_CALLS_UNRESTORED_SUFFIX}.{n}")
+                    n += 1
                 path.rename(aside)
                 kept = True
             elif aside.exists():

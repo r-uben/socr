@@ -31,7 +31,6 @@ from socr.core.verdict import (
     EXACT_PASS_ACCEPT_REASON,
     NATIVE_TABLE_EXACT_PASS_KIND,
 )
-from c3_support import give_word_evidence
 from verdict_marks_helper import canonical_marks, strip_verdict_marks
 
 TABLE = "| Model | 3-cat | 5-cat |\n| --- | --- | --- |\n| Vicuna | 0.80 | 0.48 |\n"

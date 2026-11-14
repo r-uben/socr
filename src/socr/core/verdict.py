@@ -2254,8 +2254,12 @@ def resumed_verdict_with_judge_only_clause(
         return published
     if not _is_model_reading(output):
         return published
-    if _exact_pass_unjudged_outcome(output, event_kinds).clause is not None:
-        return published
+    exact = _exact_pass_unjudged_outcome(output, event_kinds).clause
+    if exact is not None:
+        # #1181 applies: the clause a live run derives is DERIVED here, not assumed to have been
+        # published. An empty published verdict must never leave a model reading SUCCESS with no
+        # clause and no evidence.
+        return replace(published, clauses=(exact,))
     clauses = _judge_only_clause_on(replay or (), output.text or "")
     if not clauses:
         return published

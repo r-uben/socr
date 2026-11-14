@@ -59,9 +59,15 @@ def _evidenced_grid_pdf(pdf: Path) -> Path:
 
 def _evidenced_route_fn(page_num, ladder, run_provider, judge, **kwargs):
     """``_route_fn`` whose reading also carries the page's line (the layer's words)."""
-    decision = _route_fn(page_num, ladder, run_provider, judge, **kwargs)
-    decision.final_output.text = _with_page_line(page_num, decision.final_output.text)
-    return decision
+    # The evidenced reading is built BEFORE the judge assesses it: one reading is judged and shipped.
+    return _route_fn(
+        page_num,
+        ladder,
+        run_provider,
+        judge,
+        reading_text=_with_page_line(page_num, _MISSING_COLUMNS_CANDIDATE),
+        **kwargs,
+    )
 
 
 def _run(root: Path, *, mode: str):

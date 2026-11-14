@@ -151,12 +151,21 @@ def _pass_digest_mismatch(sidecar: dict, checks: list[dict]) -> bool:
     )
 
 
-def _words_pass_page_scope(checks: list[dict]) -> bool:
+def _words_pass_page_scope(sidecar: dict, checks: list[dict]) -> bool:
+    """True when the page-scope words check is a PASS that still names the sidecar's own winning
+    text: the digest rule the writers apply (``verify_pass_digests``) comes first, so a stale or
+    digest-less PASS is not evidence and not counted."""
+    from socr.core.pass_trace import trace_from_dicts
+    from socr.core.verdict import verify_pass_digests
+
+    winning = sidecar.get("winning_output")
+    text = winning.get("text") if isinstance(winning, dict) else None
+    entries = trace_from_dicts(checks)
+    if not entries or not isinstance(text, str):
+        return False
     return any(
-        str(e.get("check")) == "text_layer_words"
-        and str(e.get("result")) == "PASS"
-        and str(e.get("scope")) == "page"
-        for e in checks
+        e.check == "text_layer_words" and e.result.value == "PASS" and e.scope == "page"
+        for e in verify_pass_digests(entries, text)
     )
 
 
@@ -172,8 +181,10 @@ def _model_success_without_evidence(sidecar: dict, checks: list[dict], status: s
         return False
     winning = sidecar.get("winning_output")
     text = winning.get("text") if isinstance(winning, dict) else None
+    if not isinstance(text, str):
+        return True  # a sidecar with no readable winning text holds no evidence of one
     entries = trace_from_dicts(checks) or ()
-    return not independent_page_evidence(entries, text if isinstance(text, str) else "")
+    return not independent_page_evidence(entries, text)
 
 
 def _words_compared(sidecar: dict) -> int | None:
@@ -309,7 +320,7 @@ def count_document(doc_dir: Path) -> collections.Counter:
         if _model_success_without_evidence(sidecar, checks, status):
             c["records.model_success_without_verified_evidence"] += 1
         compared = _words_compared(sidecar)
-        if _words_pass_page_scope(checks) and compared is not None:
+        if _words_pass_page_scope(sidecar, checks) and compared is not None:
             if compared < WEAK_WORDS_PASS_BELOW:
                 c["records.pages_weak_words_pass"] += 1
         for entry in checks:

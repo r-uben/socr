@@ -106,7 +106,9 @@ def _job(args):
                 )
                 clauses = silent_success_clauses(out, p, kinds)
                 words = page_word_check_record(out, p)
-                if words is not None:
+                # only a PASS is evidence (the record is also written for a check that found words
+                # missing), so only a PASS counts toward the weak-pass bucket
+                if words is not None and words["missing"] == 0:
                     r["words_compared"] = words["compared"]
                 if not clauses:
                     r["after"] = "success"

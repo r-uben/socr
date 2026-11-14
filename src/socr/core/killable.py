@@ -165,7 +165,10 @@ def _child_main(spec: CallSpec, conn) -> None:
         # are not reliably picklable across the spawn boundary -- they can
         # carry live sockets or request objects. Cross only the TYPE NAME and
         # message; the parent reconstructs a plain exception from that.
-        conn.send(("error", type(exc).__name__, str(exc)))
+        # A plain-string ``raw`` (a judge's cut reply, #1251) is data the parent's audit record
+        # needs; it crosses as a string, never as the exception.
+        raw = getattr(exc, "raw", None)
+        conn.send(("error", type(exc).__name__, str(exc), raw if isinstance(raw, str) else None))
     finally:
         conn.close()
 
@@ -279,10 +282,13 @@ def run_killable(
                 _terminate_then_kill(proc, pgid, term_grace, kill_grace)
             if outcome[0] == "ok":
                 return outcome[1]
-            _, type_name, message = outcome
+            _, type_name, message, *rest = outcome
             if type_name in _TIMEOUT_TYPE_NAMES:
                 raise KillableTimeoutError(spec.func, timeout, killed=False)
-            raise RuntimeError(f"{spec.func} failed in killable child: {type_name}: {message}")
+            failure = RuntimeError(f"{spec.func} failed in killable child: {type_name}: {message}")
+            if rest and isinstance(rest[0], str):
+                failure.raw = rest[0]  # type: ignore[attr-defined]
+            raise failure
         # Deadline hit with no answer: presumed wedged. Kill the whole group
         # so a grandchild the call spawned (or left running) dies with it.
         logger.warning(

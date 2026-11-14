@@ -304,18 +304,20 @@ def parse_verdict(text: str) -> JudgeVerdict:
         data = _extract_json(text)
         if not isinstance(data, dict):
             raise ValueError(f"judge output is not a JSON object: {text[:200]!r}")
-    except ValueError as exc:
+        faithful = bool(data.get("faithful", False))
+        issues = [str(i) for i in data.get("issues", []) or []]
+        try:
+            confidence = float(data.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
+        action = data.get("suggested_action") or ("accept" if faithful else "escalate_engine")
+        if action not in VALID_ACTIONS:
+            action = "accept" if faithful else "escalate_engine"
+    except (TypeError, ValueError) as exc:
+        # Any malformed field (e.g. ``"issues": 7``) is the same unreadable reply as bad JSON:
+        # the raw bytes travel with the error so the call record keeps them.
         raise JudgeReplyUnparseableError(str(exc), raw=text) from exc
-    faithful = bool(data.get("faithful", False))
-    issues = [str(i) for i in data.get("issues", []) or []]
-    try:
-        confidence = float(data.get("confidence", 0.0))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    confidence = max(0.0, min(1.0, confidence))
-    action = data.get("suggested_action") or ("accept" if faithful else "escalate_engine")
-    if action not in VALID_ACTIONS:
-        action = "accept" if faithful else "escalate_engine"
     return JudgeVerdict(
         faithful=faithful,
         issues=issues,

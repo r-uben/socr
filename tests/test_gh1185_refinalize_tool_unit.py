@@ -92,6 +92,17 @@ def test_a_page_only_the_current_analysis_calls_earlier_ocr_is_marked_not_left_c
         _sidecar(run_out, run_v, prior_ocr_layer_suspect=True), _analysis(prior_ocr=True)
     )
     assert flagged is None
+    # The OLD input (flagged, empty verdict) is no longer left alone: under #1251 that page, whose
+    # prior-OCR layer is no evidence, is marked by this tool like any other empty-verdict page.
+    stale = tool.refinalize_page(
+        _sidecar(old_out, old_v, prior_ocr_layer_suspect=True), _analysis(prior_ocr=True)
+    )
+    assert stale is not None
+    stale_out, stale_verdict = stale
+    assert [(c.check, c.result) for c in stale_verdict.clauses] == [
+        (verdict_module.Check.PAGE_JUDGE, verdict_module.CheckResult.UNKNOWN)
+    ]
+    assert stale_out.status is PageStatus.WARNING
     out, verdict = unflagged
     [clause] = verdict.clauses
     assert (clause.check, clause.result) == (

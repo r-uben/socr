@@ -73,7 +73,10 @@ _PAGE_NAMES = ("alpha", "beta", "gamma", "delta", "epsilon", "zeta", "theta", "k
 def page_line(n: int) -> str:
     """Page *n*'s line. It differs per page: text identical on every page is running furniture,
     and the words check does not owe furniture."""
-    return f"{PAGE_LINE} {_PAGE_NAMES[n - 1]}"
+    if n <= len(_PAGE_NAMES):
+        return f"{PAGE_LINE} {_PAGE_NAMES[n - 1]}"
+    # Beyond the named pages: an all-letter token (digits spelled a..j) unique to the page.
+    return f"{PAGE_LINE} page{''.join('abcdefghij'[int(d)] for d in str(n))}"
 
 
 def add_page_lines(pdf_path: Any, *, top: float = 100.0) -> None:

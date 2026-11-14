@@ -55,7 +55,8 @@ happened. Record: `page`, `outcome` (`verdict`, `timeout`, `error`, `deadline_ex
 call without one, the exception type and a capped message (`JUDGE_CALL_ERROR_MAX_CHARS`, 500, with
 its derivation beside it). Recorded at the VLM leaf (`VLMPageJudge`), so the re-judge, the retries
 and every rung are covered; our own wall-clock deadline adds a `deadline_exceeded` row from
-`_TimeoutJudge`, and a worker that finishes after it still records its own `verdict` row.
+`_TimeoutJudge`; a worker that finishes after it is NOT recorded (the late append is ignored, see
+"Late records" below).
 
 * Written by `_flush_page_sidecar` (every sidecar write, so the in-loop, assemble and final flushes
   leave the same file) from `PageState.judge_calls`. A resumed page is loaded with the list its
@@ -380,6 +381,20 @@ inside the copy, uncapped anchor counts == 1 asserted: `give_word_evidence` made
 34 fail (all that get their evidence through these three functions). The other 16 carry their
 evidence inline in the test (a caption, a title, a prose line); they are red on the previous head
 (the 50 in the full run before this change).
+
+## Final review round (e961204f)
+
+* Resume with the #1181 exception: `resumed_verdict_with_judge_only_clause` DERIVES the #1181
+  clause (judge_reason `EXACT_PASS_ACCEPT_REASON` plus the `native_table_verifier_exact_pass`
+  event) instead of assuming it was published, so an empty published verdict never leaves a
+  model reading SUCCESS with no clause and no evidence.
+* `parse_verdict` wraps the whole coercion/validation, so a `TypeError`/`ValueError` from a field
+  (`{"faithful": true, "issues": 7}`) is a `JudgeReplyUnparseableError` holding the reply.
+  `run_killable` carries a string `raw` of the child's exception across its error transport.
+* A second unreadable history never overwrites an earlier aside: it takes the next free name
+  (`NNNNN.judge-calls.unrestored.1`, ...), and `kept_as` names the file actually kept.
+* Scoreboard: non-string winning text is no evidence; `pages_weak_words_pass` applies
+  `verify_pass_digests` first; the measure script counts only words PASS records.
 
 ## Not done
 
