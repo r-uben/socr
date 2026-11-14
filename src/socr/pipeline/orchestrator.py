@@ -9692,7 +9692,13 @@ class UnifiedPipeline:
         ps.point_repairs = dict(kept)
 
     def _commit_point_repairs(
-        self, state: DocumentState, page_num: int, ps: PageState, shipped: PageOutput | None
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        shipped: PageOutput | None,
+        bo: PageOutput | None = None,
+        pre_repair_text: str | None = None,
     ) -> int:
         """#1282: record the repairs the page's FINAL output carries, drop the rest.
 
@@ -9707,6 +9713,13 @@ class UnifiedPipeline:
             return 0
         kept = self._shipped_repairs(ps, shipped)
         self._forget_point_repairs(ps, kept)
+        if not kept and bo is not None and pre_repair_text is not None:
+            # #1300: no repair of the page is kept, so the reading goes back to what the model
+            # wrote (as ``_abandon_point_repairs``): a repaired cell must never ship, on any
+            # later path (assemble), without its record.
+            if getattr(bo, "point_repaired", False):
+                bo.text = pre_repair_text
+                bo.point_repaired = False
         for ev in pending:
             if (ev.data or {}).get("table_id") in kept:
                 state.events.append(ev)
@@ -13281,7 +13294,9 @@ class UnifiedPipeline:
 
                         # #1282: the repairs are recorded now that the page's final output is
                         # known: only those whose repaired row is in the bytes that ship.
-                        self._commit_point_repairs(state, page_num, ps, _record.output)
+                        self._commit_point_repairs(
+                            state, page_num, ps, _record.output, bo, _pre_repair_text
+                        )
                         _repairs_committed = True
 
                         # Strip any leading ## Page N marker so the provisional fragment

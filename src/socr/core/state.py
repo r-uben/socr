@@ -654,7 +654,8 @@ class PageState:
     row_binding_mark_only: bool = False
     #: #1282: ``table_id`` -> the cells restored from the text layer on this page, handed to
     #: ``_run_row_binding_check`` so the table's ``row_binding`` record (persisted) carries them.
-    #: Transient: a resumed page restores them from ``row_binding``.
+    #: Transient: not persisted here; the committed repairs persist in ``row_binding[...]["repairs"]``
+    #: and the sidecar's ``audit_events``, which a resumed page replays.
     point_repairs: dict = field(default_factory=dict)
     #: #1282: the ``table_point_repaired`` events of those repairs, buffered until the page's final
     #: output is settled (``_commit_point_repairs``).  Transient.

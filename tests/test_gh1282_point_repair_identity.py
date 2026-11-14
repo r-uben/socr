@@ -358,3 +358,47 @@ def _pipeline_like():
             write_manifest=True,
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# 6. #1300: a repair dropped at commit restores the model's text, on every later path
+# ---------------------------------------------------------------------------
+
+
+def _dropped_at_commit(tmp_path, name, providers, pdf, *, drop):
+    """The repair step runs; with *drop* the commit finds no repair that ships (the selector's
+    verdict is forced), without it the commit is the real one."""
+    if drop:
+        with patch.object(UnifiedPipeline, "_shipped_repairs", staticmethod(lambda ps, out: {})):
+            _, _, st, out, pdf = _run(
+                tmp_path, DROPPED, 0, check_runs=True, out_name=name, native=NATIVE,
+                providers=providers, pdf=pdf,
+            )  # fmt: skip
+    else:
+        _, _, st, out, pdf = _run(
+            tmp_path, DROPPED, 0, check_runs=True, out_name=name, native=NATIVE,
+            providers=providers, pdf=pdf,
+        )  # fmt: skip
+    return st, out, pdf
+
+
+@PROVIDER_STATES
+def test_a_repair_dropped_at_commit_ships_the_models_cell_through_assemble(tmp_path, providers):
+    st_kept, kept, pdf = _dropped_at_commit(tmp_path, "kept", providers, None, drop=False)
+    st_drop, drop, _ = _dropped_at_commit(tmp_path, "drop", providers, pdf, drop=True)
+    assert _events(drop, KIND) == []
+    assert all(not ps.point_repairs for ps in st_drop.pages.values())
+    if not providers:
+        assert _events(kept, KIND) == []
+        return  # no model reading, nothing repaired
+    # control: a kept repair still ships repaired, with its event
+    assert "| -.7 |" in _assembled(kept) and _events(kept, KIND)
+    # dropped: the model's own cell ships everywhere, assemble included, with no event
+    for text in (_fragment(drop), _assembled(drop), _sidecar(drop)["winning_output"]["text"]):
+        assert "| -7 |" in text and "| -.7 |" not in text
+    assert all(
+        not getattr(o, "point_repaired", False)
+        for ps in st_drop.pages.values()
+        for o in [ps.best_output]
+        if o
+    )
