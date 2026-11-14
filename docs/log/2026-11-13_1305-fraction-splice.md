@@ -229,3 +229,7 @@ single page leaves: the Spanish "EL ARCO IRIS INVISIBLE" p68, "7½ Hz").
 - Fed lane on the original event-page set (408 pages, 81 docs, page JSONs of
   `51270eb5_words`, text layer re-read from `inputs/fed/pdfs`): 403 leave, 5 stay, the same
   5 (2020-07-29 transcript-presentation-materials p23, p26-p29). Unchanged.
+- All-page trigger count, text layer only (PyMuPDF, 6329 Fed PDFs under
+  `Databases/central_banks/fed`, 17427 pages with any candidate glyph, trigger = glyph
+  count >= `MIN_MATH_CORRUPTION_GLYPHS`): this branch 157 pages, main (b2d6454e) 157 pages;
+  flagged now and not by main: none; flagged by main and not now: none.
