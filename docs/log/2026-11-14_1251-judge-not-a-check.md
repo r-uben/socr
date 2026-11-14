@@ -143,7 +143,7 @@ uncapped anchor count == 1 asserted before editing, all KILLED by the new tests)
 
 ## Existing tests this change fails (NOT edited; coordinator ruling needed)
 
-Full suite: 9 fail after the side-file rename (was 14).
+Full suite: 11 fail after the side-file rename (was 14).
 
 Group 1, the rule's own effect. Each builds a model-read page, accepted by a fixed judge, on a
 rotated or otherwise layer-less fixture where no words are owed, and asserts it is clean SUCCESS.
@@ -181,7 +181,7 @@ volatile, or the breaker must record a synthetic `circuit_open` call (coordinato
 The third, `test_short_circuited_pages_are_reprocessed_on_resume_when_the_judge_is_healthy`,
 asserts a judge-accepted control page is `_passed`; it is Group 1 (control page has no own layer).
 
-Totals now: 9 existing tests fail (Group 1: 8 listed above plus the gh987 control; Group 2: 2),
+Totals now: 11 existing tests fail (Group 1: 8 listed above plus the gh987 control; Group 2: 2),
 counted by file in the list above.
 
 ## Not done
