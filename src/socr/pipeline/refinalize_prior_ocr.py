@@ -35,7 +35,8 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from socr.core.verdict import published_audit_passed, reconcile_pass_trace
+from socr.core.pass_trace import trace_to_dicts
+from socr.core.verdict import published_audit_passed
 
 #: The floors this tool may replace. Both are reachable only on a POSITIVE prior-OCR
 #: finding, so the recorded ending is itself the evidence the page qualifies.
@@ -357,10 +358,14 @@ def _updated_sidecar(sidecar: dict, record) -> dict:
     out["provider"] = winning.get("provider_id", "")
     if record.verdict is not None:
         out["verdict"] = record.verdict.to_dict()
-        # #1183: keep the pass trace consistent with the verdict this tool wrote.
-        _checks = reconcile_pass_trace(sidecar.get("checks"), record.verdict)
-        if _checks is not None:
-            out["checks"] = _checks
+    # #1183: a page this tool rewrote ships new text, and the finalize seam that produced the
+    # record also states its checks on that text (a failure marker's trace would put
+    # ``FAILED_MARKER_REASON`` on recovered prose). The record's own trace is the page's trace;
+    # a record without one drops the old list rather than keeping entries about the old text.
+    if record.checks is not None:
+        out["checks"] = trace_to_dicts(record.checks)
+    else:
+        out.pop("checks", None)
     out["winning_output"] = winning
     # The table gate's answer, as a fresh run persists it: the masked ending is reached
     # only when the gate said "no table" (Argon, round 2 re-review).

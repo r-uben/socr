@@ -60,12 +60,13 @@ class TraceEntry:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TraceEntry:
-        return cls(
-            check=str(d["check"]),
-            result=TraceResult(d["result"]),
-            scope=str(d.get("scope") or SCOPE_PAGE),
-            reason=str(d.get("reason") or ""),
-        )
+        # Strict: an entry is read only when every field is the string the writer wrote. A
+        # missing scope is not "page" (a table pass would then read as a page pass), and a
+        # coerced non-string would report assurance for a check that never existed.
+        check, scope, reason = d["check"], d["scope"], d["reason"]
+        if not all(isinstance(v, str) for v in (check, scope, reason)) or not check or not scope:
+            raise TypeError("a trace entry's check, scope and reason must be strings")
+        return cls(check=check, result=TraceResult(d["result"]), scope=scope, reason=reason)
 
 
 def trace_to_dicts(entries: tuple[TraceEntry, ...] | list[TraceEntry]) -> list[dict[str, str]]:
@@ -74,7 +75,8 @@ def trace_to_dicts(entries: tuple[TraceEntry, ...] | list[TraceEntry]) -> list[d
 
 def trace_from_dicts(raw: Any) -> tuple[TraceEntry, ...] | None:
     """A stored trace, or ``None`` when *raw* is not one (absent key, wrong type, or any
-    unreadable entry). ``None`` and ``()`` differ: ``()`` is a recorded empty trace."""
+    unreadable entry: one malformed entry makes the whole trace unreadable, so a valid PASS beside
+    it is never reported). ``None`` and ``()`` differ: ``()`` is a recorded empty trace."""
     if not isinstance(raw, list):
         return None
     try:

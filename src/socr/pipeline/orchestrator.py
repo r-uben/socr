@@ -12169,6 +12169,10 @@ class UnifiedPipeline:
                 ps.best_output = fallback
 
         # Snapshot the ladder for manifest provenance (B3).
+        state.equation_lane_enabled = bool(
+            self.config.equation_region_lane
+            or (self.config.recover_clean_equations and self.config.detect_equations)
+        )
         state.agentic_ladder = [
             {
                 "provider_id": p.id,

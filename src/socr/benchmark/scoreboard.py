@@ -110,9 +110,13 @@ def _clauses(sidecar: dict) -> list[dict]:
 
 
 def _checks(sidecar: dict) -> list[dict]:
-    """The page's pass trace (#1183), ``[]`` when the sidecar carries none or a malformed one."""
+    """The page's pass trace (#1183), ``[]`` when the sidecar carries none or a malformed one: one
+    unreadable entry makes the whole list unreadable (the reader's rule), so a valid PASS beside it
+    is not counted."""
+    from socr.core.pass_trace import trace_from_dicts
+
     raw = sidecar.get("checks")
-    return [e for e in raw if isinstance(e, dict)] if isinstance(raw, list) else []
+    return raw if trace_from_dicts(raw) is not None else []
 
 
 def _missing_links(text: str, doc_dir: Path) -> int:
@@ -210,14 +214,16 @@ def count_document(doc_dir: Path) -> collections.Counter:
         attempts = sidecar.get("attempts_summary") or sidecar.get("attempts") or []
         if len(attempts) > 1:
             c["records.pages_more_than_one_attempt"] += 1
-        if status == "success" and engine == "native" and not events and not clauses:
+        checks = _checks(sidecar)
+        # "No trace" is a page with no event, no clause AND no pass trace: a traced page that has
+        # nothing else to say is not untraced (#1183).
+        if status == "success" and engine == "native" and not events and not clauses and not checks:
             c["records.clean_native_success_no_trace"] += 1
         if any(str(cl.get("check")) == "unknown" for cl in clauses):
             c["records.pages_clause_check_unknown"] += 1
         # #1183: what the pass trace says. A page with no entry at all cannot say which checks
         # ran; a page with any PASS names at least one check that ran and found nothing. NOT_RUN
         # is counted per check: it is where a check could have applied and did not.
-        checks = _checks(sidecar)
         if not checks:
             c["records.pages_checks_empty"] += 1
         if any(str(e.get("result")) == "PASS" for e in checks):

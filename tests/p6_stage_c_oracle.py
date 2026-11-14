@@ -1637,7 +1637,7 @@ def _pass_trace_1183_pages() -> dict[int, list[dict]]:
             e(
                 "text_layer_drops",
                 "NOT_RUN",
-                "page",
+                "table_rows",
                 f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
             ),
             e(
@@ -1669,7 +1669,7 @@ def _pass_trace_1183_pages() -> dict[int, list[dict]]:
             e(
                 "text_layer_drops",
                 "NOT_RUN",
-                "page",
+                "table_rows",
                 f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
             ),
             e(
@@ -1698,7 +1698,7 @@ def _pass_trace_1183_pages() -> dict[int, list[dict]]:
             e("page_judge", "FAIL", "page", "the page judge did not accept the bytes that ship"),
             e("prior_ocr_layer", "PASS", "page", V.PRIOR_OCR_PASS_REASON),
             e("row_binding", "NOT_RUN", "table:1", V.ROW_BINDING_NOT_RUN_REASON),
-            e("text_layer_drops", "NOT_RUN", "page", V.DROPS_LAYER_NOT_USABLE_REASON),
+            e("text_layer_drops", "NOT_RUN", "table_rows", V.DROPS_LAYER_NOT_USABLE_REASON),
             e("text_layer_numbers", "UNKNOWN", "page", V.NO_OWN_TEXT_REASON),
             e("text_layer_words", "NOT_RUN", "page", V.WORDS_NO_REFERENCE_REASON),
         ],
@@ -1714,7 +1714,7 @@ def _pass_trace_1183_pages() -> dict[int, list[dict]]:
             e("page_judge", "NOT_APPLICABLE", "page", V.EXACT_PASS_NOT_APPLICABLE_REASON),
             e("prior_ocr_layer", "PASS", "page", V.PRIOR_OCR_PASS_REASON),
             e("row_binding", "NOT_RUN", "table:1", V.ROW_BINDING_NOT_RUN_REASON),
-            e("text_layer_drops", "NOT_RUN", "page", V.DROPS_LAYER_NOT_USABLE_REASON),
+            e("text_layer_drops", "NOT_RUN", "table_rows", V.DROPS_LAYER_NOT_USABLE_REASON),
             e("text_layer_numbers", "UNKNOWN", "page", V.NO_OWN_TEXT_REASON),
             e("text_layer_words", "NOT_RUN", "page", V.WORDS_NO_REFERENCE_REASON),
         ],
@@ -1730,7 +1730,7 @@ def _pass_trace_1183_pages() -> dict[int, list[dict]]:
             e("page_judge", "NOT_APPLICABLE", "page", V.EXACT_PASS_NOT_APPLICABLE_REASON),
             e("prior_ocr_layer", "PASS", "page", V.PRIOR_OCR_PASS_REASON),
             e("row_binding", "NOT_RUN", "table:1", V.ROW_BINDING_NOT_RUN_REASON),
-            e("text_layer_drops", "NOT_RUN", "page", V.DROPS_LAYER_NOT_USABLE_REASON),
+            e("text_layer_drops", "NOT_RUN", "table_rows", V.DROPS_LAYER_NOT_USABLE_REASON),
             e("text_layer_numbers", "UNKNOWN", "page", V.NO_OWN_TEXT_REASON),
             e("text_layer_words", "NOT_RUN", "page", V.WORDS_NO_REFERENCE_REASON),
         ],
@@ -1749,7 +1749,7 @@ def _pass_trace_1183_pages() -> dict[int, list[dict]]:
             e(
                 "text_layer_drops",
                 "NOT_RUN",
-                "page",
+                "table_rows",
                 f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
             ),
             e(
@@ -1778,7 +1778,7 @@ def _pass_trace_1183_pages() -> dict[int, list[dict]]:
             e("page_judge", "NOT_APPLICABLE", "page", V.EXACT_PASS_NOT_APPLICABLE_REASON),
             e("prior_ocr_layer", "NOT_APPLICABLE", "page", V.PRIOR_OCR_NO_LAYER_REASON),
             e("row_binding", "NOT_APPLICABLE", "page", V.ROW_BINDING_NO_TABLE_REASON),
-            e("text_layer_drops", "NOT_RUN", "page", V.DROPS_LAYER_NOT_USABLE_REASON),
+            e("text_layer_drops", "NOT_RUN", "table_rows", V.DROPS_LAYER_NOT_USABLE_REASON),
             e("text_layer_numbers", "UNKNOWN", "page", V.NO_OWN_TEXT_REASON),
             e("text_layer_words", "NOT_APPLICABLE", "page", V.WORDS_NO_LAYER_REASON),
         ],
@@ -1800,7 +1800,7 @@ def _pass_trace_1183_pages() -> dict[int, list[dict]]:
             e("page_judge", "FAIL", "page", "the page judge did not accept the bytes that ship"),
             e("prior_ocr_layer", "PASS", "page", V.PRIOR_OCR_PASS_REASON),
             e("row_binding", "NOT_RUN", "table:1", V.ROW_BINDING_NOT_RUN_REASON),
-            e("text_layer_drops", "NOT_RUN", "page", V.DROPS_LAYER_NOT_USABLE_REASON),
+            e("text_layer_drops", "NOT_RUN", "table_rows", V.DROPS_LAYER_NOT_USABLE_REASON),
             e("text_layer_numbers", "UNKNOWN", "page", V.NO_OWN_TEXT_REASON),
             e("text_layer_words", "NOT_RUN", "page", V.WORDS_NO_REFERENCE_REASON),
         ],
@@ -1822,7 +1822,7 @@ def _pass_trace_1183_pages() -> dict[int, list[dict]]:
                 "page",
                 "a table on this page cannot be represented faithfully and was withheld",
             ),
-            e("text_layer_drops", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
+            e("text_layer_drops", "NOT_RUN", "table_rows", V.FAILED_MARKER_REASON),
             e("text_layer_numbers", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
             e("text_layer_words", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
         ],
@@ -1847,7 +1847,7 @@ def _pass_trace_1183_pages() -> dict[int, list[dict]]:
             e(
                 "text_layer_drops",
                 "NOT_RUN",
-                "page",
+                "table_rows",
                 f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
             ),
             e(
@@ -1873,7 +1873,7 @@ def _pass_trace_1183_pages() -> dict[int, list[dict]]:
             e(
                 "text_layer_drops",
                 "NOT_RUN",
-                "page",
+                "table_rows",
                 f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
             ),
             e(
@@ -1905,7 +1905,7 @@ def _pass_trace_1183_pages() -> dict[int, list[dict]]:
             e(
                 "text_layer_drops",
                 "NOT_RUN",
-                "page",
+                "table_rows",
                 f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
             ),
             e(

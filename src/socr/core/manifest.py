@@ -7889,6 +7889,7 @@ def _select_and_finalize_page(
         verdict,
         event_kinds=_page_event_kinds,
         providers_available=bool(getattr(state, "agentic_ladder", None)),
+        equation_lane_enabled=bool(getattr(state, "equation_lane_enabled", False)),
         replay=_replay,
         resumed_without_trace=_replay is None and getattr(p, "published_verdict", None) is not None,
     )

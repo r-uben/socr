@@ -869,6 +869,9 @@ class DocumentState:
     # Agentic routing ladder snapshot (B3) — populated by _phase_agentic, None otherwise.
     # Each entry: {provider_id, model, backend, cost_per_page_usd, tier}.
     agentic_ladder: list[dict] = field(default_factory=list)
+    # #1183: whether an equation-reading lane (the region lane, or the legacy detect + recover-clean
+    # pair) could attach a reading on this run. Set with the ladder; read only by the pass trace.
+    equation_lane_enabled: bool = False
     # Judge model used for agentic routing (B3) — "" when heuristic judge was used.
     agentic_judge_model: str = ""
     # PP-2 cascade halt: non-empty when the page loop stopped early because the

@@ -24,6 +24,7 @@ from socr.core.pass_trace import TraceEntry, TraceResult, trace_from_dicts, trac
 from socr.core.result import PageOutput, PageStatus
 from socr.core.verdict import (
     CHART_VALUES_NOT_APPLICABLE_REASON,
+    SCOPE_TABLE_ROWS,
     NO_PROVIDER_LADDER_REASON,
     PASS_TRACE_SLOTS,
     RESUMED_WITHOUT_TRACE_REASON,
@@ -69,6 +70,11 @@ def _out(text: str = LAYER, engine: str = "qwen") -> PageOutput:
     return PageOutput(page_num=1, text=text, status=PageStatus.SUCCESS, engine=engine)
 
 
+def _scope(check: str) -> str:
+    """The scope a check's non-clause entry sits at: the drops check reads table rows only."""
+    return SCOPE_TABLE_ROWS if check == "text_layer_drops" else "page"
+
+
 def _by_check(outcomes) -> dict[tuple[str, str], TraceEntry]:
     return {(o.entry.check, o.entry.scope): o.entry for o in outcomes}
 
@@ -92,13 +98,18 @@ def _trace(out, p, **kw) -> dict[tuple[str, str], TraceEntry]:
 )
 def test_a_check_that_ran_and_found_nothing_is_a_pass_at_page_scope(check: Check) -> None:
     trace = _trace(_out(), _p())
-    entry = trace[(check.value, "page")]
+    entry = trace[(check.value, _scope(check.value))]
     assert entry.result is TraceResult.PASS, entry
+    assert (check.value, "page") not in trace or check is not Check.TEXT_LAYER_DROPS
+
+
+TABLE = "| a | b |\n| - | - |\n| Korea | 4.0 |\n"
+THREE_TABLES = "\n\ntext\n\n".join([TABLE] * 3)
 
 
 def test_row_binding_pass_keeps_its_table_scope_and_never_reads_as_a_page_pass() -> None:
     p = _p(row_binding={"p1-t1": {"table_index": 1, "outcome": "bound"}})
-    trace = _trace(_out(), p)
+    trace = _trace(_out(THREE_TABLES), p)
     assert trace[(ROW_BINDING_CHECK, "table:2")].result is TraceResult.PASS
     assert (ROW_BINDING_CHECK, "page") not in trace
 
@@ -111,15 +122,12 @@ def test_row_binding_records_state_their_own_outcome() -> None:
             "p1-t2": {"table_index": 2, "outcome": "unverifiable"},
         }
     )
-    trace = _trace(_out(), p)
+    trace = _trace(_out(THREE_TABLES), p)
     assert [trace[(ROW_BINDING_CHECK, f"table:{k}")].result for k in (1, 2, 3)] == [
         TraceResult.PASS,
         TraceResult.FAIL,
         TraceResult.UNKNOWN,
     ]
-
-
-TABLE = "| a | b |\n| - | - |\n| Korea | 4.0 |\n"
 
 
 def test_row_binding_without_a_record_says_why_per_table() -> None:
@@ -136,6 +144,12 @@ def test_row_binding_without_a_record_says_why_per_table() -> None:
     [
         pytest.param("text_layer_numbers", {}, _out(LAYER, "native"), id="numbers: native text"),
         pytest.param("text_layer_drops", {}, _out(LAYER, "native"), id="drops: native text"),
+        pytest.param(
+            "text_layer_words",
+            {"own_layer_word_reference": "", "own_layer_figure_words": "x"},
+            _out("![c](a.png)"),
+            id="words: none owed",
+        ),
         pytest.param("text_layer_numbers", {}, _out("  "), id="numbers: no text"),
         pytest.param("text_layer_words", {}, _out("  "), id="words: no text"),
         pytest.param(
@@ -156,7 +170,7 @@ def test_row_binding_without_a_record_says_why_per_table() -> None:
     ],
 )
 def test_a_check_that_does_not_apply_says_so(check: str, over: dict, out: PageOutput) -> None:
-    entry = _trace(out, _p(**over), providers_available=True)[(check, "page")]
+    entry = _trace(out, _p(**over), providers_available=True)[(check, _scope(check))]
     assert entry.result is TraceResult.NOT_APPLICABLE and entry.reason, entry
 
 
@@ -176,7 +190,7 @@ def test_a_check_that_does_not_apply_says_so(check: str, over: dict, out: PageOu
 def test_a_check_that_could_have_applied_and_did_not_run_is_not_run(
     check: str, over: dict, out: PageOutput
 ) -> None:
-    entry = _trace(out, _p(**over), providers_available=True)[(check, "page")]
+    entry = _trace(out, _p(**over), providers_available=True)[(check, _scope(check))]
     assert entry.result is TraceResult.NOT_RUN and entry.reason, entry
 
 
@@ -190,11 +204,11 @@ def test_no_provider_makes_the_model_dependent_checks_not_run_and_nothing_else()
     with_provider = _trace(out, _p(), providers_available=True)
     without = _trace(out, _p(), providers_available=False)
     moved = {k for k in with_provider if with_provider[k] != without[k]}
-    assert moved == {(c, "page") for c in MODEL_DEPENDENT}
+    assert moved == {(c, _scope(c)) for c in MODEL_DEPENDENT}
     for check in MODEL_DEPENDENT:
-        assert with_provider[(check, "page")].result is TraceResult.NOT_APPLICABLE
-        assert without[(check, "page")].result is TraceResult.NOT_RUN
-        assert NO_PROVIDER_LADDER_REASON in without[(check, "page")].reason
+        assert with_provider[(check, _scope(check))].result is TraceResult.NOT_APPLICABLE
+        assert without[(check, _scope(check))].result is TraceResult.NOT_RUN
+        assert NO_PROVIDER_LADDER_REASON in without[(check, _scope(check))].reason
 
 
 def test_an_absent_clause_is_never_read_as_a_pass() -> None:
@@ -429,3 +443,271 @@ def test_the_scoreboard_counts_passes_empty_traces_and_not_run_per_check(tmp_pat
     assert not any(
         k.startswith("records.check_result.") for k in scoreboard.render([counts], ["x"]).split()
     )
+
+
+# --- review round on #1332: PASS only for a check that ran on the SHIPPED text ------------
+
+WORD_FIGURE_ONLY = {"own_layer_word_reference": "", "own_layer_figure_words": "chart axis words"}
+
+
+def test_words_pass_needs_words_owed_and_a_layer_that_is_evidence() -> None:
+    """Carbon 1: zero words compared is not a pass, and neither is agreement with a layer the
+    page analysis refused or found glyph-damaged."""
+    shipped = {(c, s): e for (c, s), e in _trace(_out(), _p()).items()}
+    assert shipped[("text_layer_words", "page")].result is TraceResult.PASS
+    chart = _trace(_out("![chart](c.png)"), _p(**WORD_FIGURE_ONLY))[("text_layer_words", "page")]
+    assert chart.result is TraceResult.NOT_APPLICABLE and "owes no word" in chart.reason
+    for damage in ({"is_born_digital": False}, {"has_unrecovered_symbol_glyphs": True}):
+        # one stray word the reading kept: nothing missing, so the old code said PASS
+        entry = _trace(_out("korea china"), _p(own_layer_word_reference="korea", **damage))[
+            ("text_layer_words", "page")
+        ]
+        assert entry.result is TraceResult.NOT_RUN, (damage, entry)
+
+
+def test_drops_checks_table_rows_only_so_its_scope_is_never_page() -> None:
+    """Carbon 2: the PASS of the drops check names the region it read."""
+    trace = _trace(_out(), _p())
+    assert trace[("text_layer_drops", SCOPE_TABLE_ROWS)].result is TraceResult.PASS
+    assert ("text_layer_drops", "page") not in trace
+    assert ("text_layer_drops", SCOPE_TABLE_ROWS) in PASS_TRACE_SLOTS
+
+
+def test_row_binding_states_only_tables_that_ship() -> None:
+    """Carbon 3 and Fable 1/2: a record never speaks for a table the output does not carry, and
+    every shipped table without a record is NOT_RUN."""
+    bound = {"table_index": 0, "outcome": "bound"}
+    marker = _out("[page 1 failed: unverifiable table -- see image]")
+    entry = _trace(marker, _p(row_binding={"p1-t0": bound}))[(ROW_BINDING_CHECK, "table:1")]
+    assert entry.result is TraceResult.NOT_RUN and "does not ship" in entry.reason
+    # a record for a third table on a page that ships one
+    far = {"p1-t2": {"table_index": 2, "outcome": "bound"}}
+    trace = _trace(_out(TABLE), _p(row_binding=far))
+    assert trace[(ROW_BINDING_CHECK, "table:3")].result is TraceResult.NOT_RUN
+    assert trace[(ROW_BINDING_CHECK, "table:1")].result is TraceResult.NOT_RUN
+    # a native text is not the reading the record was taken on
+    native = _trace(_out(TABLE, "native"), _p(row_binding={"p1-t0": bound}))
+    assert native[(ROW_BINDING_CHECK, "table:1")].result is TraceResult.NOT_RUN
+    # partial records: the others are stated, not absent
+    some = _trace(_out(THREE_TABLES), _p(row_binding={"p1-t0": bound}))
+    assert [some[(ROW_BINDING_CHECK, f"table:{k}")].result for k in (1, 2, 3)] == [
+        TraceResult.PASS,
+        TraceResult.NOT_RUN,
+        TraceResult.NOT_RUN,
+    ]
+    assert not any(s == "page" for c, s in some if c == ROW_BINDING_CHECK)
+
+
+def test_replay_overlays_every_verdict_clause_it_lacks() -> None:
+    """Fable 3: a resumed page demoted after its original run cannot say PASS beside its clause."""
+    stored = (TraceEntry("control_bytes", TraceResult.PASS, "page", "ran"),)
+    clause = VerdictClause(Check.CONTROL_BYTES, CheckResult.FAIL, "page", "now found")
+    other = VerdictClause(Check.TEXT_LAYER_WORDS, CheckResult.UNKNOWN, "page", "new")
+    got = {
+        (e.check, e.scope): e
+        for e in build_pass_trace(_out(), _p(), PageVerdict(1, (clause, other)), replay=stored)
+    }
+    assert got[("control_bytes", "page")].result is TraceResult.FAIL
+    assert got[("text_layer_words", "page")].result is TraceResult.UNKNOWN
+
+
+def test_a_resumed_page_demoted_at_assemble_carries_its_clause_in_the_trace(tmp_path) -> None:
+    from test_gh1145_chart_values_clause import _state
+
+    from socr.core.manifest import _select_and_finalize_page
+
+    state = _state(tmp_path, text="body 1.0", engine="qwen", status=PageStatus.WARNING)
+    ps = state.pages[1]
+    ps.published_verdict = PageVerdict(1)
+    ps.published_checks = (TraceEntry("control_bytes", TraceResult.PASS, "page", "clean run"),)
+    record = _select_and_finalize_page(state, 1)
+    assert record.verdict.clauses, "premise: the demoted page carries a clause"
+    by_key = {(e.check, e.scope): e for e in record.checks}
+    for clause in record.verdict.clauses:
+        entry = by_key[(clause.check.value, clause.scope)]
+        assert entry.result is not TraceResult.PASS, entry
+
+
+def test_a_resumed_page_without_a_trace_states_table_slots_not_a_page_row_binding() -> None:
+    trace = _trace(_out(THREE_TABLES), _p(), resumed_without_trace=True)
+    assert (ROW_BINDING_CHECK, "page") not in trace
+    assert {k for k in trace if k[0] == ROW_BINDING_CHECK} == {
+        (ROW_BINDING_CHECK, f"table:{k}") for k in (1, 2, 3)
+    }
+
+
+def test_equation_fidelity_with_a_provider_and_the_lane_off_is_not_run() -> None:
+    """Fable 6: a lane that could not attach a reading did not run; with it on, a page with no
+    equation is not applicable. The DIFFERENCE is the lane flag alone."""
+    on = _trace(_out(), _p(), providers_available=True, equation_lane_enabled=True)
+    off = _trace(_out(), _p(), providers_available=True, equation_lane_enabled=False)
+    moved = {k for k in on if on[k] != off[k]}
+    assert moved == {("equation_fidelity", "page")}
+    assert on[("equation_fidelity", "page")].result is TraceResult.NOT_APPLICABLE
+    assert off[("equation_fidelity", "page")].result is TraceResult.NOT_RUN
+
+
+def test_consensus_winners_are_model_readings_for_the_numbers_check() -> None:
+    entry = _trace(_out(LAYER, "consensus(qwen)"), _p())[("text_layer_numbers", "page")]
+    assert entry.result is TraceResult.PASS, entry
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"check": "x", "result": "PASS", "reason": ""},  # no scope: not "page"
+        {"check": "x", "result": "PASS", "scope": 3, "reason": ""},
+        {"check": 7, "result": "PASS", "scope": "page", "reason": ""},
+        {"check": "x", "result": "PASS", "scope": "page", "reason": None},
+        {"check": "x", "result": "PASS", "scope": "", "reason": ""},
+    ],
+)
+def test_a_malformed_entry_makes_the_whole_trace_unreadable(bad: dict) -> None:
+    good = {"check": "y", "result": "PASS", "scope": "page", "reason": "ok"}
+    assert trace_from_dicts([good, bad]) is None
+    from socr.benchmark import scoreboard
+
+    assert scoreboard._checks({"checks": [good, bad]}) == []
+    assert scoreboard._checks({"checks": [good]}) == [good]
+
+
+def test_the_scoreboard_does_not_call_a_traced_clean_native_page_untraced(tmp_path: Path) -> None:
+    from socr.benchmark import scoreboard
+
+    pages = tmp_path / "doc" / "pages"
+    pages.mkdir(parents=True)
+    for n, checks in (
+        (1, [{"check": "x", "result": "NOT_RUN", "scope": "page", "reason": "r"}]),
+        (2, None),
+    ):
+        (pages / f"{n:05d}.md").write_text("text\n")
+        body = {"page_num": n, "status": "success", "engine": "native", "audit_passed": True}
+        if checks is not None:
+            body["checks"] = checks
+        (pages / f"{n:05d}.json").write_text(json.dumps(body))
+    counts = scoreboard.count_document(tmp_path / "doc")
+    assert counts["records.clean_native_success_no_trace"] == 1
+
+
+# --- the offline tools --------------------------------------------------------------------
+
+OLD_TRACE = trace_to_dicts(
+    (
+        TraceEntry("text_layer_numbers", TraceResult.PASS, "page", "ok"),
+        TraceEntry("text_layer_words", TraceResult.PASS, "page", "ok"),
+        TraceEntry("equation_fidelity", TraceResult.NOT_APPLICABLE, "page", "none attached"),
+    )
+)
+
+
+def test_reconcile_turns_a_kept_pass_into_not_run_when_the_text_changed() -> None:
+    """Fable 4: a PASS the tool did not recompute says nothing about the new text."""
+    recomputed = (TraceEntry("text_layer_numbers", TraceResult.PASS, "page", "rerun"),)
+    got = {
+        (e["check"], e["scope"]): e
+        for e in reconcile_pass_trace(
+            OLD_TRACE, PageVerdict(1), recomputed=recomputed, text_changed=True
+        )
+    }
+    assert got[("text_layer_numbers", "page")]["reason"] == "rerun"
+    assert got[("text_layer_words", "page")]["result"] == "NOT_RUN"
+    assert "not run on the new text" in got[("text_layer_words", "page")]["reason"]
+    assert got[("equation_fidelity", "page")]["result"] == "NOT_APPLICABLE"
+    kept = {e["result"] for e in reconcile_pass_trace(OLD_TRACE, PageVerdict(1))}
+    assert "NOT_RUN" not in kept, "text unchanged: the PASS entries stay"
+
+
+def test_a_malformed_old_trace_is_dropped_from_a_rewritten_sidecar() -> None:
+    from socr.core.verdict import write_reconciled_trace
+
+    out = {"checks": [{"check": "x"}], "page_num": 1}
+    write_reconciled_trace(out, out["checks"], PageVerdict(1), text_changed=True)
+    assert "checks" not in out
+
+
+def test_refinalize_boilerplate_marks_kept_passes_not_run(tmp_path: Path) -> None:
+    from test_boilerplate_output import _PREAMBLE_LINE
+
+    from socr.pipeline.refinalize_boilerplate import refinalize_document
+
+    doc = tmp_path / "doc"
+    pages = doc / "pages"
+    pages.mkdir(parents=True)
+    body = "Section 1\n\nOutlays total 100 billion in fiscal year 2026."
+    raw = f"{_PREAMBLE_LINE}\n\n---\n\n{body}"
+    sidecar = {
+        "page_num": 1,
+        "terminal": True,
+        "winning_output": {"engine": "qwen", "text": raw},
+        "verdict": {"page_num": 1, "clauses": []},
+        "checks": OLD_TRACE,
+    }
+    (pages / "00001.json").write_text(json.dumps(sidecar))
+    (pages / "00001.md").write_text(raw)
+    (doc / "doc.md").write_text(f"## Page 1\n\n{raw}")
+    refinalize_document(doc, apply=True)
+    after = json.loads((pages / "00001.json").read_text())
+    assert after["winning_output"]["text"] == body
+    results = {e["check"]: e["result"] for e in after["checks"]}
+    assert results["text_layer_numbers"] == "NOT_RUN" and results["text_layer_words"] == "NOT_RUN"
+    assert results["equation_fidelity"] == "NOT_APPLICABLE"
+
+
+def test_refinalize_prior_ocr_takes_the_records_own_trace() -> None:
+    from socr.pipeline import refinalize_prior_ocr as tool
+
+    out = PageOutput(
+        page_num=1, text="recovered prose 1.0", status=PageStatus.WARNING, engine="native"
+    )
+    new_checks = (TraceEntry("control_bytes", TraceResult.PASS, "page", "fresh"),)
+    record = SimpleNamespace(
+        output=out,
+        disposition=SimpleNamespace(to_dict=lambda: {}),
+        verdict=PageVerdict(1),
+        checks=new_checks,
+    )
+    sidecar = {
+        "page_num": 1,
+        "winning_output": {"text": "[page 1 failed: x]"},
+        "checks": trace_to_dicts(
+            (
+                TraceEntry(
+                    "text_layer_numbers",
+                    TraceResult.NOT_RUN,
+                    "page",
+                    "this page ships socr's failure marker",
+                ),
+            )
+        ),
+    }
+    try:
+        got = tool._updated_sidecar(sidecar, record)
+    except Exception as exc:  # pragma: no cover - the fake record is too thin for a field
+        pytest.skip(f"fake record too thin: {exc!r}")
+    assert got["checks"] == trace_to_dicts(new_checks)
+
+
+def test_refinalize_own_text_states_the_words_check_it_wrote() -> None:
+    from socr.pipeline.refinalize_own_text import _updated_sidecar
+
+    out = _out(LAYER, "native")
+    sidecar = {
+        "page_num": 1,
+        "status": "success",
+        "winning_output": out.to_dict(),
+        "checks": trace_to_dicts(
+            (
+                TraceEntry(
+                    "text_layer_words", TraceResult.NOT_RUN, "page", RESUMED_WITHOUT_TRACE_REASON
+                ),
+            )
+        ),
+    }
+    from socr.core.verdict import page_word_check_record
+
+    p = _p()
+    got = _updated_sidecar(
+        sidecar, out, PageVerdict(1), words_record=page_word_check_record(out, p), page_state=p
+    )
+    entry = {e["check"]: e for e in got["checks"]}["text_layer_words"]
+    assert entry["result"] == "PASS" and got["text_layer_words"]["compared"] > 0

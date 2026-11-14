@@ -48,7 +48,11 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
-from socr.core.verdict import pass_trace_outcomes, published_audit_passed, reconcile_pass_trace
+from socr.core.verdict import (
+    published_audit_passed,
+    rerun_text_dependent_checks,
+    write_reconciled_trace,
+)
 
 #: The per-document record of what this tool changed.
 LOG_NAME = "refinalized_point_drops.json"
@@ -237,16 +241,16 @@ def repair_page(
         new_sidecar["row_binding"] = {**records, **payloads}
     # #1183: keep the pass trace consistent with the verdict and the row-binding records this tool
     # wrote (no invention): the check ran here, so its table entries are the records' own.
-    # It also ran the two number checks again on the repaired text, so their outcomes are its own.
-    _rerun = {Check.TEXT_LAYER_NUMBERS.value, Check.TEXT_LAYER_DROPS.value}
-    _checks = reconcile_pass_trace(
+    # It also ran every text-dependent check again on the repaired text (it holds the page state),
+    # so their outcomes are its own; any other kept PASS is NOT_RUN on a text this tool changed.
+    write_reconciled_trace(
+        new_sidecar,
         sidecar.get("checks"),
         verdict,
-        new_sidecar.get("row_binding") if payloads else None,
-        recomputed=tuple(o.entry for o in pass_trace_outcomes(final, p) if o.entry.check in _rerun),
+        row_binding_records=new_sidecar.get("row_binding") if payloads else None,
+        recomputed=rerun_text_dependent_checks(final, p, sidecar.get("checks")),
+        text_changed=(sidecar.get("winning_output") or {}).get("text") != final.text,
     )
-    if _checks is not None:
-        new_sidecar["checks"] = _checks
 
     # The page's events: text-layer events kept, shrunk or removed; row-binding events rewritten;
     # the repair events added where a run records them (after the page's other events).
