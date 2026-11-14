@@ -42,6 +42,9 @@ CELLS = "cells"
 REFUSE = "refuse"
 DEFER = "defer"
 
+#: Reason on a CELLS plan: the failing cells' tokens disagree with the text layer.
+CELL_MISMATCH_REASON = "cell_mismatch"
+
 PlanAction = Literal["ship", "cells", "refuse", "defer"]
 
 # GH-917 / GH-916: reason on the DEFER that replaces a rotated exact-pass SHIP.
@@ -67,6 +70,9 @@ MODEL_RETRY_REFUSAL_REASONS: frozenset[str] = frozenset(
         "unlocalizable_cells",
         "region_unverifiable",
         "numeric_orphan",
+        # A CELLS plan whose repair could not be confirmed, or whose spliced grid re-plans to
+        # a refusal, ends refused: the page was never read whole by a model.
+        CELL_MISMATCH_REASON,
     }
 )
 
@@ -334,7 +340,7 @@ def plan_native_table(
         cells = locate_mismatched_cells(words, markdown)
         if not cells:
             return NativeTablePlan(REFUSE, reason="unlocalizable_cells")
-        return NativeTablePlan(CELLS, cells=tuple(cells), reason="cell_mismatch")
+        return NativeTablePlan(CELLS, cells=tuple(cells), reason=CELL_MISMATCH_REASON)
     if unverifiable:
         return NativeTablePlan(REFUSE, reason="region_unverifiable")
     return NativeTablePlan(DEFER, reason=verdict.state or VerifierState.AMBIGUOUS)

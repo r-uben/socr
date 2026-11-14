@@ -68,7 +68,34 @@ provider states. No absolute status tuple is pinned.
 | P0-1: skip `_refuse_native_table_first` in the retry branch | `retry_differs_from_main...[provider]`, `rejected_reading_ends...[provider]` |
 | P0-2: remove the `native_table_model_retry` return in `d3_floor_kept_model_output` | `rejected_reading_ends...[provider]` (a model reading ships over the floor), `rejected_reading_is_kept_by_262_without_the_exemption` |
 | allowlist: drop the reason condition (retry every REFUSE) | `other_refusal_reasons_stay_refused` x3, `retry_differs...[provider]` |
-| allowlist: add `header_unattributed` | `other_refusal_reasons_stay_refused[header_unattributed]`, `allowlist_is_the_five_named_reasons` |
+| allowlist: add `header_unattributed` | `other_refusal_reasons_stay_refused[header_unattributed]`, `allowlist_is_the_six_named_reasons` |
+
+## Review round 1 (PR #1320)
+
+* An ACCEPTED retry lifts the refusal (`_lift_native_table_refusal`): `native_table_structure_failed`,
+  `native_table_unverifiable`, its ordinals and the floor picture go back to their pre-refusal values, as
+  `_crop_repair` does. Before this, the accepted page landed in `d3_floor_pages` (false
+  `table_region_unverifiable`, red CLI line, document error). A rejected retry keeps them. The native grid's own
+  `table_structure_failed` / `table_not_scorable` events are facts about the layer and still reach the
+  document note; that is untouched here.
+* The retry event is recorded after the row-binding withhold and the point repairs, and `accepted` also
+  requires the shipped page not to be ERROR. Assemble's final-body guard restates it
+  (`_restate_native_table_model_retry`, an edit of the existing event so a resumed page keeps its record).
+* `--retry-failed-pages`: the dropped plan and the pre-refusal flags are kept by the loop (not on `PageState`,
+  which the reset replaces) and the plan is put back for pass two, so the refusal, the #262 exemption and the
+  retry flag are applied again.
+* A `cell_mismatch` page whose repair could not be confirmed, or whose spliced grid re-plans to an
+  allowlisted REFUSE, is retried too. `cell_mismatch` joins the allowlist (six reasons); it can only be a CELLS
+  plan, never a plan-time REFUSE, and the plan is replaced only when a provider exists, so no-provider runs end
+  as before.
+
+Mutants (copy outside the repo, `socr.__file__` inside the copy, anchor count 1), all killed: skip the lift
+(`retry_differs...[provider]`); drop the shipped-status condition
+(`accepted_then_withheld...[provider]`); drop the assemble restate
+(`final_body_guard_conviction...[provider]`); drop the pass-two plan restore
+(`retry_failed_pages_second_pass...[provider]`); drop the cells retry
+(`cell_mismatch_page...` x2). 513-page stub, accepted arm: 513 routed, 513 accepted, 0
+`table_region_unverifiable`, document SUCCESS.
 
 ## Not measured
 
