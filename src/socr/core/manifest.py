@@ -3370,6 +3370,75 @@ def _native_text_line_body(p, page_num: int, *, marker_line: str, png_ref: str) 
     return "\n\n".join(blocks)
 
 
+def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str) -> str | None:
+    """#1261: the words the geometry floor would ship, in the text layer's OWN line order.
+
+    ``native_prose_floor_text`` clusters words by baseline, so on a page whose columns are
+    drawn column-major the bands weld two columns and the order gate refuses the page. The
+    layer's own order (PyMuPDF block, line, word) keeps the columns apart. This takes the
+    partition the floor already took (every box withheld, keep-sentences rule, categorical
+    rows withheld: ``_page_prose_partition``) and changes ONLY the order the surviving words
+    are emitted in. It admits no word the bands body would not ship. Because a layer line is
+    narrower than a baseline band (a table row's label, its values and a prose sentence on the
+    same baseline are separate layer lines), each line is also held to the keep-sentences
+    rule on its own words: a line that is mostly numerals ("±0.3", "2008", "1|") is withheld
+    even when its band is not, so no loose value ships as a line of its own. A layer line that
+    holds both shipped and withheld words (a baseline shared by prose and a table) is withheld
+    whole, a run of withheld lines becomes one marker, and a line that parses as markdown
+    table syntax is withheld like the bands body does. Returns None when nothing ships or the
+    shipped text is not a trusted layer.
+    """
+    from socr.core.born_digital import text_layer_trusted
+    from socr.tables.reconcile import table_syntax_line_indices
+    from socr.tables.row_corroboration import band_is_mostly_numerals
+
+    words = getattr(p, "native_words", None) or []
+    bands = _page_prose_partition(p, keep_sentences=True)
+    if not words or not bands:
+        return None
+    shipped = {tuple(w[:8]) for is_prose, band in bands if is_prose for w in band}
+    lines: list[list[tuple]] = []
+    index: dict[tuple, int] = {}
+    for w in words:
+        key = (w[5], w[6])
+        if key not in index:
+            index[key] = len(lines)
+            lines.append([])
+        lines[index[key]].append(w)
+    texts = [" ".join(str(w[4]) for w in line).strip() for line in lines]
+    table_syntax = table_syntax_line_indices(texts)
+    ships = [
+        bool(texts[i])
+        and i not in table_syntax
+        and all(tuple(w[:8]) in shipped for w in line)
+        and not band_is_mostly_numerals(line)
+        for i, line in enumerate(lines)
+    ]
+    if not any(ships) or not text_layer_trusted("\n".join(t for t, ok in zip(texts, ships) if ok)):
+        return None
+    blocks = [prose_recovered_flag(page_num, born_digital=True, keep_sentences=True)]
+    if png_ref:
+        blocks.append(png_ref)
+    page_image = page_image_link(png_ref)
+    marker_block = f"{marker_line}\n\n{page_image}" if page_image else marker_line
+    paragraph: list[str] = []
+    in_withheld_run = False
+    for text, ok in zip(texts, ships):
+        if ok:
+            in_withheld_run = False
+            paragraph.append(text)
+            continue
+        if paragraph:
+            blocks.append("\n".join(_escaped_native_line(line) for line in paragraph))
+            paragraph.clear()
+        if text and not in_withheld_run:
+            blocks.append(marker_block)
+            in_withheld_run = True
+    if paragraph:
+        blocks.append("\n".join(_escaped_native_line(line) for line in paragraph))
+    return "\n\n".join(blocks)
+
+
 def prose_recovery_is_born_digital(text: str, page_num: int) -> bool:
     """Whether a recovered body's own banner is the born-digital form (page-kind wording)."""
     return _body_has_born_digital_banner(text, page_num)
@@ -3564,6 +3633,7 @@ def table_floor_text_for_source(
     chart_floor: Callable[[], str | None] | None = None,
     geometry_floor: bool = False,
     chart_floor_offered: bool = True,
+    refusals: list[str] | None = None,
 ) -> str:
     """The GH-520 coverage check plus splice, over ANY source.
 
@@ -3611,6 +3681,17 @@ def table_floor_text_for_source(
         else (f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker)
     )
 
+    def _refuse(reason: str) -> str:
+        """The whole-page marker, with the reason recorded when the caller asked (#1261).
+
+        ``refusals`` is a replay hook: a measurement passes a list and reads back which gate
+        refused each page, so a gate is relaxed against the recorded reasons rather than a
+        guess. Production callers pass nothing and nothing is recorded.
+        """
+        if refusals is not None:
+            refusals.append(reason)
+        return whole_page
+
     def _refused() -> str:
         """#1144: what ships when the GH-520 splice is refused.
 
@@ -3631,7 +3712,7 @@ def table_floor_text_for_source(
         floored page is the design the owner closed unmerged in PR #1047.
         """
         if not prose_recovery:
-            return whole_page
+            return _refuse("no_prose_recovery")
         # #1144: a page whose native table lane GH-147 refused for rotation has
         # a ``get_text()`` order that is not its reading order, so this lane's
         # "prose" is confetti. Measured on GH-147's own rotated fixture, which
@@ -3641,7 +3722,7 @@ def table_floor_text_for_source(
         if getattr(p, "native_table_lane_refused_rotated", False) or getattr(
             p, "native_rotated_text_shredded", False
         ):
-            return whole_page
+            return _refuse("rotated_lane")
         # #1144 (owner ruling, 2026-10-15): the recovery runs ONLY when the page
         # has at least one detected table box.
         #
@@ -3707,19 +3788,19 @@ def table_floor_text_for_source(
             # so this costs none of them; both reviewers' partial-inventory cases were
             # CONSTRUCTED states, not pages in either corpus.
             if _count != 0 or _boxes:
-                return whole_page
+                return _refuse("boxes_incomplete")
             if chart_floor is None:
                 # #1269 records why the chart floor kept the bare marker. A caller that never
                 # offers a chart floor (``chart_floor_offered=False``: the #1266 D3 ending and
                 # ``withheld_table_floor_text``) has no chart decision to explain.
                 if chart_floor_offered:
                     _record_chart_floor_abstention(p)
-                return whole_page
+                return _refuse("no_boxes_no_chart_floor")
             if int(getattr(p, "page_rotation", 0) or 0) % 360 != 0:
                 # Same refusal the normal lane makes below, applied before the
                 # chart lane too: on a /Rotate page the box coordinates and the
                 # word coordinates are in different spaces.
-                return whole_page
+                return _refuse("rotated_page")
             # The order gate is applied INSIDE the builder, to the recovered prose
             # alone. It cannot be applied here: this body leads with socr's own
             # canonical mark lines, which are not page content and which the gate
@@ -3728,7 +3809,7 @@ def table_floor_text_for_source(
             chart_body = chart_floor()
             if not chart_body:
                 _record_chart_floor_abstention(p, empty_body=True)
-                return whole_page
+                return _refuse("chart_floor_empty")
             # Record that this body came from the chart floor, so the generic
             # chart-preservation pass skips it: that pass anchors crops on the
             # in-chart words this lane deliberately withheld (Argon 3).
@@ -3754,7 +3835,7 @@ def table_floor_text_for_source(
         # content, and it is #1159's to make. Until then these pages keep the
         # marker plus picture -- no worse than main.
         if int(getattr(p, "page_rotation", 0) or 0) % 360 != 0:
-            return whole_page
+            return _refuse("rotated_page")
         # #1144 round 4's two-column refusal lived here and is GONE. It asked
         # ``reconstruct.page_column_gutter`` whether a prose band straddled the
         # page's own gutter -- a proxy for "would this band weld two columns".
@@ -3772,8 +3853,10 @@ def table_floor_text_for_source(
             # whole-page marker and the page image, never text. Missing evidence is not a
             # pass: ``_each_table_box_sane`` and ``_structure_outside_boxes`` both fail closed
             # without words.
-            if not _each_table_box_sane(p) or _structure_outside_boxes(p):
-                return whole_page
+            if not _each_table_box_sane(p):
+                return _refuse("box_unsane")
+            if _structure_outside_boxes(p):
+                return _refuse("structure_outside")
         recovered = native_prose_floor_text(
             p,
             page_num,
@@ -3782,10 +3865,21 @@ def table_floor_text_for_source(
             keep_sentences=geometry_floor,
         )
         if not recovered:
-            return whole_page
+            return _refuse("no_recoverable_prose")
         # #1144 round 5: the last word belongs to the page's own reading order.
-        if not _prose_follows_native_order(recovered, getattr(p, "native_text", "") or ""):
-            return whole_page
+        native_text = getattr(p, "native_text", "") or ""
+        if not _prose_follows_native_order(recovered, native_text):
+            # #1261: the bands body welded columns. On the born-digital geometry floor the
+            # SAME shippable words are re-emitted in the layer's own line order, after the
+            # box sanity and structure-outside gates above have already passed. It is
+            # held to the same order gate; a page it cannot satisfy keeps the whole-page marker.
+            if geometry_floor:
+                in_order = _native_order_prose_body(
+                    p, page_num, marker_line=d3_marker, png_ref=png_ref
+                )
+                if in_order and _prose_follows_native_order(in_order, native_text):
+                    return in_order
+            return _refuse("order_gate")
         return recovered
 
     if geometry_floor:
