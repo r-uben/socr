@@ -367,23 +367,40 @@ def _pipeline_like():
 
 def _dropped_at_commit(tmp_path, name, providers, pdf, *, drop):
     """The repair step runs; with *drop* the commit finds no repair that ships (the selector's
-    verdict is forced), without it the commit is the real one."""
+    verdict is forced), without it the commit is the real one.  Returns the in-loop flushed
+    fragment (before assemble rewrites it) as well."""
+    flushed: list[str] = []
+    real_flush = UnifiedPipeline._flush_page_fragment
+
+    def _spy(self, state, page_num, body, output_dir, *a, **k):
+        flushed.append(body)
+        return real_flush(self, state, page_num, body, output_dir, *a, **k)
+
     if drop:
-        with patch.object(UnifiedPipeline, "_shipped_repairs", staticmethod(lambda ps, out: {})):
+        with (
+            patch.object(UnifiedPipeline, "_shipped_repairs", staticmethod(lambda ps, out: {})),
+            patch.object(UnifiedPipeline, "_flush_page_fragment", _spy),
+        ):
             _, _, st, out, pdf = _run(
                 tmp_path, DROPPED, 0, check_runs=True, out_name=name, native=NATIVE,
                 providers=providers, pdf=pdf,
             )  # fmt: skip
     else:
-        _, _, st, out, pdf = _run(
-            tmp_path, DROPPED, 0, check_runs=True, out_name=name, native=NATIVE,
-            providers=providers, pdf=pdf,
-        )  # fmt: skip
+        with patch.object(UnifiedPipeline, "_flush_page_fragment", _spy):
+            _, _, st, out, pdf = _run(
+                tmp_path, DROPPED, 0, check_runs=True, out_name=name, native=NATIVE,
+                providers=providers, pdf=pdf,
+            )  # fmt: skip
+    st.flushed_bodies = flushed
     return st, out, pdf
 
 
 @PROVIDER_STATES
 def test_a_repair_dropped_at_commit_ships_the_models_cell_through_assemble(tmp_path, providers):
+    """The drop is FORCED: ``_shipped_repairs`` is patched to keep nothing (``_valid_repairs``
+    calls ``_repairs_ship`` directly and still sees the repair), so this pins the restore, not a
+    real drop path.  The restore must reach the in-loop flushed fragment, the sidecar and
+    assemble alike."""
     st_kept, kept, pdf = _dropped_at_commit(tmp_path, "kept", providers, None, drop=False)
     st_drop, drop, _ = _dropped_at_commit(tmp_path, "drop", providers, pdf, drop=True)
     assert _events(drop, KIND) == []
@@ -396,6 +413,16 @@ def test_a_repair_dropped_at_commit_ships_the_models_cell_through_assemble(tmp_p
     # dropped: the model's own cell ships everywhere, assemble included, with no event
     for text in (_fragment(drop), _assembled(drop), _sidecar(drop)["winning_output"]["text"]):
         assert "| -7 |" in text and "| -.7 |" not in text
+    # the crash-recovery fragment flushed in the loop (before assemble) carries the model's cell
+    assert st_drop.flushed_bodies
+    assert all("| -7 |" in b and "| -.7 |" not in b for b in st_drop.flushed_bodies)
+    # the persisted row-binding records no repair and names why the table is not bound
+    rb = _sidecar(drop)["row_binding"]
+    assert rb and all("repairs" not in r for r in rb.values())
+    assert all(
+        r["outcome"] != "bound" and r.get("error") == "point_repair_not_shipped"
+        for r in rb.values()
+    )
     assert all(
         not getattr(o, "point_repaired", False)
         for ps in st_drop.pages.values()
