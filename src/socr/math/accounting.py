@@ -130,7 +130,13 @@ def corrupt_region_evidence(regions: list, native_text: str) -> dict:
     from socr.core.born_digital import count_pua_chars
     from socr.math.recover import _region_replacement
 
-    covered = [r for r in regions if r.resolved and r.source_aligned and r.crop_path]
+    # #1305: a region over a line that carries prose keeps its native text (damaged glyphs
+    # included) and gets the candidate beside it, so it recovered nothing in place.
+    covered = [
+        r
+        for r in regions
+        if r.resolved and r.source_aligned and r.crop_path and not r.keeps_native_line
+    ]
     return {
         "lane": LANE_CORRUPT_REGION,
         "regions_total": len(regions),

@@ -26,7 +26,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from socr.core.born_digital import clean_native_text, line_has_corrupt_math
+from socr.core.born_digital import clean_native_text, line_has_corrupt_math, line_has_prose_run
 from socr.core.ollama_utils import (
     call_with_total_deadline,
     ollama_endpoint,
@@ -58,6 +58,17 @@ _CORRUPT_CANDIDATE_HEADER = (
     "(syntax only, non-authoritative — crop is ground truth) -->"
 )
 _CORRUPT_UNRESOLVED_PREFIX = "[corrupt equation unresolved"
+# #1305: a candidate that sits BESIDE a retained native line is labelled where a reader
+# sees it (the header above is an HTML comment), because the native line may print a
+# mixed number (2¾) next to a reader output that parsed it as an exponent.
+_CORRUPT_CANDIDATE_BESIDE_NATIVE = (
+    "[equation candidate, unverified: the line above is the native text, the crop is ground truth]"
+)
+
+
+def source_carries_prose(source: str) -> bool:
+    """True if any line of a recovery source is a sentence, not only an equation."""
+    return any(line_has_prose_run(line) for line in source.split("\n"))
 
 
 def _candidate_with_source_label(region: CorruptMathRegion) -> str:
@@ -90,6 +101,16 @@ class CorruptMathRegion:
     equation_label: str = ""
     attempts: int = 0
     source_aligned: bool = False
+
+    @property
+    def keeps_native_line(self) -> bool:
+        """A resolved region whose source carries prose never replaces that source.
+
+        DECISIONS (A4): a line mixing a sentence and damaged mathematics keeps its whole
+        native text; the crop and candidate go beside it. Deleting the line to splice a
+        candidate lost sentences and turned a printed 2¾ into ``2^{3/4}``.
+        """
+        return source_carries_prose(self.source_text)
 
     @property
     def resolved(self) -> bool:
@@ -558,7 +579,8 @@ def _region_replacement(region: CorruptMathRegion) -> str:
     )
     if region.resolved:
         candidate = _candidate_with_source_label(region)
-        return f"{crop}\n{_CORRUPT_CANDIDATE_HEADER}\n$$\n{candidate}\n$$"
+        beside = f"{_CORRUPT_CANDIDATE_BESIDE_NATIVE}\n" if region.keeps_native_line else ""
+        return f"{crop}\n{beside}{_CORRUPT_CANDIDATE_HEADER}\n$$\n{candidate}\n$$"
     evidence = "; see retained crop" if region.crop_path else "; no crop was retained"
     return f"{crop}\n{_CORRUPT_UNRESOLVED_PREFIX}: {region.validation_reason}{evidence}]"
 
@@ -608,11 +630,11 @@ def splice_math(page, native_text: str, regions: list[CorruptMathRegion]) -> str
         source_available = idx != -1
         region.source_aligned = source_in_native and source_available
         replacement = _region_replacement(region)
-        if region.source_aligned and region.resolved:
+        if region.source_aligned and region.resolved and not region.keeps_native_line:
             text = text[:idx] + replacement + text[idx + len(source) :]
             cursor = idx + len(replacement)
         elif region.source_aligned and region.crop_path:
-            # Aligned but unresolved: keep the native slice untouched and
+            # Aligned but unresolved, or resolved over a source that carries prose: keep the native slice untouched and
             # attach the evidence adjacent to it, rather than deleting the
             # (still corrupt) glyphs the reader may need to see or grep for.
             insertion = f"{source}\n{replacement}"
