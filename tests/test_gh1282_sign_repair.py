@@ -161,8 +161,9 @@ def test_the_layers_own_string_is_written_verbatim_with_its_unicode_minus():
 
 
 def test_a_point_drop_and_a_sign_flip_in_one_row_are_each_one_difference_in_their_cell():
-    words = layer(NEG, ("Net exports", ["-.7", "-2.5", "3.5", "4.5"]))
-    shipped = table(NEG, ("Net exports", ["-7", "2.5", "3.5", "4.5"]))
+    # the flipped minus is the row's first value: a minus after another number is range-shaped
+    words = layer(NEG, ("Net exports", ["-2.5", "-.7", "3.5", "4.5"]))
+    shipped = table(NEG, ("Net exports", ["2.5", "-7", "3.5", "4.5"]))
     _, reps, refs = go(words, shipped)
     assert sorted((r.old, r.new, r.kind) for r in reps) == [
         ("-7", "-.7", "point"),
@@ -313,10 +314,14 @@ RANGE = ("Central tendency", ["2.3", "\u20132.6", "4.4"])
 RANGE_SHIPPED = ("Central tendency", ["2.3", "2.6", "4.4"])
 
 
-@pytest.mark.parametrize("dash", ["\u2013", "\u2014", "\u2012"], ids=["en", "em", "figure"])
-def test_a_range_dash_after_a_number_is_not_added_as_a_minus(dash):
-    # `2.3 \u20132.6`: the layer's dash glued to the second number is a range separator.  Another
-    # row of the table carries a real negative (NEG), which says nothing about this row.
+DASHES = ["-", "\u2212", "\u2013", "\u2014", "\u2012"]
+DASH_IDS = ["hyphen_minus", "u2212", "en", "em", "figure"]
+
+
+@pytest.mark.parametrize("dash", DASHES, ids=DASH_IDS)
+def test_a_range_shaped_dash_after_a_number_is_not_added_as_a_minus(dash):
+    # `2.3 -2.6`: the dash glued to the second number may separate two numbers, whatever its glyph.
+    # Another row of the table carries a real negative (NEG): it says nothing about this dash.
     words = layer(NEG, ("Central tendency", ["2.3", dash + "2.6", "4.4"]))
     shipped = table(NEG, RANGE_SHIPPED)
     new, reps, refs = go(words, shipped)
@@ -324,19 +329,36 @@ def test_a_range_dash_after_a_number_is_not_added_as_a_minus(dash):
     assert new == shipped
 
 
-@pytest.mark.parametrize(
-    "values,shipped_values",
-    [
-        (["\u20132.6", "2.3", "4.4"], ["2.6", "2.3", "4.4"]),  # no number on its left
-        (["2.3", "-2.6", "4.4"], ["2.3", "2.6", "4.4"]),  # a hyphen-minus is a minus
-        (["-2.3", "\u20132.6", "4.4"], ["-2.3", "2.6", "4.4"]),  # an agreeing negative in the row
-    ],
-    ids=["first_value", "hyphen_minus", "agreeing_negative_in_the_row"],
-)
-def test_the_range_refusal_has_controls_that_still_repair(values, shipped_values):
-    words = layer(NEG, ("Central tendency", values))
-    _, reps, refs = go(words, table(NEG, ("Central tendency", shipped_values)))
-    assert [r.kind for r in reps] == ["sign"], (reps, refs)
+@pytest.mark.parametrize("dash", ["-", "\u2013"], ids=["hyphen_minus", "en"])
+def test_a_row_of_two_ranges_is_refused_even_though_each_range_looks_like_a_negative(dash):
+    # each dash is evidence of a minus for the other: the strict rule takes no such support
+    words = layer(NEG, ("Central tendency", ["2.3", dash + "2.6", "3.1", dash + "3.4"]))
+    shipped = table(NEG, ("Central tendency", ["2.3", "2.6", "3.1", "3.4"]))
+    new, reps, refs = go(words, shipped)
+    assert reps == [] and why(refs) == {REFUSE_SIGN_GEOMETRY}, (reps, refs)
+    assert new == shipped
+
+
+def test_a_range_dash_is_refused_even_when_the_row_has_an_agreeing_negative():
+    # `-0.3 \u20130.1 1.2`: a negative lower bound then a range dash.  The agreeing `-0.3` is no
+    # evidence about the second dash.
+    words = layer(NEG, ("Central tendency", ["-0.3", "\u20130.1", "1.2"]))
+    shipped = table(NEG, ("Central tendency", ["-0.3", "0.1", "1.2"]))
+    new, reps, refs = go(words, shipped)
+    assert reps == [] and why(refs) == {REFUSE_SIGN_GEOMETRY}, (reps, refs)
+    assert new == shipped
+
+
+@pytest.mark.parametrize("dash", DASHES, ids=DASH_IDS)
+def test_a_unary_dash_still_repairs(dash):
+    # first value of the row (nothing on its left, or only its label: a word that is not a number)
+    for label, values, shipped_values in (
+        ("Central tendency", [dash + "2.6", "2.3", "4.4"], ["2.6", "2.3", "4.4"]),
+        ("Central tendency x", [dash + "2.6", "4.4", "5.5"], ["2.6", "4.4", "5.5"]),
+    ):
+        words = layer(NEG, (label, values))
+        _, reps, refs = go(words, table(NEG, (label, shipped_values)))
+        assert [r.kind for r in reps] == ["sign"], (values, reps, refs)
 
 
 @pytest.mark.parametrize("extent", ["above", "thin"])
@@ -460,6 +482,78 @@ def test_page_a_mirror_row_refuses(rotation):
     new, reps, refs = live(build_page(native, rotation), shipped + "\n")
     assert cell(new, 0, "Net exports", 0) == "1.5", (reps, refs)
     assert REFUSE_SIGN_MIRROR in page_why(refs)
+
+
+# A minus DRAWN as a vector segment is absent from the page words: the layer prints `1.5`, the page
+# shows `-1.5`, and the model's minus is right.  Removing it is refused when such a segment sits
+# attached to the number (DRAWN_MINUS_MAX_NUMBER_WIDTHS) or when the drawings cannot be read.
+DRAWN_POS = ("Net exports", ["4.5", "3.0", "3.5"])
+DRAWN_SHIPPED = ("Net exports", ["4.5", "-3.0", "3.5"])
+NUMBER_X = 260.0  # the layer helper puts the second value here (y = 20 * row, height H)
+
+
+def _drawn_case(drawn):
+    words = layer(NEG, DRAWN_POS)
+    shipped = table(NEG, DRAWN_SHIPPED)
+    new, reps, refs = propose_point_repairs(words, None, shipped, drawn)
+    return shipped, new, reps, refs
+
+
+def test_a_drawn_minus_attached_to_the_number_refuses_the_removal():
+    short = (NUMBER_X - 7.0, 24.5, NUMBER_X - 3.0, 24.5)  # 20 + 4.5: inside the number's band
+    shipped, new, reps, refs = _drawn_case([short])
+    assert reps == [] and why(refs) == {REFUSE_SIGN_GEOMETRY}, (reps, refs)
+    assert new == shipped
+
+
+def test_the_same_page_without_the_drawn_minus_removes_it():  # control: the guard is the drawing
+    _, _, reps, refs = _drawn_case([])
+    assert [(r.old, r.new) for r in reps] == [("-3.0", "3.0")], (reps, refs)
+
+
+@pytest.mark.parametrize(
+    "box,reason",
+    [
+        ((NUMBER_X - 80.0, 24.5, NUMBER_X - 3.0, 24.5), "a table rule is longer than the number"),
+        ((NUMBER_X - 7.0, 60.0, NUMBER_X - 3.0, 60.0), "outside the number's band"),
+        ((NUMBER_X - 7.0, 24.0, NUMBER_X - 6.0, 40.0), "vertical, not horizontal"),
+        ((222.0, 24.5, 226.0, 24.5), "attached to the previous value, not to the number"),
+    ],
+    ids=["long_rule", "other_band", "vertical", "previous_value"],
+)
+def test_a_drawing_that_is_not_a_minus_before_the_number_does_not_block_the_removal(box, reason):
+    _, _, reps, refs = _drawn_case([box])
+    assert [(r.old, r.new) for r in reps] == [("-3.0", "3.0")], (reason, reps, refs)
+
+
+def test_drawings_that_cannot_be_read_refuse_the_removal_but_not_the_addition():
+    shipped, new, reps, refs = _drawn_case(None)
+    assert reps == [] and why(refs) == {REFUSE_SIGN_GEOMETRY}, (reps, refs)
+    assert new == shipped
+    words = layer(NEG, ("Net exports", ["-1.5", "2.5", "3.5"]))
+    _, reps, refs = propose_point_repairs(
+        words, None, table(NEG, ("Net exports", ["1.5", "2.5", "3.5"])), None
+    )
+    assert [r.kind for r in reps] == ["sign"], (reps, refs)
+
+
+@pytest.mark.parametrize("rotation", ROTATIONS)
+def test_page_a_drawn_minus_refuses_the_removal(rotation):
+    from native_table_fixtures import place
+
+    from test_gh1267_row_binding_check import HEIGHT, LABEL_U, V0, VALUE_U0, WIDTH  # noqa: F401
+    from test_gh1267_row_binding_check import LINE_PITCH
+
+    native = [PAGE_NATIVE[0], ("Net exports", ["1.5", "2.5", "3.5"]), *PAGE_NATIVE[2:]]
+    shipped = block([PAGE_NATIVE[0], ("Net exports", ["-1.5", "2.5", "3.5"]), *PAGE_NATIVE[2:]])
+    page = build_page(native, rotation)
+    v = V0 + 1 * LINE_PITCH - 2.5  # mid-height of the digits of the "Net exports" row
+    a = place(VALUE_U0 - 6.0, v, rotation, WIDTH, HEIGHT)
+    b = place(VALUE_U0 - 2.0, v, rotation, WIDTH, HEIGHT)
+    page.draw_line(a, b, width=0.5)
+    new, reps, refs = live(page, shipped + "\n")
+    assert cell(new, 0, "Net exports", 0) == "-1.5", (reps, refs)
+    assert REFUSE_SIGN_GEOMETRY in page_why(refs)
 
 
 # ---------------------------------------------------------------------------

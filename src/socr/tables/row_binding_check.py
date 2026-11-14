@@ -1462,17 +1462,45 @@ def _in_own_line(w, t) -> bool:
     return t.y0 <= (w[1] + w[3]) / 2 <= t.y1
 
 
-def _detached_minus_attached(words: list, t) -> bool:
+# A minus DRAWN in front of a number (a vector segment, absent from the page words) is no longer than the
+# number it signs: a table rule spans a column, a minus does not.  Length is measured in widths of the
+# number's own box, so no point size is assumed; "roughly horizontal" is a segment no taller than long.
+DRAWN_MINUS_MAX_NUMBER_WIDTHS = 1.0
+
+
+def _drawn_minus_candidates(drawn, t) -> list:
+    """The drawn boxes shaped like a minus before *t* (no longer than ``DRAWN_MINUS_MAX_NUMBER_WIDTHS``
+    of its width, no taller than long), as pseudo word boxes (a glyph ``-``)."""
+    limit = DRAWN_MINUS_MAX_NUMBER_WIDTHS * (t.x1 - t.x0)
+    return [
+        (b[0], b[1], b[2], b[3], "-")
+        for b in drawn
+        if 0 < b[2] - b[0] <= limit and (b[3] - b[1]) <= (b[2] - b[0])
+    ]
+
+
+def _detached_minus_attached(words: list, t, drawn=()) -> bool:
     """Is a detached minus glyph (a word that is only ``-``) attached to the number word *t*, or
     impossible to show NOT attached?  Every minus-only word in the (widened) band of *t* is tested; the
     answer is True if ANY is attached.  A glyph is attached when it overlaps the number's box, when it
     has no word on its left in the number's own line, or when it lies closer to *t* than to the word on
     its own left (a glyph exactly midway cannot be shown NOT to be attached, so it counts as attached
-    and the caller refuses).  The distance rule reads x positions only, never word order."""
+    and the caller refuses).  The distance rule reads x positions only, never word order.
+
+    *drawn* are vector boxes (reading frame): those shaped like a minus and inside the same band are
+    candidates exactly like glyph words, but they are never a "word on its left"."""
     band = _band_neighbours(words, t)
-    for m in band:
-        if not _is_detached_sign(str(m[4])) or "-" not in str(m[4]).translate(_UNICODE_MINUS):
-            continue
+    slack = SIGN_BAND_TOL * (t.y1 - t.y0)
+    marks = [
+        m
+        for m in band
+        if _is_detached_sign(str(m[4])) and "-" in str(m[4]).translate(_UNICODE_MINUS)
+    ] + [
+        d
+        for d in _drawn_minus_candidates(drawn or (), t)
+        if d[3] + slack >= t.y0 and d[1] - slack <= t.y1
+    ]
+    for m in marks:
         if m[2] > t.x0 and m[0] < t.x1:  # the boxes overlap: ambiguous, so attached
             return True
         if m[0] >= t.x0:  # to the right of the number
@@ -1487,46 +1515,39 @@ def _detached_minus_attached(words: list, t) -> bool:
     return False
 
 
-def _range_dash_before_a_number(words: list, t) -> bool:
-    """Is the printed word *t* an en/em dash glued to a number (``-2.6``) AND is the nearest word on its
-    left in the band itself a number?  Then ``2.3 \u20132.6`` may be a range, and the dash is not a minus."""
-    if t.text.lstrip()[:1] not in _RANGE_DASHES:
+def _unary_dash(words: list, t) -> bool:
+    """Is the minus glyph of the printed word *t* UNARY: the word starts with the dash (any dash:
+    hyphen-minus, en, em, figure, U+2212), so it is not glued to a number on its left, and the nearest
+    word on its left in the number's own band is not a number?  ``2.3 -2.6`` and ``2.3 \u20132.6`` are
+    range-shaped: the dash may separate the two numbers instead of signing the second, and nothing in
+    the row or the table can say which.  Refused, whatever the dash glyph."""
+    if "-" not in t.text.lstrip()[:1].translate(_UNICODE_MINUS):
         return False
     left = [w for w in _band_neighbours(words, t) if w[2] <= t.x0 and _in_own_line(w, t)]
     if not left:
-        return False
+        return True
     m = max(left, key=lambda w: w[2])
-    return _canon_number(str(m[4]).translate(_UNICODE_MINUS)) is not None
+    return _canon_number(str(m[4]).translate(_UNICODE_MINUS)) is None
 
 
 def _sign_attached_by_geometry(
-    words: list, c: _Cand, aidx: list[int], cell: int, native: str
+    words: list, c: _Cand, aidx: list[int], cell: int, native: str, drawn: list | None = ()
 ) -> bool:
     """Plan A2 step 2: is the minus (or its absence) of text-layer value *cell* settled by the
-    geometry of the layer?  The layer's value is negative: its own word must carry the minus
-    glyph (a ``(0.3)`` is notation, not evidence), and it must not be an en/em dash after another
-    number with no agreeing negative in the row itself (a range ``2.3 \u20132.6``).  The layer's value
-    is positive: no detached minus glyph may be attached to it (the layer would then print ``- 3.0``
-    and the model's ``-3.0`` would be right).  Never by word order."""
+    geometry of the layer?  The layer's value is negative (a minus would be ADDED): its own word must
+    carry the minus glyph (a ``(0.3)`` is notation, not evidence) and the dash must be unary
+    (:func:`_unary_dash`); a range-shaped token is refused.  The layer's value is positive (a minus
+    would be REMOVED): no detached minus glyph may be attached to it (the layer would then print
+    ``- 3.0`` and the model's ``-3.0`` would be right), and no drawn minus either: a short, roughly
+    horizontal vector segment (*drawn*, reading frame) attached the same way is a minus the text
+    layer cannot show.  ``drawn=None`` means the drawings could not be read: removal is refused.
+    Never by word order."""
     w = c.line.words[aidx[cell]]
     if native.startswith("-"):
-        if not _carries_minus(w.text):
-            return False
-        if _range_dash_before_a_number(words, w) and not _row_has_agreeing_negative(c, aidx, cell):
-            return False
-        return True
-    return not _detached_minus_attached(words, w)
-
-
-def _row_has_agreeing_negative(c: _Cand, aidx: list[int], cell: int) -> bool:
-    """Another value of this same row prints a minus glyph on its own word (the row's own evidence)."""
-    return any(
-        k != cell
-        and c.line.words[i].num is not None
-        and c.line.words[i].num.startswith("-")
-        and _carries_minus(c.line.words[i].text)
-        for k, i in enumerate(aidx)
-    )
+        return _carries_minus(w.text) and _unary_dash(words, w)
+    if drawn is None:
+        return False
+    return not _detached_minus_attached(words, w, drawn)
 
 
 def _layer_encodes_minus(
@@ -1579,8 +1600,11 @@ def propose_point_repairs(
     words: list,
     region: tuple[float, float, float, float] | None,
     table_markdown: str,
+    drawn: list | None = (),
 ) -> tuple[str, list[PointRepair], list[PointRefusal]]:
-    """``(repaired_markdown, repairs, refusals)`` for one table block.
+    """``(repaired_markdown, repairs, refusals)`` for one table block.  *drawn* are the page's vector
+    boxes in the reading frame (``None``: unreadable, so no minus is removed); see
+    :func:`_sign_attached_by_geometry`.
 
     A model that drops a printed decimal point ships ``-7`` for ``-.7``.  The row then equals no
     native line, so the binder calls it UNVERIFIABLE.  A shipped data row is repaired only when
@@ -1695,7 +1719,8 @@ def propose_point_repairs(
         if "sign_flipped" in h["kinds"]:  # the sign conditions (plan A2 step 2)
             flipped = [m for m in h["mismatches"] if h["pair_kind"][m[0]] == "sign_flipped"]
             if not all(
-                _sign_attached_by_geometry(words, h["cand"], h["aidx"], k, n) for k, _, n in flipped
+                _sign_attached_by_geometry(words, h["cand"], h["aidx"], k, n, drawn)
+                for k, _, n in flipped
             ):
                 refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_SIGN_GEOMETRY,)))
                 continue
@@ -1872,6 +1897,38 @@ def check_page_row_binding(
     return results, rotation
 
 
+def _drawn_boxes(page, rotation: int) -> list | None:
+    """The boxes of every drawn path item of *page* in the reading frame (same pivot and rotation as
+    the words), or ``None`` when the drawings cannot be read."""
+    from socr.tables.reconstruct import _drawing_item_bbox, _rotate_point, _words_center
+
+    try:
+        drawings = page.get_drawings()
+        cx, cy = _words_center(list(page.get_text("words"))) or (0.0, 0.0)
+    except Exception:
+        return None
+    out = []
+    for d in drawings:
+        for item in d.get("items") or []:
+            b = _drawing_item_bbox(item)
+            if b is None:
+                continue
+            if rotation:
+                pts = [
+                    _rotate_point(x, y, cx, cy, rotation)
+                    for x in (b[0], b[2])
+                    for y in (b[1], b[3])
+                ]
+                b = (
+                    min(p[0] for p in pts),
+                    min(p[1] for p in pts),
+                    max(p[0] for p in pts),
+                    max(p[1] for p in pts),
+                )
+            out.append(b)
+    return out
+
+
 def propose_page_point_repairs(
     page, markdown: str, regions_raw: list[tuple[float, float, float, float]] | None = None
 ) -> tuple[str, list[tuple[int, list[PointRepair]]], list[tuple[int, list[PointRefusal]]]]:
@@ -1887,7 +1944,8 @@ def propose_page_point_repairs(
     block against the union (a superset only adds ambiguity), but a repair WRITES a number: with
     two blocks over one region, the other table's line with the same label can be the only hit and
     its value lands in this table (review of #1282, finding 1)."""
-    words, (boxes, union), _rotation = _page_frame(page, regions_raw)
+    words, (boxes, union), rotation = _page_frame(page, regions_raw)
+    drawn = _drawn_boxes(page, rotation)
     md_lines = markdown.splitlines()
     kept = markdown.splitlines(keepends=True)  # the page's own line endings survive a repair
     blocks = find_table_blocks(markdown)
@@ -1899,7 +1957,7 @@ def propose_page_point_repairs(
     for i, b in enumerate(blocks):
         region = boxes[i] if len(boxes) == len(blocks) else union
         new, reps, refs = propose_point_repairs(
-            words, region, "\n".join(md_lines[b.start : b.end + 1])
+            words, region, "\n".join(md_lines[b.start : b.end + 1]), drawn
         )
         if refs:
             refused.append((i, refs))

@@ -9722,6 +9722,22 @@ class UnifiedPipeline:
                     if isinstance(record, dict):
                         record["outcome"] = TableOutcome.UNVERIFIABLE.value
                         record["error"] = POINT_REPAIR_NOT_SHIPPED
+                        # the page flags the row-binding mark is drawn from must agree with the
+                        # record: a table the record calls UNVERIFIABLE is marked.  The policy
+                        # runs once per page (its mark-only reading depends on what was set
+                        # before it), so it runs here only for the page's first such table.
+                        try:
+                            table_index = int(table_id.rsplit("-t", 1)[1])
+                        except (IndexError, ValueError):
+                            continue
+                        if table_index in ps.row_binding_unverifiable_tables:
+                            continue
+                        first = not ps.row_binding_unverifiable_tables
+                        ps.row_binding_unverifiable_tables.append(table_index)
+                        if first:
+                            self._apply_row_binding_policy(
+                                ps, bo, contradicted=False, unverifiable=True
+                            )
         for ev in pending:
             if (ev.data or {}).get("table_id") in kept:
                 state.events.append(ev)

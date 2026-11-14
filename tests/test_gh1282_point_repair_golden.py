@@ -178,15 +178,11 @@ def test_the_repaired_cell_is_the_pdfs_own_string():
 # page image (2026-11-13): `(page stem, label, column, old, new, kind)`.  Every one is the printed value.
 # p085's `Previous Tealbook` row also gets its two dropped points (cols 6 and 9): that row used to be
 # refused whole because of its flipped minus, and its three cells are all printed as written.
+# Strict rule (PR #1304 round 2): a minus is ADDED only when the dash is unary (nothing but a non-number
+# on its left in the band).  Four repairs the first round made are refused now because a number stands
+# left of the dash (`p034` Unit labor costs col 6; `p130` Japan col 3; `p125` Japan cols 0 and 1, the row
+# being refused whole): each was hand-checked right, none is distinguishable from a range by the layer.
 SIGN_REPAIRS = {
-    (
-        "fed-meetings-2008-2008-12-2008-12-16-greenbook-part1__p034",
-        "Unit labor costs",
-        6,
-        ".2",
-        "-.2",
-        "sign",
-    ),
     (
         "fed-meetings-2010-2010-06-2010-06-23-tealbook-parta__p085",
         "Previous Tealbook",
@@ -211,9 +207,6 @@ SIGN_REPAIRS = {
         "-.5",
         "point",
     ),
-    ("fed-meetings-2017-2017-06-2017-06-14-tealbook-parta__p130", "Japan", 3, ".3", "-.3", "sign"),
-    ("fed-meetings-2017-2017-12-2017-12-13-tealbook-parta__p125", "Japan", 0, ".1", "-.1", "sign"),
-    ("fed-meetings-2017-2017-12-2017-12-13-tealbook-parta__p125", "Japan", 1, ".3", "-.3", "sign"),
     ("fed-meetings-2017-2017-12-2017-12-13-tealbook-parta__p125", "China", 0, ".6", "-.6", "sign"),
 }
 

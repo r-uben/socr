@@ -429,3 +429,35 @@ def test_a_repair_dropped_at_commit_ships_the_models_cell_through_assemble(tmp_p
         for o in [ps.best_output]
         if o
     )
+    # the page flags the mark is drawn from agree with those records (Fable, PR #1304): every table
+    # the record calls UNVERIFIABLE is in the page's unverifiable list, which the mark reads
+    for ps in st_drop.pages.values():
+        for table_id, record in ps.row_binding.items():
+            if record.get("error") == "point_repair_not_shipped":
+                assert int(table_id.rsplit("-t", 1)[1]) in ps.row_binding_unverifiable_tables
+    assert any(ps.row_binding_unverifiable_tables for ps in st_drop.pages.values())
+
+
+def test_the_restore_marks_a_table_the_check_had_recorded_bound():
+    """Fable, PR #1304: the restore sets a record UNVERIFIABLE, and the page flags the mark is drawn
+    from must say the same.  The page here is the one the pipeline cannot reach through the check
+    (record BOUND, flags empty), so the commit is called directly with a forced drop."""
+    from socr.core.state import PageState
+
+    ps = PageState(page_num=1)
+    ps.point_repairs = {"p1-t0": [object()]}
+    ps.row_binding = {"p1-t0": {"outcome": "bound", "repairs": [{"x": 1}]}}
+    bo = PageOutput(page_num=1, text="repaired", status=PageStatus.SUCCESS)
+    bo.point_repaired = True
+    shipped = PageOutput(page_num=1, text="repaired", status=PageStatus.SUCCESS)
+    shipped.point_repaired = True
+    pipe = UnifiedPipeline.__new__(UnifiedPipeline)
+    with patch.object(UnifiedPipeline, "_shipped_repairs", staticmethod(lambda ps, out: {})):
+        pipe._commit_point_repairs(
+            type("S", (), {"events": []})(), 1, ps, shipped, bo, "model text"
+        )
+    assert bo.text == "model text"
+    assert ps.row_binding["p1-t0"]["outcome"] == "unverifiable"
+    assert ps.row_binding["p1-t0"]["error"] == POINT_REPAIR_NOT_SHIPPED
+    assert ps.row_binding_unverifiable_tables == [0]
+    assert bo.status is PageStatus.WARNING  # the policy ran: the page is marked, not SUCCESS

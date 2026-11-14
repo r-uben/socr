@@ -6,7 +6,9 @@ from pathlib import Path
 from multiprocessing import Pool
 import fitz
 
-sys.path.insert(0, "/Users/rubenffuertes/repos/tools/socr/src")
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[3] / "src")
+)  # the repo's src, from this file
 from socr.benchmark.scoreboard import find_documents, _read_json
 
 RUN = Path("/Volumes/Main/Library/socr-work/fed_rerun_51270eb5_words/unpacked")
@@ -17,6 +19,9 @@ INDEX = Path(
 OUT = Path(__file__).parent
 SKIP_ENGINES = {"native", "blank", "chart_asset"}
 MINUS = "−–‒‐‑"  # U+2212, en dash, figure dash, hyphens
+# en dash and figure dash glued to a number AFTER another number in the line: a range separator
+# (`2.3 –2.6`), not a minus.  The hyphen-minus and U+2212 stay minus (a negative mid-row is real there).
+RANGE_DASHES = "–‒"
 SUP = "¹²³⁰⁴⁵⁶⁷⁸⁹*†‡"
 PLACEHOLDERS = {"", "-", "—", "n.a.", "na", "n/a", "...", "…", "nm", "n.m.", "…."}
 NUM = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)$")
@@ -27,7 +32,7 @@ def norm_num(tok):
     """Canonical signed string, 'PH' for placeholder, None for non-numeric."""
     t = tok.strip()
     t = re.sub(r"</?su[pb]>", "", t)
-    t = t.replace("**", "").replace("__", "")
+    t = re.sub(r"[*_`]", "", t)  # markdown emphasis (`*1.2*`, `**1.2**`); a footnote `*` goes too
     for c in MINUS:
         t = t.replace(c, "-")
     t = t.rstrip(SUP).lstrip("$").rstrip("%").strip()
@@ -102,10 +107,17 @@ def pdf_lines(page):
         i = 0
         while i < len(ws):
             t = ws[i][4]
-            if (t in ("-",) or (len(t) == 1 and t in MINUS)) and i + 1 < len(ws):
+            after_number = bool(toks) and norm_num(toks[-1]) not in (None, "PH")
+            if after_number and t[:1] in RANGE_DASHES:
+                t = t[1:]  # a range separator after a number: not a minus; the lone dash word drops
+                if not t:
+                    i += 1
+                    continue
+            elif (t in ("-",) or (len(t) == 1 and t in MINUS)) and i + 1 < len(ws):
                 nx = ws[i + 1]
-                if nx[0] - ws[i][2] < (ws[i][3] - ws[i][1]) and norm_num(nx[4]) not in (None, "PH"):
-                    toks.append("-" + nx[4])
+                bare = re.sub(r"[$()]", "", nx[4])  # `-$12` and `-(12)` are not numbers to norm_num
+                if nx[0] - ws[i][2] < (ws[i][3] - ws[i][1]) and norm_num(bare) not in (None, "PH"):
+                    toks.append("-" + bare)
                     i += 2
                     continue
             toks.append(t)
