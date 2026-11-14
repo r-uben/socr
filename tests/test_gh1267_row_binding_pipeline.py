@@ -99,6 +99,7 @@ def _run(
     markdown: str | dict[int, str] | None = None,
     classifier_refuses: bool = False,
     spacing_alone: bool = True,
+    providers: bool = True,
 ):
     pdf = pdf or _pdf(tmp_path, rotation, native)
     out_dir = tmp_path / out_name
@@ -162,7 +163,9 @@ def _run(
         stack.enter_context(patch("socr.pipeline.orchestrator.route_page", side_effect=_fake_route))
         stack.enter_context(
             patch.object(
-                pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]
+                pipeline,
+                "_available_engines_for_agentic",
+                return_value=[PROFILE_QWEN_LOCAL] if providers else [],
             )
         )
         stack.enter_context(patch.object(pipeline, "_resolve_judge_model", return_value=""))

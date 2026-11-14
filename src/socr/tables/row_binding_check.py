@@ -1090,20 +1090,477 @@ def check_row_binding(
 
 
 # ---------------------------------------------------------------------------
+# Shared by the pipeline step and the offline re-finalize tool
+# ---------------------------------------------------------------------------
+
+
+def layer_can_judge_tables(ps, out, page=None, *, native_only: bool = False) -> bool:
+    """The ONE predicate for "the text layer may judge this page's model-read tables" (#1267, #1282).
+
+    Called by ``UnifiedPipeline._run_row_binding_check`` and ``_repair_dropped_points`` and by the
+    offline ``socr-refinalize-point-drops``, so none of them can touch a page another would not.
+    Without *page*: the cheap guards (text present, not a chart asset / failed candidate / native
+    engine, not ``native_only``, and an admissible layer: an old OCR layer never votes, #1156).
+    With *page* (a fitz page): also the layer must be born-digital, or refused for spacing alone and
+    admitted by ``BornDigitalDetector.refused_layer_can_judge`` (the classifier also refuses real
+    layers as excessively spaced: 9 of the 35 convicted held-out pages).  Every other refusal
+    doubts the layer's characters."""
+    from socr.core.born_digital import BornDigitalDetector
+    from socr.core.state import layer_is_admissible_evidence
+    from socr.pipeline.agentic import is_failed_candidate
+
+    if out is None or not out.text or out.engine == "chart_asset" or is_failed_candidate(out):
+        return False
+    if native_only or (out.engine or "") == "native":
+        return False
+    if not layer_is_admissible_evidence(ps):
+        return False
+    if page is None:
+        return True
+    return bool(getattr(ps, "is_born_digital", False)) or bool(
+        getattr(ps, "refused_for_spacing_alone", False)
+        and BornDigitalDetector().refused_layer_can_judge(page)
+    )
+
+
+def row_evidence_dicts(result: RowBindingResult) -> list[dict]:
+    """The sidecar/event rows of one table's result: every row that is not BOUND."""
+    return [
+        {
+            "md_line": e.line_index,
+            "verdict": e.verdict.value,
+            "reason": e.reason,
+            "shipped_label": e.shipped_label,
+            "native_label": e.native_label,
+            "values": list(e.values),
+            "native_line": e.native_line,
+        }
+        for e in result.rows
+        if e.verdict is not RowVerdict.BOUND
+    ]
+
+
+def table_payload(
+    page_num: int, table_index: int, outcome: str, rows: list[dict], error: str = ""
+) -> dict:
+    """One table's ``ps.row_binding`` record (before ``withheld_markdown`` / ``repairs``)."""
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+    payload = {
+        "table_id": f"p{page_num}-t{table_index}",
+        "table_index": table_index,
+        "outcome": outcome,
+        "counts": counts,
+        "rows": rows,
+    }
+    if error:
+        payload["error"] = error
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Decimal-point repair (#1282)
+# ---------------------------------------------------------------------------
+
+# A repair needs this many OTHER values of the row to agree exactly (same position) with the
+# candidate line.  One agreeing value identifies no line (the same argument as
+# MIN_VALUES_TO_CONVICT), so two are required: with one, a two-value row `-7 | 1.5` would be
+# repaired on the strength of a single `1.5` (review of #1282, case A).  Measured on the 308-page
+# corpus (scratch/army/decimals, 175 repairs): the smallest count of agreeing values on any
+# repaired row was 3, so this floor loses no measured repair; it only refuses rows too short to
+# corroborate themselves.
+MIN_AGREEING_VALUES = 2
+
+# A page line that prints the row's exact label, with the same number of values, and differs from
+# the shipped row in at most this many values may be the row's OWN line (condition 7).  The row's
+# own line fails condition 1 only because the model slipped somewhere in the row; when it is not
+# the hit, at least one of those slips is not a point drop (a detached minus `- 7`, a misread
+# `-7.1`).  One such slip plus the dropped point being repaired in the same row is two
+# differences.  A hit with such a rival anywhere on the page could be another section's line
+# (`Previous`, a country name) whose value would be written into this row (review of #1282,
+# findings 2a and 3).  A named judgement, not a measured optimum: TB-34's cached pages lose 2 of
+# 152 proposed repairs at 2 (docs/log/2026-11-07_1282-point-repair.md); requiring the label to be
+# unique on the page instead loses 74.  The same tolerance names a labelled line as "near" in the
+# refusal reasons.
+MAX_RIVAL_MISMATCHES = 2
+
+# Refusal reasons (named, so a test and a sidecar can quote them).
+REFUSE_CONTRADICTED = "table_contradicted"
+REFUSE_AMBIGUOUS = "ambiguous_lines"
+REFUSE_CLAIMED = "line_claimed_by_another_row"
+REFUSE_ORDER = "out_of_reading_order"
+REFUSE_DECORATED = "decorated_cell"
+REFUSE_TOKEN_MAP = "token_map_failed"
+REFUSE_WORSENS = "repair_worsens_table"
+REFUSE_NOT_BOUND = "gate_does_not_bind_repaired_row"
+REFUSE_LABEL = "label_not_exact"
+REFUSE_NO_AGREEING = "no_agreeing_value"
+REFUSE_AFFIX = "token_affix_differs"
+REFUSE_SHARED_REGION = "region_shared_with_another_block"
+REFUSE_RIVAL_LINE = "another_line_prints_the_label_close_to_the_row"
+
+# A numeric token split into what stands before the number, the number and what follows it
+# (`-.7%` -> "", "-.7", "%").  The affixes of the shipped token and of the native one must be
+# equal: a repair changes the point and nothing else (review of #1282, case E: `-7` for `-.7%`).
+# The number ends on a digit, so a trailing `,` or `.` (`-.7,`) falls into the affix and refuses.
+_NUMBER_AFFIX = re.compile(
+    r"(?P<pre>[^\d.\-+\u2212\u2013\u2014\u2012]*)"
+    r"(?P<num>[-+\u2212\u2013\u2014\u2012]?(?:\d(?:[\d.,]*\d)?|\.\d(?:[\d.,]*\d)?))"
+    r"(?P<post>.*)",
+    re.S,
+)
+
+
+def _affixes(token: str) -> tuple[str, str] | None:
+    m = _NUMBER_AFFIX.fullmatch(token)
+    return (m.group("pre"), m.group("post")) if m else None
+
+
+def effective_outcome(outcome: str, repaired: bool) -> str:
+    """The outcome a table is RECORDED with.  A table with a repaired row is never recorded BOUND:
+    the table ladder judged the unrepaired bytes (it runs before the repair's text ships), so the
+    shipped text was not the judged text, and a repair lifts no mark (#1282 ruling 2).  The check
+    itself says BOUND (every row sits on its line); the record says UNVERIFIABLE, with no rows."""
+    return (
+        TableOutcome.UNVERIFIABLE.value
+        if repaired and outcome == TableOutcome.BOUND.value
+        else outcome
+    )
+
+
+def _digit_run(canon: str) -> str:
+    return canon.lstrip("-").replace(".", "").lstrip("0") or "0"
+
+
+def _digits_apart_from_point(canon: str) -> str:
+    """The digits of canonical *canon* with the sign and the decimal point removed, and the one
+    ``0`` a canonical form writes before a leading point (``-.7`` -> ``-0.7``) dropped again."""
+    unsigned = canon.lstrip("-")
+    if unsigned.startswith("0."):
+        unsigned = unsigned[1:]
+    return unsigned.replace(".", "")
+
+
+def point_dropped(shipped: str, native: str) -> bool:
+    """Canonical *shipped* is canonical *native* with its decimal point (and the zero before it)
+    removed: ``-7`` for ``-0.7``, ``4`` for ``0.4``, ``12`` for ``1.2``, ``70`` for ``7.0``.  Same
+    sign, and the SAME digit string apart from the point: no digit is added, dropped or moved.
+    Never a different digit run (``-0.1`` for ``-1.1``), a zero lost after the point (``7`` for
+    ``.07``, ``70`` for ``.070``: review of #1282, finding 2b), a point on both sides, or no point
+    on the native side."""
+    if shipped.startswith("-") != native.startswith("-"):
+        return False
+    if "." in shipped or "." not in native:
+        return False
+    return _digits_apart_from_point(shipped) == _digits_apart_from_point(native)
+
+
+def _classify_pair(shipped: str, native: str) -> str:
+    """Why a differing pair is or is not a point drop (for the refusal reasons)."""
+    if point_dropped(shipped, native):
+        return "point_dropped"
+    if shipped.startswith("-") != native.startswith("-"):
+        return "sign_differs"
+    if "." in shipped and "." in native:
+        ds, dn = _digit_run(shipped), _digit_run(native)
+        if ds == dn:
+            return "point_moved"
+        if dn.endswith(ds) or dn.startswith(ds):
+            return "digit_dropped"
+        return "digits_differ"
+    if "." not in native:
+        return "native_has_no_point"
+    return "digits_differ"
+
+
+@dataclass(frozen=True)
+class PointRepair:
+    """One cell changed by :func:`propose_point_repairs`."""
+
+    md_line: int  # line of the row in the table markdown given
+    label: str
+    col: int  # index of the numeric token within the row
+    old: str
+    new: str  # the text layer's own string
+    native_line: int
+    printed_label: str
+    agreeing_values: int
+    n_values: int
+
+
+@dataclass(frozen=True)
+class PointRefusal:
+    md_line: int  # -1 for a refusal of the whole table
+    label: str
+    why: tuple[str, ...]
+    detail: str = ""
+
+
+def _alignments(c: _Cand, n_values: int) -> list[tuple[list[int], list[str]]]:
+    """The ways candidate *c*'s numbers line up with a row of *n_values* values: all of them, or
+    all but a leading one (a numeric row label leads the line)."""
+    idx = [i for i in range(c.start, c.stop) if c.line.words[i].num is not None]
+    nums = [c.line.words[i].num for i in idx]
+    out = []
+    if len(nums) == n_values:
+        out.append((idx, nums))
+    if idx and idx[0] == c.start and len(nums) - 1 == n_values and len(nums) > 1:
+        out.append((idx[1:], nums[1:]))
+    return out
+
+
+def _value_word_keys(c: _Cand, aidx: list[int]) -> frozenset:
+    """The text-layer words under *aidx*, by position: the same printed words whichever region
+    the lines were built from."""
+    return frozenset((w.x0, w.y0, w.x1, w.y1, w.text) for w in (c.line.words[i] for i in aidx))
+
+
+def _is_detached_sign(text: str) -> bool:
+    return text.translate(_UNICODE_MINUS).strip() in ("-", "+")
+
+
+def _rival_lines(r: _Row, hit: dict, page_cands: list[_Cand]) -> list[str]:
+    """Condition 7: page lines other than *hit* that could be row *r*'s own line.  A line counts
+    when it prints the row's label exactly (the hit's rule; a sign printed as a word of its own
+    before the first value is read as the value's, not the label's), carries the same number of values,
+    shares no value word with the hit, and either differs from the row in at most
+    ``MAX_RIVAL_MISMATCHES`` values or is itself a point-only hit (every difference a point drop,
+    ``MIN_AGREEING_VALUES`` agreeing)."""
+    out: list[str] = []
+    for c in page_cands:
+        for aidx, anums in _alignments(c, len(r.numbers)):
+            if _value_word_keys(c, aidx) & hit["words"]:
+                continue  # the hit's own printed words
+            # a sign printed as its own word before the first value (`Previous - 7`) belongs to
+            # the value, not to the label: that line prints the label `Previous`
+            lead = aidx[0]
+            while lead > c.start and _is_detached_sign(c.line.words[lead - 1].text):
+                lead -= 1
+            printed = _printed_label(c, lead)
+            if not _labels_exact(r.label, printed, strict=True):
+                continue
+            mism = [(s, n) for s, n in zip(r.numbers, anums) if s != n]
+            point_only = (
+                bool(mism)
+                and all(point_dropped(s, n) for s, n in mism)
+                and len(anums) - len(mism) >= MIN_AGREEING_VALUES
+            )
+            if len(mism) <= MAX_RIVAL_MISMATCHES or point_only:
+                out.append(f"{printed!r}: {len(mism)} of {len(anums)} values differ")
+    return out
+
+
+def propose_point_repairs(
+    words: list,
+    region: tuple[float, float, float, float] | None,
+    table_markdown: str,
+) -> tuple[str, list[PointRepair], list[PointRefusal]]:
+    """``(repaired_markdown, repairs, refusals)`` for one table block.
+
+    A model that drops a printed decimal point ships ``-7`` for ``-.7``.  The row then equals no
+    native line, so the binder calls it UNVERIFIABLE.  A shipped data row is repaired only when
+    ALL of these hold (the numbers are quoted by the tests and the mutation record):
+
+    0. the table is not CONTRADICTED: those are withheld, and nothing derived from the text layer
+       may reach the re-read of a withheld table (#1267 follow-up);
+    1. no native line carries its values exactly (``_options`` empty): a number the page prints is
+       never changed;
+    2. exactly one native line/panel has the same number of values, prints the row's label EXACTLY
+       before them (``_labels_exact(strict=True)``, the BOUND gate's rule), and every differing
+       value pair is a :func:`point_dropped`;
+    3. at least ``MIN_AGREEING_VALUES`` other values on that line equal the row's, by position;
+    4. no other shipped row has an exact option on that line, and the line lies strictly between
+       the lines of the nearest BOUND rows above and below (reading order);
+    5. the data cells carry no markdown decoration (the substitution is token-exact);
+    6. after the substitution the production check binds that row BOUND, no row that was BOUND
+       loses it, and the table does not turn CONTRADICTED;
+    7. no OTHER line anywhere on the page (not just in the region) prints the row's exact label
+       with the same number of values and is within ``MAX_RIVAL_MISMATCHES`` values of the row, or
+       is itself a point-only hit for the row (:func:`_rival_lines`).
+
+    The number written is the text layer's printed string.  Pure and idempotent."""
+    base = check_row_binding(words, region, table_markdown)
+    if base.outcome is TableOutcome.CONTRADICTED:  # condition 0
+        return table_markdown, [], [PointRefusal(-1, "", (REFUSE_CONTRADICTED,))]
+    lines = build_native_lines(words, region)
+    cands = _candidates(lines)
+    # condition 1 looks at the WHOLE page: the table's box may miss the row's own line (and hold
+    # another table's line with the same label), so "no exact line" is asked of every line.
+    page_cands = _candidates(build_native_lines(words, None))
+    rows = [r for r in _shipped_rows(table_markdown) if not r.is_header]
+    claimed: set[int] = set()
+    row_opts: dict[int, list] = {}
+    for r in rows:
+        if not r.has_content:
+            continue
+        o = _options(r, cands)
+        row_opts[r.line_index] = o
+        claimed.update(c.line.index for c, _ in o)
+    bound_anchor = {
+        e.line_index: e.native_line
+        for e in base.rows
+        if e.verdict is RowVerdict.BOUND and e.native_line is not None
+    }
+    md = table_markdown.splitlines()
+    repairs: list[PointRepair] = []
+    refusals: list[PointRefusal] = []
+    for pos, r in enumerate(rows):
+        if not r.numbers or row_opts.get(r.line_index) or _options(r, page_cands):  # condition 1
+            continue
+        hits: list[dict] = []
+        near: list[dict] = []
+        for c in cands:
+            for aidx, anums in _alignments(c, len(r.numbers)):
+                pairs = list(zip(r.numbers, anums))
+                mism = [(k, s, n) for k, (s, n) in enumerate(pairs) if s != n]
+                if not mism:
+                    continue
+                kinds = {_classify_pair(s, n) for _, s, n in mism}
+                printed = _printed_label(c, aidx[0])
+                label_ok = bool(r.label.strip()) and _labels_exact(r.label, printed, strict=True)
+                agree = len(pairs) - len(mism)
+                rec = {
+                    "line": c.line.index,
+                    "first_word": aidx[0],
+                    "printed": printed,
+                    "label_ok": label_ok,
+                    "agree": agree,
+                    "mism": [(k, s, n, c.line.words[aidx[k]].text) for k, s, n in mism],
+                    "kinds": kinds,
+                    "words": _value_word_keys(c, aidx),
+                }
+                if (
+                    kinds == {"point_dropped"}
+                    and label_ok  # condition 2 (label)
+                    and agree >= MIN_AGREEING_VALUES  # condition 3
+                ):
+                    hits.append(rec)
+                elif kinds == {"point_dropped"} or (label_ok and len(mism) <= MAX_RIVAL_MISMATCHES):
+                    near.append(rec)
+        if not hits:
+            if near:
+                why: set[str] = set()
+                for n in near:
+                    if n["kinds"] != {"point_dropped"}:
+                        why.add("pair:" + ",".join(sorted(n["kinds"])))
+                    elif not n["label_ok"]:
+                        why.add(REFUSE_LABEL)
+                    else:
+                        why.add(REFUSE_NO_AGREEING)
+                refusals.append(
+                    PointRefusal(
+                        r.line_index, r.label, tuple(sorted(why)), repr(near[0]["mism"][:3])
+                    )
+                )
+            continue
+        if len({(h["line"], h["first_word"]) for h in hits}) > 1:
+            refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_AMBIGUOUS,)))
+            continue
+        h = hits[0]
+        rivals = _rival_lines(r, h, page_cands)
+        if rivals:  # condition 7
+            refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_RIVAL_LINE,), rivals[0]))
+            continue
+        if h["line"] in claimed:  # condition 4 (one-to-one)
+            refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_CLAIMED,)))
+            continue
+        above = [
+            bound_anchor[rows[q].line_index]
+            for q in range(pos)
+            if rows[q].line_index in bound_anchor
+        ]
+        below = [
+            bound_anchor[rows[q].line_index]
+            for q in range(pos + 1, len(rows))
+            if rows[q].line_index in bound_anchor
+        ]
+        if not (
+            max(above, default=-1) < h["line"] < min(below, default=len(lines))
+        ):  # condition 4 (reading order)
+            refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_ORDER,)))
+            continue
+        cells = _split_row(md[r.line_index])
+        if any(_MD_DECORATION.search(c) for c in cells[1:]):  # condition 5
+            refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_DECORATED,)))
+            continue
+        targets = {m[0]: m for m in h["mism"]}
+        k, ok, affix_ok, subs, new_cells = 0, True, True, [], [cells[0]]
+        for cell in cells[1:]:
+            out_toks = []
+            for t in cell.split():
+                if _canon_number(t.translate(_UNICODE_MINUS)) is None:
+                    out_toks.append(t)
+                    continue
+                if k in targets:
+                    _, _, n, printed_text = targets[k]
+                    if _canon_number(printed_text.translate(_UNICODE_MINUS)) != n:
+                        ok = False
+                    # The shipped trailing-point form (`-2.` for `-.2`) is the dropped point itself,
+                    # not an affix (ONE terminal period only: `-7..` still refuses); the PRINTED token has no such licence (`-.7,` refuses).
+                    if _affixes(t.removesuffix(".")) != _affixes(printed_text):
+                        affix_ok = False
+                    subs.append((t, printed_text, k))
+                    out_toks.append(printed_text)
+                else:
+                    out_toks.append(t)
+                k += 1
+            new_cells.append(" ".join(out_toks))
+        if not affix_ok:
+            refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_AFFIX,)))
+            continue
+        if not ok or k != len(r.numbers):
+            refusals.append(PointRefusal(r.line_index, r.label, (REFUSE_TOKEN_MAP,)))
+            continue
+        trial = list(md)
+        trial[r.line_index] = "| " + " | ".join(new_cells) + " |"
+        after = check_row_binding(words, region, "\n".join(trial))
+        after_by = {e.line_index: e for e in after.rows}
+        mine = after_by.get(r.line_index)
+        worse = any(
+            e.verdict is RowVerdict.BOUND
+            and (a := after_by.get(e.line_index)) is not None
+            and a.verdict is not RowVerdict.BOUND
+            for e in base.rows
+        ) or (after.outcome is TableOutcome.CONTRADICTED)
+        if mine is None or mine.verdict is not RowVerdict.BOUND or worse:  # condition 6
+            refusals.append(
+                PointRefusal(
+                    r.line_index,
+                    r.label,
+                    (REFUSE_WORSENS,) if worse else (REFUSE_NOT_BOUND,),
+                    mine.reason if mine else "row absent after",
+                )
+            )
+            continue
+        md = trial
+        base = after  # later rows are judged against the repaired table
+        for old, new, col in subs:
+            repairs.append(
+                PointRepair(
+                    r.line_index,
+                    r.label,
+                    col,
+                    old,
+                    new,
+                    h["line"],
+                    h["printed"],
+                    h["agree"],
+                    len(r.numbers),
+                )
+            )
+    return "\n".join(md), repairs, refusals
+
+
+# ---------------------------------------------------------------------------
 # Page helper
 # ---------------------------------------------------------------------------
 
 
-def check_page_row_binding(
-    page, markdown: str, regions_raw: list[tuple[float, float, float, float]] | None = None
-) -> tuple[list[RowBindingResult], int]:
-    """Run :func:`check_row_binding` for every table block of *markdown* on fitz *page*.
-
-    Words are rotated into the reading frame with ``native_first.upright_words_for_page`` and the
-    detected table boxes (raw page frame) with the same pivot and rotation the rowizer uses
-    (``reconstruct._words_center`` / ``_rotate_point``).  Block *i* takes box *i* when there is one box
-    per block; otherwise every block takes the union of the boxes (a superset: it can only add
-    ambiguity, never a false line).  Returns ``(results per block, rotation)``."""
+def _page_frame(page, regions_raw):
+    """``(words, per-block-box source, rotation)``: the page's words in the reading frame and its
+    detected table boxes (raw page frame) rotated with the same pivot and rotation the rowizer
+    uses, as ``(boxes, union)``.  Shared by the check and the repair so they see one geometry."""
     from socr.tables.native_first import upright_words_for_page
     from socr.tables.reconstruct import _rotate_point, _words_center
 
@@ -1134,6 +1591,20 @@ def check_page_row_binding(
         if boxes
         else None
     )
+    return words, (boxes, union), rotation
+
+
+def check_page_row_binding(
+    page, markdown: str, regions_raw: list[tuple[float, float, float, float]] | None = None
+) -> tuple[list[RowBindingResult], int]:
+    """Run :func:`check_row_binding` for every table block of *markdown* on fitz *page*.
+
+    Words are rotated into the reading frame with ``native_first.upright_words_for_page`` and the
+    detected table boxes (raw page frame) with the same pivot and rotation the rowizer uses
+    (``reconstruct._words_center`` / ``_rotate_point``).  Block *i* takes box *i* when there is one box
+    per block; otherwise every block takes the union of the boxes (a superset: it can only add
+    ambiguity, never a false line).  Returns ``(results per block, rotation)``."""
+    words, (boxes, union), rotation = _page_frame(page, regions_raw)
     md_lines = markdown.splitlines()
     blocks = find_table_blocks(markdown)
     results = []
@@ -1141,3 +1612,42 @@ def check_page_row_binding(
         region = boxes[i] if len(boxes) == len(blocks) else union
         results.append(check_row_binding(words, region, "\n".join(md_lines[b.start : b.end + 1])))
     return results, rotation
+
+
+def propose_page_point_repairs(
+    page, markdown: str, regions_raw: list[tuple[float, float, float, float]] | None = None
+) -> tuple[str, list[tuple[int, list[PointRepair]]], list[tuple[int, list[PointRefusal]]]]:
+    """:func:`propose_point_repairs` for every table block of *markdown* on fitz *page*, with the
+    geometry of :func:`check_page_row_binding`.  Returns ``(repaired page markdown, [(block index,
+    repairs)], [(block index, refusals)])``; only blocks with something to report are listed.
+    Repairs change cell text only, so line numbers (``md_line`` is relative to the block) and the
+    block boundaries are unchanged.
+
+    A block that would scan a region shared with another block (no box per block: no boxes at
+    all, or a box count that differs from the block count, with more than one block) gets NO
+    repair and a ``REFUSE_SHARED_REGION`` refusal of the whole table.  The check may judge such a
+    block against the union (a superset only adds ambiguity), but a repair WRITES a number: with
+    two blocks over one region, the other table's line with the same label can be the only hit and
+    its value lands in this table (review of #1282, finding 1)."""
+    words, (boxes, union), _rotation = _page_frame(page, regions_raw)
+    md_lines = markdown.splitlines()
+    kept = markdown.splitlines(keepends=True)  # the page's own line endings survive a repair
+    blocks = find_table_blocks(markdown)
+    repaired: list[tuple[int, list[PointRepair]]] = []
+    refused: list[tuple[int, list[PointRefusal]]] = []
+    if len(blocks) > 1 and len(boxes) != len(blocks):
+        shared = [PointRefusal(-1, "", (REFUSE_SHARED_REGION,), f"{len(boxes)} boxes")]
+        return markdown, [], [(i, list(shared)) for i in range(len(blocks))]
+    for i, b in enumerate(blocks):
+        region = boxes[i] if len(boxes) == len(blocks) else union
+        new, reps, refs = propose_point_repairs(
+            words, region, "\n".join(md_lines[b.start : b.end + 1])
+        )
+        if refs:
+            refused.append((i, refs))
+        if reps:
+            repaired.append((i, reps))
+            for at, line in zip(range(b.start, b.end + 1), new.splitlines()):
+                ending = kept[at][len(md_lines[at]) :]
+                kept[at] = line + ending
+    return "".join(kept), repaired, refused

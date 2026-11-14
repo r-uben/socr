@@ -129,6 +129,7 @@ from socr.judge.table_verdict import (
     TABLE_BINDING_ADJUDICATED_KIND,
     TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
     TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+    TABLE_POINT_REPAIRED_KIND,
     TABLE_ROW_BINDING_CONTRADICTED_KIND,
     TABLE_ROW_BINDING_UNVERIFIABLE_KIND,
     TABLE_SPACER_ROWS_DROPPED_KIND,
@@ -534,6 +535,11 @@ _RESUME_REPLAYED: dict[str, str] = {
     NATIVE_CELL_CHECK_SKIPPED_KIND: (
         "default-on native per-cell binding: geometry skip on a resumed page"
     ),
+    TABLE_POINT_REPAIRED_KIND: (
+        "#1282: cells restored from the text layer before the page was finalized; emitted by "
+        "_repair_dropped_points, which a terminal resumed page skips, and the only record of "
+        "which cells the model read differently (the sidecar holds the repaired text)"
+    ),
     TABLE_ROW_BINDING_CONTRADICTED_KIND: (
         "#1267: row labels proven not to bind to the page's text-layer values; emitted by "
         "_run_row_binding_check, which a resumed page skips, and in TABLE_DISTRUST_KINDS"
@@ -859,6 +865,11 @@ def _attempts_summary(ps) -> list[dict]:
 
 
 logger = logging.getLogger(__name__)
+
+#: #1282: the reason a row-binding record carries when its repair evidence was removed because the
+#: repaired bytes did not ship (a table recorded UNVERIFIABLE only for its repair keeps that
+#: outcome; it is never left without a reason).
+POINT_REPAIR_NOT_SHIPPED = "point_repair_not_shipped"
 
 
 class _PriorOcrLayerNotEvidenceError(Exception):
@@ -9532,6 +9543,215 @@ class UnifiedPipeline:
             bo.failure_mode = FailureMode.TABLE_UNVERIFIED
         ps.unchecked_table_kind = "unverified"
 
+    def _row_binding_applies(self, ps: PageState, out: PageOutput | None, page=None) -> bool:
+        """``tables.row_binding_check.layer_can_judge_tables`` under this run's config: the ONE
+        predicate the check (#1267), the repair (#1282) and the offline tool share."""
+        from socr.tables.row_binding_check import layer_can_judge_tables
+
+        return layer_can_judge_tables(ps, out, page, native_only=bool(self.config.native_only))
+
+    def _repair_dropped_points(
+        self, state: DocumentState, page_num: int, ps: PageState, bo: PageOutput | None
+    ) -> int:
+        """#1282: restore decimal points the model dropped, from the page's own text layer.
+
+        Runs once per page, BEFORE ``finalized_page_record``, on the winning output's text, under
+        ``_row_binding_applies`` (the check's own guards).  Transform once, from source, before
+        marks: the verdict and the row-binding check then see the repaired bytes.  A CONTRADICTED
+        table is never repaired (``propose_point_repairs``).  Returns the number of cells changed.
+        A failure of the step leaves the text as the model wrote it (the check then marks it, as it
+        did before) and is logged.
+
+        The events are only BUFFERED (``ps.point_repair_events``): whether ``bo`` ships is decided
+        later, by selectors this method must not re-list.  ``_commit_point_repairs`` records them
+        once the page's final output is settled, for the repairs that output carries."""
+        ps.point_repairs = {}
+        ps.point_repair_events = []
+        if not self._row_binding_applies(ps, bo):
+            return 0
+        from socr.core.audit_log import AuditEvent
+        from socr.tables.reconcile import find_table_blocks
+
+        blocks = find_table_blocks(bo.text)
+        if not blocks:
+            return 0
+        try:
+            from socr.core.pdf import open_pdf
+            from socr.tables.locate import locate_tables
+            from socr.tables.row_binding_check import propose_page_point_repairs
+
+            with open_pdf(state.handle.path) as doc:
+                if page_num < 1 or page_num > doc.page_count or doc[page_num - 1] is None:
+                    return 0
+                page = doc[page_num - 1]
+                if not self._row_binding_applies(ps, bo, page):
+                    return 0
+                regions = [tuple(b.bbox) for b in locate_tables(page)] or None
+                repaired_text, repaired, _refused = propose_page_point_repairs(
+                    page, bo.text, regions
+                )
+        except Exception as exc:
+            logger.warning(
+                "point repair failed on p%d (%s: %s); the page is left as read",
+                page_num,
+                type(exc).__name__,
+                exc,
+            )
+            return 0
+        if not repaired or repaired_text == bo.text:
+            return 0
+        text_lines = repaired_text.splitlines()
+        cells = 0
+        for table_index, reps in repaired:
+            table_id = f"p{page_num}-t{table_index}"
+            start = blocks[table_index].start
+            rows = [
+                {
+                    "table_line": r.md_line,  # within the table block: stable across the marks above the page
+                    "label": r.label,
+                    "col": r.col,
+                    "old": r.old,
+                    "new": r.new,
+                    "native_line": r.native_line,
+                    "printed_label": r.printed_label,
+                    "agreeing_values": r.agreeing_values,
+                    "n_values": r.n_values,
+                    "row_after": text_lines[start + r.md_line],
+                }
+                for r in reps
+            ]
+            ps.point_repairs[table_id] = rows
+            cells += len(rows)
+            ps.point_repair_events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=TABLE_POINT_REPAIRED_KIND,
+                    engine=bo.engine or "",
+                    detail=(
+                        f"table {table_id}: {len(rows)} cell(s) restored from the page's text "
+                        "layer (the model dropped the decimal point): "
+                        + ", ".join(f"{r['old']} -> {r['new']}" for r in rows)
+                    ),
+                    data={"table_id": table_id, "rows": rows},
+                )
+            )
+        bo.text = repaired_text
+        # The provenance link: THIS reading's bytes were repaired.  What ships is judged by it
+        # (``_repairs_ship``), never by whether some reading prints the same row.
+        bo.point_repaired = True
+        return cells
+
+    @staticmethod
+    def _repairs_ship(reps: list[dict], out: PageOutput | None, block_lines: list[str]) -> bool:
+        """#1282: does *out*, the output that ships, carry these repairs?  Two conditions, both
+        required.  IDENTITY: *out* descends from the reading whose bytes were repaired
+        (``PageOutput.point_repaired``), so an older attempt, a native body or a floor never
+        qualifies, whatever it prints.  BYTES: every ``row_after`` is a line of the table's block,
+        so a guard that rewrote the table after the repair (a withhold, an emission floor) drops it."""
+        return bool(
+            reps
+            and out is not None
+            and getattr(out, "point_repaired", False)
+            and all(r["row_after"] in block_lines for r in reps)
+        )
+
+    @staticmethod
+    def _shipped_repairs(ps: PageState, out: PageOutput | None) -> dict:
+        """The part of ``ps.point_repairs`` that the output *out* carries (``_repairs_ship``),
+        by the same-index table block of its text."""
+        from socr.tables.reconcile import find_table_blocks
+
+        text = (out.text if out is not None else "") or ""
+        lines = text.splitlines()
+        blocks = find_table_blocks(text)
+        kept: dict = {}
+        for table_id, reps in ps.point_repairs.items():
+            try:
+                idx = int(table_id.rsplit("-t", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            if idx >= len(blocks):
+                continue
+            if UnifiedPipeline._repairs_ship(
+                reps, out, lines[blocks[idx].start : blocks[idx].end + 1]
+            ):
+                kept[table_id] = reps
+        return kept
+
+    @staticmethod
+    def _forget_point_repairs(ps: PageState, kept: dict) -> None:
+        """Drop the evidence of every repair not in *kept* from the page's row-binding records.  A
+        table the check recorded UNVERIFIABLE only because of its repair keeps that outcome (its
+        bytes did not ship, nothing says it is bound), now with a named reason instead of an
+        empty record."""
+        for table_id, record in ps.row_binding.items():
+            if table_id in kept or not isinstance(record, dict):
+                continue
+            if record.pop("repairs", None) and not record.get("error"):
+                record["error"] = POINT_REPAIR_NOT_SHIPPED
+        ps.point_repairs = dict(kept)
+
+    def _commit_point_repairs(
+        self, state: DocumentState, page_num: int, ps: PageState, shipped: PageOutput | None
+    ) -> int:
+        """#1282: record the repairs the page's FINAL output carries, drop the rest.
+
+        Called once, after the row-binding policy and the last ``finalized_page_record`` of the
+        page, before the fragment flush.  A repair counts only when *shipped* descends from the
+        repaired reading AND every ``row_after`` of its table is a line of the same-index table
+        block (``_repairs_ship``); a page that ships native text, a floor, a withheld-table
+        marker or an older attempt carries none, so its buffered events and its
+        ``row_binding[...]["repairs"]`` evidence go.  Returns the repairs kept."""
+        pending, ps.point_repair_events = list(ps.point_repair_events), []
+        if not ps.point_repairs and not pending:
+            return 0
+        kept = self._shipped_repairs(ps, shipped)
+        self._forget_point_repairs(ps, kept)
+        for ev in pending:
+            if (ev.data or {}).get("table_id") in kept:
+                state.events.append(ev)
+        return sum(len(r) for r in kept.values())
+
+    def _abandon_point_repairs(
+        self, ps: PageState, bo: PageOutput | None, pre_repair_text: str
+    ) -> None:
+        """#1282: the page's step failed before its repairs were committed.  The repaired bytes
+        would ship with no record, so the reading goes back to what the model wrote and every
+        buffer and piece of evidence goes with it."""
+        if bo is not None and getattr(bo, "point_repaired", False):
+            bo.text = pre_repair_text
+            bo.point_repaired = False
+        ps.point_repair_events = []
+        self._forget_point_repairs(ps, {})
+
+    def _reconcile_point_repairs(
+        self, state: DocumentState, records: list[FinalizedPageRecord]
+    ) -> None:
+        """#1282: at assemble, the records are recomputed (``finalized_page_records``) and a page
+        can come out different from what its loop committed against -- a figure description
+        introduced a malformed table and the page became TABLE_EMISSION_INVALID.  Remove the
+        committed events and evidence of every repair the authoritative record does not carry.
+        Only pages processed in this run have ``ps.point_repairs`` (a resumed page restores its
+        evidence from its sidecar and is not touched)."""
+        for rec in records:
+            page_num = rec.output.page_num
+            ps = state.pages.get(page_num)
+            if ps is None or not ps.point_repairs:
+                continue
+            kept = self._shipped_repairs(ps, rec.output)
+            if len(kept) == len(ps.point_repairs):
+                continue
+            state.events = [
+                ev
+                for ev in state.events
+                if not (
+                    ev.page_num == page_num
+                    and ev.kind == TABLE_POINT_REPAIRED_KIND
+                    and (ev.data or {}).get("table_id") not in kept
+                )
+            ]
+            self._forget_point_repairs(ps, kept)
+
     def _run_row_binding_check(
         self,
         state: DocumentState,
@@ -9558,21 +9778,16 @@ class UnifiedPipeline:
         # call that returns without checking.
         self.rollback_row_binding_page_state(state, page_num, ps)
         out = shipped if shipped is not None else bo
-        if out is None or not out.text or out.engine == "chart_asset" or is_failed_candidate(out):
-            return False
-        if self.config.native_only:
-            return False
-        if (out.engine or "") == "native":
-            return False
-        if not layer_is_admissible_evidence(ps):
+        if not self._row_binding_applies(ps, out):
             return False
         from socr.core.audit_log import AuditEvent
-        from socr.core.born_digital import BornDigitalDetector
         from socr.tables.reconcile import find_table_blocks
         from socr.tables.row_binding_check import (
-            RowVerdict,
             TableOutcome,
             check_page_row_binding,
+            effective_outcome,
+            row_evidence_dicts,
+            table_payload,
         )
 
         blocks = find_table_blocks(out.text)
@@ -9580,20 +9795,26 @@ class UnifiedPipeline:
             return False
         _out_lines = out.text.splitlines()
 
+        def _valid_repairs(table_index: int) -> list[dict] | None:
+            """#1282: the cells restored in this table, if the table that ships still carries
+            them.  The output must descend from the repaired reading (identity), and the rows are
+            matched inside THIS table's block (by its index), by content: the marks the
+            finalizer puts above the body shift line numbers, and another table of the page must
+            never vouch for this one."""
+            reps = ps.point_repairs.get(f"p{page_num}-t{table_index}")
+            if not reps or table_index >= len(blocks):
+                return None
+            _b = blocks[table_index]
+            block_lines = _out_lines[_b.start : _b.end + 1]
+            return reps if self._repairs_ship(reps, out, block_lines) else None
+
         def _record(table_index: int, outcome: str, rows: list[dict], error: str = "") -> None:
             table_id = f"p{page_num}-t{table_index}"
-            counts: dict[str, int] = {}
-            for r in rows:
-                counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
-            payload = {
-                "table_id": table_id,
-                "table_index": table_index,
-                "outcome": outcome,
-                "counts": counts,
-                "rows": rows,
-            }
-            if error:
-                payload["error"] = error
+            payload = table_payload(page_num, table_index, outcome, rows, error)
+            counts = payload["counts"]
+            _repairs = _valid_repairs(table_index)
+            if _repairs and outcome != TableOutcome.CONTRADICTED.value:
+                payload["repairs"] = _repairs
             if outcome == TableOutcome.CONTRADICTED.value:
                 # The model's table is withheld, not lost: it stays in the sidecar, unshipped,
                 # beside the evidence, for the re-read that follows.
@@ -9665,33 +9886,20 @@ class UnifiedPipeline:
                 page = doc[page_num - 1]
                 # The classifier also refuses real layers as excessively spaced (9 of the 35
                 # convicted held-out pages). Every other refusal doubts the layer's characters.
-                if not getattr(ps, "is_born_digital", False) and not (
-                    getattr(ps, "refused_for_spacing_alone", False)
-                    and BornDigitalDetector().refused_layer_can_judge(page)
-                ):
+                if not self._row_binding_applies(ps, out, page):
                     return False
                 ps.row_binding_table_count = len(blocks)
                 regions = [tuple(b.bbox) for b in locate_tables(page)] or None
                 results, _rotation = check_page_row_binding(page, out.text, regions)
             for idx, result in enumerate(results):
-                rows = [
-                    {
-                        "md_line": e.line_index,
-                        "verdict": e.verdict.value,
-                        "reason": e.reason,
-                        "shipped_label": e.shipped_label,
-                        "native_label": e.native_label,
-                        "values": list(e.values),
-                        "native_line": e.native_line,
-                    }
-                    for e in result.rows
-                    if e.verdict is not RowVerdict.BOUND
-                ]
-                _record(idx, result.outcome.value, rows)
-                if result.outcome is TableOutcome.CONTRADICTED:
+                rows = row_evidence_dicts(result)
+                # #1282: a table with a repaired row is never recorded BOUND (no mark lifts)
+                outcome = effective_outcome(result.outcome.value, bool(_valid_repairs(idx)))
+                _record(idx, outcome, rows)
+                if outcome == TableOutcome.CONTRADICTED.value:
                     worst = TableOutcome.CONTRADICTED.value
                 elif (
-                    result.outcome is TableOutcome.UNVERIFIABLE
+                    outcome == TableOutcome.UNVERIFIABLE.value
                     and worst != TableOutcome.CONTRADICTED.value
                 ):
                     worst = TableOutcome.UNVERIFIABLE.value
@@ -13003,6 +13211,14 @@ class UnifiedPipeline:
                 with clock.span("figures"):
                     self._agentic_unshipped_figure_page(state, page_num, ps, bo, _chart_figures_dir)
 
+                # #1282: a dropped decimal point is restored from the page's own text layer here,
+                # on the winning output, so that the finalize below (verdict, marks) and the
+                # row-binding check after it all see the repaired bytes once.
+                _pre_repair_text = bo.text
+                _repairs_committed = False
+                with clock.span("tables"):
+                    self._repair_dropped_points(state, page_num, ps, bo)
+
                 try:
                     from ocr_output_contract import PAGE_MARKER_RE
 
@@ -13063,6 +13279,11 @@ class UnifiedPipeline:
                                 state, page_num, _whole_doc_page_texts(state)
                             )
 
+                        # #1282: the repairs are recorded now that the page's final output is
+                        # known: only those whose repaired row is in the bytes that ship.
+                        self._commit_point_repairs(state, page_num, ps, _record.output)
+                        _repairs_committed = True
+
                         # Strip any leading ## Page N marker so the provisional fragment
                         # body matches what assemble would produce (modulo
                         # post-strip/post-figure transforms, which run later).
@@ -13082,6 +13303,9 @@ class UnifiedPipeline:
                         page_num,
                         exc,
                     )
+                    if not _repairs_committed:
+                        # #1282: the repaired bytes would ship with no record.
+                        self._abandon_point_repairs(ps, bo, _pre_repair_text)
                     if not ps.timings_s:
                         ps.timings_s = clock.finalize()
             finally:
@@ -21842,6 +22066,9 @@ class UnifiedPipeline:
             final_bodies = split_native_pages(final_text)
             if len(final_bodies) == state.handle.page_count:
                 final_records = finalized_page_records(state, final_text)
+                # #1282: the page loop committed its repairs against the page's loop-time
+                # record; this one is authoritative.
+                self._reconcile_point_repairs(state, final_records)
                 final_page_outputs = [record.output for record in final_records]
                 self._record_table_counts(state, final_records)
                 emission_failures = [

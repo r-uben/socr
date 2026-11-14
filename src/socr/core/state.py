@@ -652,6 +652,13 @@ class PageState:
     #: unverified mark goes on ``row_binding_unverifiable_tables`` alone, not on bound siblings.
     #: Persisted.
     row_binding_mark_only: bool = False
+    #: #1282: ``table_id`` -> the cells restored from the text layer on this page, handed to
+    #: ``_run_row_binding_check`` so the table's ``row_binding`` record (persisted) carries them.
+    #: Transient: a resumed page restores them from ``row_binding``.
+    point_repairs: dict = field(default_factory=dict)
+    #: #1282: the ``table_point_repaired`` events of those repairs, buffered until the page's final
+    #: output is settled (``_commit_point_repairs``).  Transient.
+    point_repair_events: list = field(default_factory=list)
     #: P1 retry latch: transient external state absent from the run fingerprint.
     #: Set when at least one table on this page reached an UNVERIFIED terminal
     #: caused by an unavailable table judge rung (transport failure, missing

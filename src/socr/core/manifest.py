@@ -6451,6 +6451,16 @@ def _split_page_top_banners(text: str) -> tuple[list[str], str]:
     return [line.rstrip("\n") for line in banners if line.strip()], body
 
 
+def without_page_top_banners(text: str, drop) -> str:
+    """*text* without the leading page banners for which ``drop(banner_line)`` is true; the
+    other banners stay in their place. The public seam for a re-finalize tool (#1282)."""
+    banners, body = _split_page_top_banners(text)
+    kept = [b for b in banners if not drop(b.strip())]
+    if len(kept) == len(banners):
+        return text
+    return _with_page_top_banners(body, kept)
+
+
 def _with_page_top_banners(body: str, banner_lines: Sequence[str]) -> str:
     """Prepend banner lines once; ``body`` must not already include them."""
     body = body.lstrip("\n")
