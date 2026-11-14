@@ -422,3 +422,45 @@ def test_the_verdict_names_the_cause_instead_of_the_unknown_fallback(
     got = clauses(mode)
     assert "unknown" not in got
     assert got.get("source_evidence") == result
+
+
+def test_a_pre_1270_sidecar_keeps_its_stored_hallucination_on_resume(tmp_path: Path) -> None:
+    """Review of PR #1325: a floor page whose sidecar stored ``hallucination`` (written before
+    the label was split) is not relabelled when selection runs again on resume. The keep needs
+    the floor's own marker in the saved text as well as the stored mode."""
+    state = _floored_state(tmp_path / "a", unverifiable=False)
+    floor, _prov = _select_page_output_tagged(state, 1)
+    assert floor.failure_mode is FailureMode.WITNESS_DISAGREES
+
+    # Resume: the saved floor output comes back with the mode the old run stored.
+    old = _floored_state(tmp_path / "b", unverifiable=False)
+    stored = PageOutput(
+        page_num=1,
+        text=floor.text,
+        status=PageStatus.ERROR,
+        engine=floor.engine,
+        audit_passed=False,  # as the floor writes it; True would win the passing-output shortcut
+        failure_mode=FailureMode.HALLUCINATION,
+    )
+    old.pages[1].best_output = stored
+    old.pages[1].attempts = [stored]
+    resumed, _ = _select_page_output_tagged(old, 1)
+    assert resumed.failure_mode is FailureMode.HALLUCINATION
+    assert resumed.text == floor.text and resumed.status is floor.status
+
+    # Difference arm: the same saved floor output stored by a run of this code (the new mode)
+    # keeps the new mode: only the stored mode differs between the two resumed arms.
+    new = _floored_state(tmp_path / "c", unverifiable=False)
+    stored_new = PageOutput(
+        page_num=1,
+        text=floor.text,
+        status=PageStatus.ERROR,
+        engine=floor.engine,
+        audit_passed=False,  # as the floor writes it; True would win the passing-output shortcut
+        failure_mode=FailureMode.WITNESS_DISAGREES,
+    )
+    new.pages[1].best_output = stored_new
+    new.pages[1].attempts = [stored_new]
+    again, _ = _select_page_output_tagged(new, 1)
+    assert again.failure_mode is FailureMode.WITNESS_DISAGREES
+    assert again.text == resumed.text

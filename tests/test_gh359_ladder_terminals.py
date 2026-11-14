@@ -20,7 +20,6 @@ from unittest.mock import patch
 
 import fitz
 
-from socr.core.born_digital import BornDigitalDetector
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.providers import PROFILE_QWEN_LOCAL
 from socr.core.result import DocumentStatus, FailureMode, PageOutput, PageStatus
@@ -459,14 +458,6 @@ class TestRuling6ChokePoint:
                 ),
                 patch.object(pipeline, "_binding_contradiction_for_witness", return_value=None),
                 patch.object(pipeline, "_run_table_judge_gate", return_value=None),
-                # #1270 B4 class 3: this tiny page is refused for its shape, and its agreeing layer
-                # now counts as a check, which removes the only mark the unwired arm carried (the
-                # old "agrees, but the layer was refused" UNKNOWN). The choke point is pinned on a
-                # page that keeps that mark; whether an unwired table SHOULD carry its own mark is
-                # an open point of PR #1325, not something this fixture can settle.
-                patch.object(
-                    BornDigitalDetector, "_shape_refusal_layer_is_clean", return_value=False
-                ),
             ]
             if not assemble_backfill:
                 patches.append(

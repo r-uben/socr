@@ -4119,6 +4119,20 @@ def _is_restored_prose_recovery(p, page_num: int) -> bool:
     return _is_prose_recovery_body(text, page_num)
 
 
+def _is_stored_pre_1270_floor(source: PageOutput | None, marker: str) -> bool:
+    """#1270: *source* is this floor's own saved output carrying the pre-split ``hallucination``.
+
+    Both halves: the stored mode, and the floor's failed-table marker in the saved text (a
+    live model attempt that merely audited as a hallucination does not carry it, so a live run
+    is always labelled by the witness flags above).
+    """
+    return (
+        source is not None
+        and source.failure_mode is FailureMode.HALLUCINATION
+        and marker in (source.text or "")
+    )
+
+
 def _restored_floor_body_holds(p, page_num: int) -> bool:
     """#1266 round 4 (Astra P0): may a words-less page REUSE its saved floor body as is?
 
@@ -5195,6 +5209,11 @@ def _select_page_output_tagged(
                 if getattr(p, "scanned_table_withheld_unconfirmed", False)
                 else FailureMode.TABLE_UNVERIFIED_WITNESS
                 if getattr(p, "scanned_table_witness_unverifiable", False)
+                # #1270: a page whose own sidecar stored ``hallucination`` for THIS floor was
+                # written before the label was split. Resume does not re-label it: the stored
+                # mode is what that run recorded, and the page keeps it.
+                else FailureMode.HALLUCINATION
+                if _is_stored_pre_1270_floor(source, d3_marker)
                 else FailureMode.WITNESS_DISAGREES
             ),
         ), SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED

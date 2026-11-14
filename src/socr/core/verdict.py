@@ -41,6 +41,7 @@ from typing import Any
 from socr.core.marks import (
     SCOPE_PAGE,
     parse_canonical_mark,
+    region_scope,
     Check,
     CheckResult,
     FAMILY_COVERAGE,
@@ -1389,7 +1390,16 @@ def _layer_is_clean_for_no_number_clearance(p: Any) -> bool:
 
 
 def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | None:
-    """#1185: a model reading is CHECKED only if its numbers occur in the page's own text.
+    """The numbers clause alone; see :func:`_text_layer_numbers_verdict`."""
+    return _text_layer_numbers_verdict(output, p)[0]
+
+
+def _text_layer_numbers_verdict(output: PageOutput, p: Any) -> tuple[VerdictClause | None, bool]:
+    """``(clause, cleared_by_b4)``. *cleared_by_b4* is True when the clause is None ONLY because
+    a #1270 B4 class 2 (no number on either side, covered) or class 3 (shape-refused layer
+    that agrees) clearance applied: the two places a page lost the mark it used to carry.
+
+    #1185: a model reading is CHECKED only if its numbers occur in the page's own text.
 
     Measured on the Fed calibration run: 2018 Tealbook p125 shipped ``-8`` for a printed
     ``-.8`` with ``judge_reason=faithful`` and nothing comparing the table's numbers with
@@ -1418,20 +1428,23 @@ def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | Non
     from socr.core.manifest import is_page_failed_marker
 
     if (output.engine or "") not in model_reading_engines() or not (output.text or "").strip():
-        return None
+        return None, False
     # A page that ships socr's ``[page N failed: ...]`` marker ships none of the reading,
     # so there is nothing to compare; its marker already marks it. Without this the
     # sidecar carried an UNKNOWN clause that no line on the page states, because
     # ``_apply_verdict_marks`` never writes above a whole-page failure marker -- one
     # surface saying what another does not (found by the p6 stage C oracle, page 9).
     if is_page_failed_marker(output.text):
-        return None
+        return None, False
     if _flag(p, "prior_ocr_layer_suspect"):
-        return None
+        return None, False
     reference = getattr(p, "own_layer_text", "")
     if not isinstance(reference, str) or not reference.strip():
-        return VerdictClause(
-            Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, SCOPE_PAGE, NO_OWN_TEXT_REASON
+        return (
+            VerdictClause(
+                Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, SCOPE_PAGE, NO_OWN_TEXT_REASON
+            ),
+            False,
         )
     record = compare_numbers(
         reference,
@@ -1441,43 +1454,58 @@ def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | Non
     if record.compared == 0:
         layer_count = record.reference_only
         if not layer_count and _no_numbers_anywhere_is_covered(output, p):
-            return None
+            return None, True
         reason = (
             NO_NUMBER_LAYER_HAS_SOME_REASON.format(count=layer_count)
             if layer_count
             else NO_NUMBER_REASON
         )
-        return VerdictClause(Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, SCOPE_PAGE, reason)
+        return (
+            VerdictClause(Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, SCOPE_PAGE, reason),
+            False,
+        )
     if _layer_is_damaged(p) and not _layer_is_shape_refused(p):
         reason = (
             DAMAGED_LAYER_PREFIX + describe_disputes(record)
             if record.disputed
             else DAMAGED_LAYER_AGREES_REASON
         )
-        return VerdictClause(Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, SCOPE_PAGE, reason)
+        return (
+            VerdictClause(Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, SCOPE_PAGE, reason),
+            False,
+        )
     if _layer_is_shape_refused(p) and record.disputed:
         # #1270: AGREEMENT with a shape-refused, shown-clean layer is a check; a DISPUTE stays
         # UNKNOWN (named), because the shape that made the detector refuse the layer (dot
         # leaders, spaced digits) is also the shape that splits or fuses a number, so the
         # layer may be the one that is wrong. Only the agreement side is claimed here.
-        return VerdictClause(
-            Check.TEXT_LAYER_NUMBERS,
-            CheckResult.UNKNOWN,
-            SCOPE_PAGE,
-            SHAPE_REFUSED_LAYER_PREFIX + describe_disputes(record),
+        return (
+            VerdictClause(
+                Check.TEXT_LAYER_NUMBERS,
+                CheckResult.UNKNOWN,
+                SCOPE_PAGE,
+                SHAPE_REFUSED_LAYER_PREFIX + describe_disputes(record),
+            ),
+            False,
         )
     if record.disputed and any(_flag(p, f) for f in _COSMETIC_LAYER_FLAGS):
-        return VerdictClause(
-            Check.TEXT_LAYER_NUMBERS,
-            CheckResult.UNKNOWN,
-            SCOPE_PAGE,
-            DAMAGED_LAYER_PREFIX + describe_disputes(record),
+        return (
+            VerdictClause(
+                Check.TEXT_LAYER_NUMBERS,
+                CheckResult.UNKNOWN,
+                SCOPE_PAGE,
+                DAMAGED_LAYER_PREFIX + describe_disputes(record),
+            ),
+            False,
         )
     if record.disputed:
-        return VerdictClause(
-            Check.TEXT_LAYER_NUMBERS, CheckResult.FAIL, SCOPE_PAGE, describe_disputes(record)
+        return (
+            VerdictClause(
+                Check.TEXT_LAYER_NUMBERS, CheckResult.FAIL, SCOPE_PAGE, describe_disputes(record)
+            ),
+            False,
         )
-    return None
+    return None, _layer_is_shape_refused(p)
 
 
 #: #1218: the reason of a ``text_layer_drops`` FAIL. COUNT ONLY, never the numbers: a mark
@@ -1716,6 +1744,77 @@ def text_layer_words_clause(output: PageOutput, p: Any) -> VerdictClause | None:
     return VerdictClause(Check.TEXT_LAYER_WORDS, result, SCOPE_PAGE, reason)
 
 
+#: #1270: a table that ships with no table-ladder disposition at all.
+UNCHECKED_TABLE_REASON = (
+    "this table has no table-ladder verdict (not verified, unverified or withheld), "
+    "so nothing checked its cells"
+)
+
+
+def _page_has_table_ladder_terminal(
+    output: PageOutput, p: Any, event_kinds: frozenset[str]
+) -> bool:
+    """True when the table ladder recorded ANY disposition for this page.
+
+    The same three sources ``orchestrator._table_ladder_terminal`` reads (the page state's
+    disposition, the shipped attempt's mode) plus the page's terminal audit events, which is
+    the only place an ACCEPTED table is recorded (it sets no disposition). Page-level on
+    purpose: the seam sees event KINDS, not table ids. A page with one terminal and one
+    unwitnessed table is caught by the assemble backfill, which stamps the missing one.
+    """
+    from socr.judge.table_verdict import TABLE_LADDER_EVENT_KINDS
+
+    terminals = {
+        FailureMode.TABLE_REJECTED,
+        FailureMode.TABLE_UNVERIFIED,
+        FailureMode.TABLE_WITHHELD,
+    }
+    return (
+        getattr(p, "table_ladder_disposition", None) in terminals
+        or output.failure_mode in terminals
+        or bool(event_kinds & TABLE_LADDER_EVENT_KINDS)
+    )
+
+
+def unchecked_table_clauses(
+    output: PageOutput, p: Any, event_kinds: frozenset[str] = frozenset()
+) -> tuple[VerdictClause, ...]:
+    """#1270: one ``source_evidence`` UNKNOWN per table that was never checked.
+
+    A table that shipped and has no ladder terminal of any kind (the assemble backfill that
+    stamps ``TABLE_UNVERIFIED`` was skipped, or the ladder never ran) was not checked by
+    anything. Its mark must not depend on another clause happening to be present: the
+    numbers clause's shape and no-number clearances (class 2 and 3) removed the mark such a
+    page used to carry by accident. Scope is ``table:N``, N the ordinal of the table block in
+    the shipped text, so a mark never impugns a sibling table.
+
+    Emitted only on a page whose numbers clause was cleared by class 2 or 3 (see
+    :func:`_text_layer_numbers_verdict`): every other page keeps the marks it already had, and
+    the rest of the suite and corpus see no change. A page with a table the ladder never ran
+    on for another reason is a pre-existing question, not one B4 opened.
+
+    Nothing is claimed for a failed-marker page or one whose table was withheld (no table
+    block ships there).
+    """
+    from socr.core.manifest import is_page_failed_marker
+    from socr.tables.reconcile import find_table_blocks
+
+    text = output.text or ""
+    if not text.strip() or is_page_failed_marker(text):
+        return ()
+    if _page_has_table_ladder_terminal(output, p, event_kinds):
+        return ()
+    return tuple(
+        VerdictClause(
+            Check.SOURCE_EVIDENCE,
+            CheckResult.UNKNOWN,
+            region_scope("table", ordinal),
+            UNCHECKED_TABLE_REASON,
+        )
+        for ordinal, _block in enumerate(find_table_blocks(text))
+    )
+
+
 #: The order ``silent_success_clauses`` emits its clauses in, as ``(check, scope kind)``.
 #: Named here, beside the function that defines it, so the two cannot drift.
 #:
@@ -1737,6 +1836,8 @@ _SILENT_SUCCESS_ORDER: tuple[tuple[Check, str], ...] = (
     (Check.TEXT_LAYER_WORDS, SCOPE_PAGE),
     # #1306: last again, for the same reason.
     (Check.CONTROL_BYTES, SCOPE_PAGE),
+    # #1270: last again.
+    (Check.SOURCE_EVIDENCE, "table"),
 )
 
 
@@ -1776,6 +1877,9 @@ def silent_success_clauses(
     the hole confirmed at the seam -- see the slice-2 log).
     """
     numbers = text_layer_numbers_clause(output, p)
+    # Only a page whose numbers clause is None can have been cleared; asking again costs one
+    # more comparison on those pages and none on the pages that carry the clause.
+    numbers_cleared_by_b4 = numbers is None and _text_layer_numbers_verdict(output, p)[1]
     drops = text_layer_drops_clause(output, p)
     words = text_layer_words_clause(output, p)
     control = control_bytes_clause(output, p)
@@ -1785,6 +1889,9 @@ def silent_success_clauses(
         *((drops,) if drops is not None else ()),
         *((words,) if words is not None else ()),
         *((control,) if control is not None else ()),
+        # #1270: last, outside the "ahead of the numbers clause" tuple, so a re-finalize tool's
+        # slot count for the numbers clause is unchanged.
+        *(unchecked_table_clauses(output, p, event_kinds) if numbers_cleared_by_b4 else ()),
     )
 
 
