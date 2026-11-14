@@ -28,6 +28,8 @@ Run it as ``socr-refinalize-unshipped-figures <out_dir> --pdf-dir <dir> [--dry-r
 
 from __future__ import annotations
 
+from socr.core.page_files import page_sidecar_paths
+
 import argparse
 import json
 import re
@@ -407,7 +409,7 @@ def _answered_sidecars(pages_dir: Path, pending: dict[int, dict]) -> list[dict]:
     as the disk, because the sidecars are written LAST and are the commit point.
     """
     out: list[dict] = []
-    for path in sorted(pages_dir.glob("*.json")):
+    for path in page_sidecar_paths(pages_dir):
         try:
             data = _read_json(path)
         except (OSError, ValueError):
@@ -494,7 +496,7 @@ def refinalize_document(
     changes: list[PageChange] = []
     fragments: list[tuple[Path, str]] = []
     sidecars: list[tuple[Path, dict]] = []
-    for sidecar_path in sorted(pages_dir.glob("*.json")):
+    for sidecar_path in page_sidecar_paths(pages_dir):
         sidecar = _read_json(sidecar_path)
         result = refinalize_page(sidecar, pdf, figures_dir, max_per_page, render=not dry_run)
         if result is None:

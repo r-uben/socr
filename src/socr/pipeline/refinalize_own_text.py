@@ -44,6 +44,8 @@ socr's source, so a resume on new code re-OCRs every page).
 
 from __future__ import annotations
 
+from socr.core.page_files import page_sidecar_paths
+
 import argparse
 import json
 import sys
@@ -835,7 +837,7 @@ def refinalize_document(
     meta_path = doc_dir / "metadata.json"
     if not pages_dir.is_dir():
         return []
-    sidecar_paths = sorted(pages_dir.glob("[0-9]*.json"))
+    sidecar_paths = page_sidecar_paths(pages_dir, "[0-9]*.json")
     candidates = []
     for path in sidecar_paths:
         sidecar = _read_json(path)

@@ -81,6 +81,7 @@ from socr.core.verdict import PRIOR_OCR_MODEL_REASON, PRIOR_OCR_NATIVE_REASON
 from socr.core.pass_trace import TraceEntry
 from socr.core.verdict import (
     ENGINE_NATIVE_MATH,
+    JUDGE_ONLY_REASON,
     PageVerdict,
     build_page_verdict,
     build_pass_trace,
@@ -6926,6 +6927,7 @@ _VERDICT_DERIVED_MODES: frozenset[FailureMode] = frozenset(
         FailureMode.EQUATION_FIDELITY_UNVERIFIED,
         FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
         FailureMode.MODEL_OUTPUT_UNJUDGED,
+        FailureMode.READING_UNCORROBORATED,
         FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
         FailureMode.FIGURE_NOT_SHOWN,
         FailureMode.FIGURE_RENDER_FAILED,
@@ -7057,6 +7059,10 @@ def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
             if scoped is FailureMode.FIGURE_NOT_SHOWN and kind in _FIGURE_RENDER_FAILED_KINDS:
                 return FailureMode.FIGURE_RENDER_FAILED
             return scoped
+        # #1251: same check as #1181's unjudged accept, different mode (resumability differs),
+        # told apart by the clause's own reason, which is the constant this module emits.
+        if clause.check is Check.PAGE_JUDGE and clause.reason == JUDGE_ONLY_REASON:
+            return FailureMode.READING_UNCORROBORATED
         return by_check.get(clause.check) or by_result.get((clause.check, clause.result))
 
     # A FAIL outranks an UNKNOWN, whatever the clause order (Argon P0-A). A FAIL means a check

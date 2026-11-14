@@ -25,6 +25,8 @@ A file that cannot be read (missing, truncated, not a JSON object) is counted un
 
 from __future__ import annotations
 
+from socr.core.page_files import page_sidecar_paths
+
 import argparse
 import collections
 import hashlib
@@ -95,7 +97,7 @@ def _read_json(path: Path) -> dict | None:
 
 def _doc_rank(doc_dir: Path) -> tuple[int, int]:
     return (
-        len(list((doc_dir / "pages").glob("*.json"))),
+        len(page_sidecar_paths(doc_dir / "pages")),
         int((doc_dir / "metadata.json").exists()),
     )
 
@@ -168,7 +170,7 @@ def count_document(doc_dir: Path) -> collections.Counter:
     for md_path in (doc_dir / "pages").glob("*.md"):
         if not md_path.with_suffix(".json").exists():
             c["coverage.pages_without_sidecar"] += 1
-    for sc_path in sorted((doc_dir / "pages").glob("*.json")):
+    for sc_path in page_sidecar_paths(doc_dir / "pages"):
         sidecar = _read_json(sc_path)
         if sidecar is None:
             c["coverage.unreadable_sidecars"] += 1
@@ -347,7 +349,7 @@ def count_text_layer(args: tuple[Path, Path]) -> collections.Counter:
         c["textlayer.unreadable_pdfs"] += 1
         return c
     with pdf:
-        for sc_path in sorted((doc_dir / "pages").glob("*.json")):
+        for sc_path in page_sidecar_paths(doc_dir / "pages"):
             md_path = sc_path.with_suffix(".md")
             sidecar = _read_json(sc_path)
             if sidecar is None or not md_path.exists():

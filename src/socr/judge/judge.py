@@ -172,6 +172,75 @@ class JudgeVerdict:
         return self.faithful
 
 
+#: Longest error text kept in a judge-call record. Derivation: the reply cap
+#: (``JUDGE_MAX_REPLY_TOKENS``) bounds a verdict, but an exception's text is whatever a transport
+#: or a service chose to say; the type name carries the classification, the text is a hint, and a
+#: record that grew with it would grow the page's side file without bound.
+JUDGE_CALL_ERROR_MAX_CHARS = 500
+
+#: #1251: the outcomes of one page-judge call, as the side file records them.
+JUDGE_CALL_VERDICT = "verdict"
+JUDGE_CALL_TIMEOUT = "timeout"
+JUDGE_CALL_ERROR = "error"
+#: The orchestrator's own wall-clock deadline hit before the call returned. The call itself may
+#: still finish later and then record its own ``verdict`` row: both stay, in order.
+JUDGE_CALL_DEADLINE = "deadline_exceeded"
+
+
+def page_judge_prompt_sha256() -> str:
+    """SHA-256 of the page-judge prompt template (the same digest the run manifest records as
+    ``page_judge_prompt_digest``), or a marker when the file is unreadable."""
+    import hashlib
+
+    try:
+        return hashlib.sha256(load_judge_prompt().encode("utf-8")).hexdigest()
+    except OSError:
+        return "unreadable-page-judge-prompt"
+
+
+def judge_call_record(
+    *,
+    page_num: int,
+    outcome: str,
+    judge: object,
+    reading: str,
+    verdict: JudgeVerdict | None = None,
+    error: BaseException | None = None,
+) -> dict:
+    """One page-judge call, for ``pages/NNNNN.judge.json`` (#1251).
+
+    Holds what a later reader needs to audit the call without re-running it: the digest of the
+    prompt template and of the reading it was shown, the model and backend, the FULL reply as the
+    backend returned it (uncut) with its length, and the parsed verdict. A call that produced no
+    verdict (a timeout, a crash, a reply that did not parse) says so by ``outcome`` and carries
+    the exception type; it has no reply to keep."""
+    import hashlib
+
+    record: dict = {
+        "page": page_num,
+        "outcome": outcome,
+        "judge_model": str(getattr(judge, "model", "") or ""),
+        "judge_backend": type(judge).__name__,
+        "prompt_sha256": page_judge_prompt_sha256(),
+        "reading_sha256": hashlib.sha256((reading or "").encode("utf-8")).hexdigest(),
+    }
+    if verdict is not None:
+        record["reply"] = verdict.raw
+        record["reply_chars"] = len(verdict.raw or "")
+        record["parsed"] = {
+            "faithful": bool(verdict.faithful),
+            "issues": list(verdict.issues),
+            "confidence": verdict.confidence,
+            "suggested_action": verdict.suggested_action,
+        }
+    if error is not None:
+        record["error"] = {
+            "type": type(error).__name__,
+            "message": str(error)[:JUDGE_CALL_ERROR_MAX_CHARS],
+        }
+    return record
+
+
 class Judge(Protocol):
     """Anything that can turn (page image, ocr text) into a verdict."""
 

@@ -89,6 +89,17 @@ EXACT_PASS_UNJUDGED_REASON = (
     "not their columns or row labels, and nothing outside the table"
 )
 
+#: #1251 (C3): the reason of the ``page_judge=UNKNOWN`` clause on a model reading the page judge
+#: accepted and nothing independent confirmed. Worded by what is MISSING, never by who judged:
+#: on an escalated page a cloud engine read and the local model judged, so "approved by the model
+#: that produced it" would be false there. Also the key that tells this clause from #1181's
+#: (``EXACT_PASS_UNJUDGED_REASON``): same check, different resolvability.
+JUDGE_ONLY_REASON = (
+    "no independent check confirmed this reading: neither the words nor the numbers of the "
+    "page were compared with the page's own text layer; verify it against the page image "
+    "before citing"
+)
+
 #: Failure modes that name their own failed check. A mode absent from this map falls to
 #: ``_fallback_clause`` rather than being guessed at.
 #: #1156 / #1262: why a page whose text layer is an earlier OCR run is never CHECKED. The
@@ -239,6 +250,13 @@ _MODE_CLAUSES: dict[FailureMode, tuple[Check, CheckResult, str]] = {
         Check.PAGE_JUDGE,
         CheckResult.UNKNOWN,
         EXACT_PASS_UNJUDGED_REASON,
+    ),
+    #: #1251 (C3): same purpose as the row above, for the judge-approved model reading that no
+    #: independent check confirmed.
+    FailureMode.READING_UNCORROBORATED: (
+        Check.PAGE_JUDGE,
+        CheckResult.UNKNOWN,
+        JUDGE_ONLY_REASON,
     ),
     FailureMode.EQUATION_FIDELITY_UNVERIFIED: (
         Check.EQUATION_FIDELITY,
@@ -939,6 +957,9 @@ PERMANENTLY_UNRESOLVABLE_MODES: frozenset[FailureMode] = frozenset(
         FailureMode.WORDS_MISSING_FROM_PAGE,
         # #1306: the same layer holds the same control bytes.
         FailureMode.CONTROL_BYTES_REPLACED,
+        # #1251: re-reading cannot produce an independent check the layer does not offer, and
+        # the reading is not deterministic, so re-reading would only change shipped text.
+        FailureMode.READING_UNCORROBORATED,
     }
 )
 
@@ -989,6 +1010,13 @@ LAYER_CHECK_MODES: dict[FailureMode, Check] = {
 #: This is the clause-level check the chart slice deleted as unreachable, restored to
 #: exactly the one case that reaches it.
 REPROCESSABLE_CLAUSE_CHECKS: frozenset[Check] = frozenset({Check.PAGE_JUDGE})
+
+
+def clause_is_reprocessable(clause: VerdictClause) -> bool:
+    """Could re-reading the page resolve *clause*? Every ``page_judge`` clause but #1251's: that
+    one says no independent check exists for this reading, which a re-read of the same page
+    under the same layer and config cannot change (it can only change the shipped text)."""
+    return clause.check in REPROCESSABLE_CLAUSE_CHECKS and clause.reason != JUDGE_ONLY_REASON
 
 
 #: The chart lane's record that the values drawn in a chart were never transcribed.
@@ -2052,13 +2080,85 @@ def silent_success_clauses(
     drops = text_layer_drops_clause(output, p)
     words = text_layer_words_clause(output, p)
     control = control_bytes_clause(output, p)
-    return (
+    clauses = (
         *_clauses_ahead_of_text_layer_numbers(output, p, event_kinds),
         *((numbers,) if numbers is not None else ()),
         *((drops,) if drops is not None else ()),
         *((words,) if words is not None else ()),
         *((control,) if control is not None else ()),
     )
+    # #1251: LAST, and only on a page the other checks leave SUCCESS: a page that already carries
+    # a clause is already demoted and marked, and a second line would say nothing new.
+    judge_only = () if clauses else _judge_only_clauses(output, p, event_kinds)
+    return (*clauses, *judge_only)
+
+
+# --- the page judge is not a check (#1251, C3) --------------------------------------------
+
+
+def independent_page_evidence(entries: Iterable[TraceEntry], text: str) -> bool:
+    """Does a pass trace hold an independent confirmation of the page text *text*?
+
+    Yes only when, after every PASS not computed on *text* is dropped
+    (:func:`verify_pass_digests`): the words check passed at page scope, the numbers check passed
+    at page scope or does not apply, and no entry of any check is a FAIL or UNKNOWN. The words
+    and numbers checks compare the shipped page with the page's OWN text layer, which no model
+    wrote; a table-scope pass (row binding) says nothing about the rest of the page (#1181), and a
+    NOT_RUN is an absence of evidence, so neither counts. Pure over the entries: it reads no
+    judge field, so a reworded judge reason cannot move it."""
+    checked = verify_pass_digests(entries, text)
+    if any(e.result in (TraceResult.FAIL, TraceResult.UNKNOWN) for e in checked):
+        return False
+
+    def at_page(check: Check, *wanted: TraceResult) -> bool:
+        return any(
+            e.check == check.value and e.scope == SCOPE_PAGE and e.result in wanted for e in checked
+        )
+
+    return at_page(Check.TEXT_LAYER_WORDS, TraceResult.PASS) and at_page(
+        Check.TEXT_LAYER_NUMBERS, TraceResult.PASS, TraceResult.NOT_APPLICABLE
+    )
+
+
+def _judge_accepted(output: PageOutput) -> bool:
+    """The page judge COMPLETED and accepted this reading (typed fields, never the reason)."""
+    from socr.core.result import JUDGE_OUTCOME_COMPLETED
+
+    return output.judge_outcome == JUDGE_OUTCOME_COMPLETED and output.judge_accepted is True
+
+
+def _judge_only_clauses(
+    output: PageOutput, p: Any, event_kinds: frozenset[str]
+) -> tuple[VerdictClause, ...]:
+    """``page_judge=UNKNOWN`` on a model reading whose acceptance is the page judge's alone.
+
+    #1251. Every defective model page the four auditors found had been judged faithful by a
+    model call on the same page, so the acceptance carries no information: it may warn or reject
+    (untouched), it does not confirm. The predicate is the ABSENCE of independent evidence on the
+    shipped text (:func:`independent_page_evidence`), evaluated from the checks' own outcomes, so
+    it does not read the judge's reason. Fires on a page still SUCCESS, or on one this clause
+    itself demoted (every later pass derives it again, like #1181's).
+
+    Not fired when the page was accepted without a judge (#1181 owns that), and not on a page the
+    judge did not accept: those carry their own refusal clause.
+    """
+    if not (
+        output.status is PageStatus.SUCCESS
+        or output.failure_mode is FailureMode.READING_UNCORROBORATED
+    ):
+        return ()
+    if not _is_model_reading(output) or not _judge_accepted(output):
+        return ()
+    if _exact_pass_unjudged_outcome(output, event_kinds).clause is not None:
+        return ()
+    text = output.text or ""
+    entries = [
+        stamp_text_digest(o.entry, text)
+        for o in pass_trace_outcomes(output, p, event_kinds, providers_available=True)
+    ]
+    if independent_page_evidence(entries, text):
+        return ()
+    return (VerdictClause(Check.PAGE_JUDGE, CheckResult.UNKNOWN, SCOPE_PAGE, JUDGE_ONLY_REASON),)
 
 
 # --- the pass trace (#1183) ---------------------------------------------------------------

@@ -1616,8 +1616,8 @@ def _resume_verdict_is_permanently_unverifiable(
     from socr.core.result import FailureMode as _FailureMode
     from socr.core.verdict import (
         PERMANENTLY_UNRESOLVABLE_MODES,
-        REPROCESSABLE_CLAUSE_CHECKS,
         PageVerdict,
+        clause_is_reprocessable,
     )
 
     if not isinstance(raw_verdict, dict):
@@ -1657,7 +1657,7 @@ def _resume_verdict_is_permanently_unverifiable(
     # resolvable -- so the page skipped for ever with its table still unjudged. Measured
     # through the seam before this line existed. Doubt reprocesses, so the refusal is the
     # safe direction.
-    if any(clause.check in REPROCESSABLE_CLAUSE_CHECKS for clause in verdict.clauses):
+    if any(clause_is_reprocessable(clause) for clause in verdict.clauses):
         return False
     return mode in PERMANENTLY_UNRESOLVABLE_MODES
 
@@ -11743,8 +11743,13 @@ class UnifiedPipeline:
         ``_read_with_deadline``, and ``killable.run`` (child process).
         """
 
-        def __init__(self, inner, timeout_sec: float | None, owner=None, on_timeout=None) -> None:
+        def __init__(
+            self, inner, timeout_sec: float | None, owner=None, on_timeout=None, on_deadline=None
+        ) -> None:
             self._inner = inner
+            # #1251: called once when OUR wall-clock deadline hit (not when the inner judge raised
+            # its own timeout, which the inner judge records itself).
+            self._on_deadline = on_deadline
             # #987: called once per timed-out judge call (either branch), before
             # the typed exception leaves; the circuit breaker's evidence probe.
             self._on_timeout = on_timeout
@@ -11801,6 +11806,11 @@ class UnifiedPipeline:
                     note = "late page-judge result discarded"
                     if note not in output.audit_notes:
                         output.audit_notes.append(note)
+                    if self._on_deadline is not None:
+                        try:
+                            self._on_deadline(output)
+                        except Exception as rec_exc:  # never mask the timeout itself
+                            logger.warning("judge deadline record failed: %s", rec_exc)
                     if self._on_timeout is not None:
                         try:
                             self._on_timeout(output.page_num)
@@ -17303,6 +17313,27 @@ class UnifiedPipeline:
             cur = getattr(cur, "_inner", None)
         return False
 
+    @staticmethod
+    def _record_page_judge_call(state: DocumentState, record: dict) -> None:
+        """#1251: keep one page-judge call on its page, for ``pages/NNNNN.judge.json``."""
+        ps = state.pages.get(int(record.get("page") or 0))
+        if ps is None:
+            logger.warning("page-judge call for unknown page %r not recorded", record.get("page"))
+            return
+        ps.judge_calls.append(record)
+
+    def _record_page_judge_deadline(self, state: DocumentState, output, leaf) -> None:
+        """#1251: our own deadline hit before the leaf judge answered: a call with no reply."""
+        from socr.judge.judge import JUDGE_CALL_DEADLINE, judge_call_record
+
+        record = judge_call_record(
+            page_num=output.page_num,
+            outcome=JUDGE_CALL_DEADLINE,
+            judge=getattr(leaf, "_judge", leaf),
+            reading=output.text or "",
+        )
+        self._record_page_judge_call(state, record)
+
     def _build_page_judge(self, state: DocumentState):
         """Select the page judge: VLM if requested+available, else heuristics.
 
@@ -17348,7 +17379,11 @@ class UnifiedPipeline:
                         )
                     else:
                         vj = OllamaVisionJudge(model=resolved_model)
-                    inner_judge = VLMPageJudge(vj, self._make_page_renderer(state))
+                    inner_judge = VLMPageJudge(
+                        vj,
+                        self._make_page_renderer(state),
+                        record_call=lambda rec: self._record_page_judge_call(state, rec),
+                    )
                     judge_identity = resolved_model
                     # #987: breaker target + leaf. An Ollama judge is probed with a
                     # 1-token generation; a vLLM judge with the OpenAI-compatible
@@ -17451,6 +17486,14 @@ class UnifiedPipeline:
             self._page_judge_leaf_timeout_sec(),
             owner=self,
             on_timeout=lambda page_num: self._judge_circuit_breaker(state, page_num),
+            # Only a model judge makes a call worth a record; the heuristic one reads no image.
+            on_deadline=(
+                None
+                if judge_identity == JUDGE_IDENTITY_HEURISTIC
+                else lambda output: self._record_page_judge_deadline(
+                    state, output, getattr(inner_judge, "_inner", inner_judge)
+                )
+            ),
         )
 
         def native_evidence_suspect(page_num: int) -> bool:
@@ -18301,10 +18344,71 @@ class UnifiedPipeline:
                 },
             }
 
+        # #1251: the page judge's calls live in ``pages/NNNNN.judge.json``; the sidecar keeps the
+        # file's name, digest and call count. Sparse (absent on a page no model judged), and not
+        # part of the run fingerprint, so no other sidecar changes by a byte.
+        judge_calls_ref = self._write_page_judge_calls(ps, sidecar_path.parent, page_num)
+        if judge_calls_ref is not None:
+            payload["judge_calls"] = judge_calls_ref
+
         tmp_path = sidecar_path.with_suffix(".json.tmp")
         tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_path.rename(sidecar_path)
         return sidecar_path
+
+    @staticmethod
+    def _write_page_judge_calls(ps, pages_dir: Path, page_num: int) -> dict | None:
+        """#1251: write ``pages/NNNNN.judge.json`` (a JSON list of every page-judge call of this
+        page, in order) and return the reference the sidecar keeps, or ``None`` when the page has
+        no call.
+
+        Called by every sidecar write, so the in-loop flush, the assemble flush and the final
+        records flush all leave the same file: the list on ``ps`` is the whole history (a resumed
+        page was loaded with the list its original run wrote). A page with no call has no file,
+        and a stale one from an earlier run of the page is removed. Written atomically."""
+        import json
+
+        from socr.core.page_credential import sha256_text
+        from socr.core.page_files import judge_calls_path
+
+        if ps is None:
+            return None
+        path = judge_calls_path(pages_dir, page_num)
+        calls = list(ps.judge_calls)
+        if not calls:
+            path.unlink(missing_ok=True)
+            return None
+        body = json.dumps(calls, indent=2, ensure_ascii=False)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(body, encoding="utf-8")
+        tmp.rename(path)
+        return {"path": path.name, "sha256": sha256_text(body), "count": len(calls)}
+
+    @staticmethod
+    def _load_page_judge_calls(pages_dir: Path, page_num: int, ref: object) -> list[dict]:
+        """#1251: the calls a resumed page's original run recorded, or ``[]`` with a warning when
+        the sidecar names a file that is missing, altered (digest) or unreadable. The record is
+        never rebuilt from anything else."""
+        import json
+
+        from socr.core.page_credential import sha256_text
+        from socr.core.page_files import judge_calls_path
+
+        if not isinstance(ref, dict):
+            return []
+        try:
+            body = judge_calls_path(pages_dir, page_num).read_text(encoding="utf-8")
+            calls = json.loads(body)
+            if ref.get("sha256") != sha256_text(body) or not isinstance(calls, list):
+                raise ValueError("digest mismatch or not a list")
+            return [c for c in calls if isinstance(c, dict)]
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "#1251: p%d page-judge calls named by its sidecar could not be restored (%s)",
+                page_num,
+                exc,
+            )
+            return []
 
     def _load_rejudge_candidate(
         self, state: DocumentState, page_num: int, output_dir: Path, ladder: list
@@ -18922,7 +19026,10 @@ class UnifiedPipeline:
                     _mode = _FM(str(winning.get("failure_mode") or ""))
                 except ValueError:
                     _mode = None
-                if _mode in LAYER_CHECK_MODES and winning.get("status") != PageStatus.WARNING.value:
+                # #1251: this mode too is written only by the verdict demotion of a SUCCESS page.
+                if (
+                    _mode in LAYER_CHECK_MODES or _mode is _FM.READING_UNCORROBORATED
+                ) and winning.get("status") != PageStatus.WARNING.value:
                     is_permanently_unverifiable = False
 
             # #1187 round 5 (Argon P1-2c): a crop this lane FAILED to render is retried,
@@ -19402,6 +19509,11 @@ class UnifiedPipeline:
         ps.persisted_text_layer_words = (
             dict(_words_record) if isinstance(_words_record, dict) else None
         )
+        # #1251: the page-judge calls of the original run, so the writer leaves the same file.
+        if meta.get("judge_calls") is not None:
+            ps.judge_calls = self._load_page_judge_calls(
+                sidecar_path.parent, page_num, meta["judge_calls"]
+            )
         raw_verdict = meta.get("verdict")
         if isinstance(raw_verdict, dict):
             from socr.core.verdict import PageVerdict

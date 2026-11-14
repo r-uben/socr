@@ -28,6 +28,8 @@ Run it as ``socr-refinalize-prior-ocr <out_dir> [--dry-run]``.
 
 from __future__ import annotations
 
+from socr.core.page_files import page_sidecar_paths
+
 import argparse
 import json
 import re
@@ -488,7 +490,7 @@ def refinalize_document(
     if len(md_paths) != 1:
         # A document whose every page was floored has no ``.md`` at all; writing one is
         # the assembler's job, not this tool's. Left as it is, and counted.
-        for sidecar_path in pages_dir.glob("*.json"):
+        for sidecar_path in page_sidecar_paths(pages_dir):
             if is_floor_page(_read_json(sidecar_path)):
                 skipped["document has no .md (every page floored)"] += 1
         return []
@@ -510,7 +512,7 @@ def refinalize_document(
     changes: list[PageChange] = []
     fragments: list[tuple[Path, str]] = []
     sidecars: list[tuple[Path, dict]] = []
-    for sidecar_path in sorted(pages_dir.glob("*.json")):
+    for sidecar_path in page_sidecar_paths(pages_dir):
         sidecar = _read_json(sidecar_path)
         if not is_floor_page(sidecar):
             continue
