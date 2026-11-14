@@ -1364,7 +1364,7 @@ def engines() -> None:
         (EngineType.NOUGAT, "local, academic papers"),
         (EngineType.DEEPSEEK, "local via Ollama"),
         (EngineType.MARKER, "local, layout-aware (Surya + Texify)"),
-        (EngineType.GEMINI, "cloud, ~$0.0002/page (CLI)"),
+        (EngineType.GEMINI, "cloud, ~$0.021/page measured (CLI)"),
         (EngineType.MISTRAL, "cloud, ~$0.001/page"),
     ]
 

@@ -101,10 +101,25 @@ PROFILE_QWEN_CLOUD = ProviderProfile(
     model="qwen3.5:cloud",
 )
 
+# #1343: measured, not estimated. 100 random hard Fed pages read by gemini-4-hydrogen on
+# 2026-11-14 used 118,042 input tokens and 252,503 output+thinking tokens (thinking is billed
+# as output). List price: $1.50 per 1M input tokens, $7.50 per 1M output tokens.
+# 118,042 * 1.50e-6 + 252,503 * 7.50e-6 = $2.07 for 100 pages = about $0.021 per page.
+# The old 0.0002 was about 100x too low. Re-measure when the model or its price changes.
+_GEMINI_MEASURED_PAGES = 100
+_GEMINI_MEASURED_INPUT_TOKENS = 118_042
+_GEMINI_MEASURED_OUTPUT_TOKENS = 252_503
+_GEMINI_USD_PER_M_INPUT_TOKENS = 1.50
+_GEMINI_USD_PER_M_OUTPUT_TOKENS = 7.50
+GEMINI_COST_PER_PAGE_USD = (
+    _GEMINI_MEASURED_INPUT_TOKENS * _GEMINI_USD_PER_M_INPUT_TOKENS
+    + _GEMINI_MEASURED_OUTPUT_TOKENS * _GEMINI_USD_PER_M_OUTPUT_TOKENS
+) / (1_000_000 * _GEMINI_MEASURED_PAGES)
+
 PROFILE_GEMINI = ProviderProfile(
     engine=EngineType.GEMINI,
     tier=TIER_CLOUD,
-    cost_per_page_usd=0.0002,
+    cost_per_page_usd=GEMINI_COST_PER_PAGE_USD,
     id="gemini",
     backend="gemini-api",
     model=DEFAULT_GEMINI_MODEL,

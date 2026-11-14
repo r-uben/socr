@@ -9,12 +9,14 @@ from pathlib import Path
 
 # The one place the default Gemini model is named. It was a literal in four modules and went
 # stale there ("gemini-3-flash-preview" while gemini-3.8-flash was current); override per run
-# with --gemini-model.
-DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+# with --gemini-model. #1343: Gemini 4 Hydrogen (API name confirmed by GET /v1beta/models on
+# 2026-11-14) read 100 random hard Fed pages with 391 numbers missing against the text layer,
+# versus 919 for Gemini 3.8 Flash and 1781 for local qwen3-vl-30b.
+DEFAULT_GEMINI_MODEL = "gemini-4-hydrogen"
 
 # Gemini models socr used to default to. ``profile_by_model`` still prices a run recorded
 # under one of them as the metered Gemini rung, not as free.
-RETIRED_GEMINI_MODELS: tuple[str, ...] = ("gemini-3-flash-preview",)
+RETIRED_GEMINI_MODELS: tuple[str, ...] = ("gemini-3-flash-preview", "gemini-3.8-flash")
 
 
 class EngineType(str, Enum):

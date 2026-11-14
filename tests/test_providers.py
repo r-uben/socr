@@ -178,7 +178,7 @@ def test_direct_profile_list_makes_qwen_local_cloud_distinct_rungs():
 
 
 def test_gemini_profile_model_matches_engine_default():
-    assert DEFAULT_GEMINI_MODEL == "gemini-3.8-flash"
+    assert DEFAULT_GEMINI_MODEL == "gemini-4-hydrogen"
     assert PROFILE_GEMINI.model == DEFAULT_GEMINI_MODEL == PipelineConfig().gemini_model
 
 
