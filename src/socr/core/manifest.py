@@ -6695,6 +6695,7 @@ _VERDICT_DERIVED_MODES: frozenset[FailureMode] = frozenset(
         FailureMode.NUMBERS_UNCHECKED,
         FailureMode.NUMBERS_DROPPED_FROM_READING,
         FailureMode.WORDS_MISSING_FROM_PAGE,
+        FailureMode.CONTROL_BYTES_REPLACED,
     }
 )
 
@@ -6790,6 +6791,8 @@ def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
         Check.TEXT_LAYER_DROPS: FailureMode.NUMBERS_DROPPED_FROM_READING,
         # #1294: FAIL and UNKNOWN both say words are missing; one mode.
         Check.TEXT_LAYER_WORDS: FailureMode.WORDS_MISSING_FROM_PAGE,
+        # #1306: FAIL is the only result the clause emits.
+        Check.CONTROL_BYTES: FailureMode.CONTROL_BYTES_REPLACED,
     }
     #: #1187: the one place two silent-success classes share a CHECK and must not share a
     #: mode. The chart lane's clause is page-scoped and means "a picture shipped without its
@@ -7557,6 +7560,51 @@ def _is_bare_floor_body(text: str, page_num: int, png_ref: str) -> bool:
     return kept == [d3_marker]
 
 
+def _apply_damaged_layer_guard(output: PageOutput, p) -> PageOutput:
+    """#1306: no control byte ships, and a hidden footnote duplicate ships only if it is alone.
+
+    Applies to every shipped text, whatever its engine and status (the native lane, a
+    ``--native-only`` page, the native fallback, a chart page): a control byte is never content.
+    Each C0 character except tab, LF and CR becomes U+FFFD, never nothing -- deleting it would
+    turn ``\\x010.47`` (-0.47) into a clean ``0.47``. The page is marked by the verdict's
+    ``control_bytes`` clause, which reads what this records on the page state.
+
+    The hidden footnote wrapper is removed only from the layer's own text (a native-text
+    winner), only when the page analysis shows the PDF does not paint it, and only when the
+    page carries the printed note as a complete line; see
+    ``damaged_layer.strip_hidden_footnotes``. Both are idempotent:
+    a second pass over shipped text finds nothing, and then leaves the record of the first
+    untouched, because the seam runs again at assemble over the text it already repaired.
+    """
+    from socr.core.damaged_layer import (
+        FootnoteResult,
+        replace_control_bytes,
+        strip_hidden_footnotes,
+    )
+
+    text = output.text or ""
+    if not text or is_page_failed_marker(text):
+        return output
+    repaired, controls = replace_control_bytes(text)
+    # Only the layer's own text carries the wrapper, and only a page whose analysis read the
+    # painted glyphs can show it is hidden. A model reading is never rewritten here.
+    if engine_ships_native_text(output.engine):
+        footnotes = strip_hidden_footnotes(repaired, getattr(p, "painted_layer_text", None))
+    else:
+        footnotes = FootnoteResult(repaired)
+    if p is not None:
+        # Written only when something was found: a pass over already-repaired text finds
+        # nothing and must not erase what the pass that repaired it recorded.
+        if controls:
+            p.control_bytes_replaced = dict(controls)
+        if footnotes.stripped:
+            p.hidden_footnotes_stripped = [s.to_dict() for s in footnotes.stripped]
+            p.hidden_footnote_words = footnotes.stripped_words
+    if footnotes.text == text:
+        return output
+    return replace(output, text=footnotes.text)
+
+
 def _select_and_finalize_page(
     state: DocumentState,
     page_num: int,
@@ -7580,6 +7628,7 @@ def _select_and_finalize_page(
       9c. _apply_native_paragraphs (#1074)
       9d. _apply_unverified_table_mark (#1048)
       9e. _apply_unaccepted_output_mark (#1129)
+      9e2. _apply_damaged_layer_guard (#1306)
       9f. _apply_verdict_marks (#1145) -- LAST, so the verdict sees the final bytes and
           every mark an earlier step already put at the top.
       10. Disposition construction from the guarded output and provenance.
@@ -7684,6 +7733,9 @@ def _select_and_finalize_page(
             output = _apply_native_paragraphs(output, p, state.native_vocabulary)
         output = _apply_unverified_table_mark(output, p)
     output = _apply_unaccepted_output_mark(output, provenance, p)
+    # #1306 step 9e2: control bytes become U+FFFD and a hidden footnote duplicate goes, BEFORE
+    # the verdict reads the bytes, so the words check and the control-byte clause see what ships.
+    output = _apply_damaged_layer_guard(output, p)
     # #1145 step 9f. A resumed page takes the verdict its original run PUBLISHED: two
     # clause inputs (``table_label_unverified``; slice 3's escalation predicate, which
     # reads ``p.attempts``) do not survive a resume, and recomputing would drop them, so

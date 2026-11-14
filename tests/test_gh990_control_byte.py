@@ -229,6 +229,13 @@ def _e2e(
         m.setattr(orch, "get_engine", lambda engine_type: engine)
         if detector == "neutralised":
             m.setattr(born_digital, "count_control_byte_before_digit_hits", lambda t: 0)
+            # #1306: the shipping boundary now marks any page that carries a control byte, so
+            # the "detector off" baseline would differ from the live arm by TWO changes. This
+            # file's property is #990's routing, so the baseline switches the boundary guard
+            # off as well; the guard has its own file (test_gh1306_damaged_layer.py).
+            from socr.core import manifest as _manifest
+
+            m.setattr(_manifest, "_apply_damaged_layer_guard", lambda output, p: output)
         elif detector == "raising":
 
             def _boom(text):

@@ -59,6 +59,10 @@ EXPECTED_RESUME_KINDS = frozenset(
         # #1063 added this kind: a detected crop the clean-equation reader was refused on.
         "equation_sidecar_skipped_model_refused",
         "judge_wedged_circuit_open",
+        # #1306: the damaged-layer guard's two records. Both changed shipped text before the page
+        # became terminal; a resumed page restores that text and never runs the guard again.
+        "control_bytes_replaced",
+        "hidden_footnote_stripped",
         "native_encoding_hygiene_suspect",
         "native_math_font_unrecovered",
         "native_math_unrecovered",
@@ -163,5 +167,6 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 67 with #1267's two row-binding kinds.
     # 68 with table_blank_lines_dropped (blank rows/columns dropped before the table gate).
     # 69 with #1282's table_point_repaired.
-    # 73 with #1276's four figure-presence kinds.
-    assert len(EXPECTED_RESUME_KINDS) == 73
+    # 71 with #1306's control_bytes_replaced and hidden_footnote_stripped.
+    # 75 with #1276's four figure-presence kinds merged onto #1306's two.
+    assert len(EXPECTED_RESUME_KINDS) == 75
