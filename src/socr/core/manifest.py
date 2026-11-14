@@ -3377,6 +3377,15 @@ _LINE_WITHHELD_MARK = "[line withheld]"
 _LINES_WITHHELD_MARK = "[{n} lines withheld]"
 
 
+#: #1261 review round 3: the fewest words a text run needs to count as a sentence when deciding
+#: that a table has ended. A clause needs a subject, a finite verb and a complement or adjunct
+#: (``Rates rose in March``), so 4 is the floor for any sentence; 5 is taken because 4-word
+#: stub labels (``Total pension obligation, net``) are common and a stub label is the one thing
+#: the walk must not stop at. The cost of too high is over-withholding under a neutral mark
+#: (a short opening line of the next paragraph); of too low, a shipped table row.
+_NATIVE_ORDER_SENTENCE_MIN_WORDS = 5
+
+
 def _native_order_boxes(p) -> list[tuple[float, float, float, float]] | None:
     """The page's detected boxes as float rectangles, or ``None`` when one cannot be read.
 
@@ -3410,16 +3419,16 @@ def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str
     emitted in. It admits no word the bands body would not ship, and it withholds more:
 
     * A layer line is narrower than a baseline band, so the keep-sentences numerals rule is
-      applied to each layer line, and then a numerals-withheld line takes down every line on its
-      side of the band's widest gap between layer lines (its column). A table row beside prose
-      in the other column is not diluted by that prose: ``Real GDP 2.3`` / ``2.5`` withhold
-      together, and so do the stub labels and legend entries of a table whose values were
-      withheld. (Applying the rule to the side's pooled words adds nothing: a pool is mostly
-      numerals only when one of its lines is.)
-    * TABLE CONTINUATIONS. A detected box can be clipped (a ruled final row left outside it),
-      so a line that sits directly below or above a box, in its horizontal span, and carries a
-      numeral is withheld with its whole band, and so on band by band while each carries a
-      numeral. A box whose geometry cannot be read makes the body abstain (``None``).
+      applied to each layer line, and then a numerals-withheld line withholds the lines beside
+      it in its band (x order, both directions) until a line that is a sentence. A table row
+      split into fragments by wide cell gaps cannot ship a fragment, and neither do the stub
+      labels and legend entries of a table whose values were withheld.
+    * TABLE CONTINUATIONS. From each detected box, walk outward (down and up) through the bands
+      that overlap the box's horizontal span and withhold every line there until the first band
+      whose text in the span is a sentence (``_is_sentence``: the floor's prose test plus
+      numeral-free and ``_NATIVE_ORDER_SENTENCE_MIN_WORDS`` words). A numeral-free subheading, a
+      categorical row, a stub label are not sentences, so the walk goes on past them. A box whose
+      geometry cannot be read makes the body abstain (``None``).
     * A line with no word of two or more letters (shredded inline math: ``t``, ``y``, ``+``) is
       withheld.
     * A layer line that holds both shipped and withheld words is withheld whole, and a line that
@@ -3434,6 +3443,7 @@ def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str
     from socr.tables.reconcile import table_syntax_line_indices
     from socr.tables.row_corroboration import (
         band_is_mostly_numerals,
+        bears_categorical_row,
         bears_printed_numeral,
         cluster_band_words,
     )
@@ -3457,8 +3467,6 @@ def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str
     texts = [" ".join(str(w[4]) for w in line).strip() for line in lines]
     table_syntax = table_syntax_line_indices(texts)
 
-    # Band sides: a band's layer lines split at their widest gap, so the column a line is in
-    # is a group of its own. ``side_of[(band, line)]`` -> 0 / 1.
     band_of: dict[tuple, int] = {}
     band_lines: list[dict[int, list[float]]] = []
     for b, band in enumerate(cluster_band_words(words)):
@@ -3468,43 +3476,48 @@ def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str
             ext = extents.setdefault(index[(w[5], w[6])], [w[0], w[2]])
             ext[0], ext[1] = min(ext[0], w[0]), max(ext[1], w[2])
         band_lines.append(extents)
-    side_of: dict[tuple[int, int], int] = {}
-    for b, extents in enumerate(band_lines):
-        order = sorted(extents, key=lambda i: extents[i][0])
-        cut = len(order)
-        if len(order) > 1:
-            gaps = [extents[order[k + 1]][0] - extents[order[k]][1] for k in range(len(order) - 1)]
-            cut = max(range(len(gaps)), key=gaps.__getitem__) + 1
-        for k, i in enumerate(order):
-            side_of[(b, i)] = 0 if k < cut else 1
-    line_groups: list[set[tuple[int, int]]] = [set() for _ in lines]
-    for i, line in enumerate(lines):
-        for w in line:
-            b = band_of[tuple(w[:8])]
-            g = (b, side_of[(b, i)])
-            line_groups[i].add(g)
 
     def _centroid_in(w, box) -> bool:
         cx, cy = (w[0] + w[2]) / 2.0, (w[1] + w[3]) / 2.0
         return box[0] <= cx <= box[2] and box[1] <= cy <= box[3]
 
-    def _carries_numeral(b: int, i: int) -> bool:
-        """Whether line *i*'s words IN BAND *b* carry a numeral."""
-        return any(bears_printed_numeral(str(w[4])) for w in lines[i] if band_of[tuple(w[:8])] == b)
+    def _band_words(b: int, i: int, span: tuple[float, float] | None = None) -> list[tuple]:
+        """Line *i*'s words in band *b*, optionally only those overlapping *span* in x."""
+        return [
+            w
+            for w in lines[i]
+            if band_of[tuple(w[:8])] == b
+            and (span is None or (w[0] <= span[1] and w[2] >= span[0]))
+        ]
+
+    def _is_sentence(group: list[tuple]) -> bool:
+        """The stop condition of both walks: *group* is running prose, not a table's text.
+
+        The floor's own prose test (not mostly numerals, not a categorical row) is necessary and
+        not sufficient: ``Pension liabilities`` and ``Coverage included`` pass it and are table
+        text. A sentence is also numeral-free and has ``_NATIVE_ORDER_SENTENCE_MIN_WORDS`` words.
+        """
+        ordered = sorted(group, key=lambda w: w[0])
+        return (
+            sum(any(c.isalpha() for c in str(w[4])) for w in ordered)
+            >= _NATIVE_ORDER_SENTENCE_MIN_WORDS
+            and not any(bears_printed_numeral(str(w[4])) for w in ordered)
+            and not band_is_mostly_numerals(ordered)
+            and not bears_categorical_row(ordered)
+        )
 
     numerals = [band_is_mostly_numerals(line) for line in lines]
 
-    # Table continuations: walk away from each box, band by band, while the lines that overlap
-    # the box's horizontal span carry a numeral.
+    # Table continuations (coordinator rule): from each box walk outward, band by band, over the
+    # bands that overlap its horizontal span, and withhold every line overlapping the span until
+    # the first band whose text in the span is a sentence. A numeral-free subheading, a
+    # categorical row, a stub label or a legend is not a sentence, so the walk goes on past it.
     continuation: set[int] = set()
-    band_centres = [
-        sum((w[1] + w[3]) / 2.0 for w in band) / len(band) for band in cluster_band_words(words)
-    ]
-    meets_box = [
-        any(_centroid_in(w, box) for box in boxes for w in band)
-        for band in cluster_band_words(words)
-    ]
+    clustered = cluster_band_words(words)
+    band_centres = [sum((w[1] + w[3]) / 2.0 for w in band) / len(band) for band in clustered]
+    meets_box = [any(_centroid_in(w, box) for box in boxes for w in band) for band in clustered]
     for box in boxes:
+        span = (box[0], box[2])
         below = [
             b for b in range(len(band_centres)) if band_centres[b] > box[3] and not meets_box[b]
         ]
@@ -3513,25 +3526,37 @@ def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str
         ]
         for walk in (below, list(reversed(above))):
             for b in walk:
-                overlapping = [
-                    i for i, (x0, x1) in band_lines[b].items() if x0 <= box[2] and x1 >= box[0]
-                ]
+                overlapping = [i for i in band_lines[b] if _band_words(b, i, span)]
                 if not overlapping:
                     continue
-                if not any(_carries_numeral(b, i) for i in overlapping):
+                if _is_sentence([w for i in overlapping for w in _band_words(b, i, span)]):
                     break
                 continuation.update(overlapping)
 
-    numeric_groups = {
-        g for i in range(len(lines)) if numerals[i] or i in continuation for g in line_groups[i]
-    }
+    # A numerals-withheld line is a table cell or a stub label, and the cells and labels of its
+    # row sit on the same baseline in other layer lines. Withhold outward through the band's
+    # lines (in x order, both directions) until a line that is a sentence: a row split into
+    # fragments cannot ship a fragment whatever the cell gaps are, and prose in a neighbouring
+    # column stops the spread.
+    spread: set[int] = set()
+    for b, extents in enumerate(band_lines):
+        order = sorted(extents, key=lambda i: extents[i][0])
+        for k, i in enumerate(order):
+            if not numerals[i]:
+                continue
+            spread.add(i)
+            for step in (1, -1):
+                j = k + step
+                while 0 <= j < len(order) and not _is_sentence(_band_words(b, order[j])):
+                    spread.add(order[j])
+                    j += step
     ships = [
         bool(texts[i])
         and i not in table_syntax
         and all(tuple(w[:8]) in shipped for w in line)
         and not numerals[i]
         and i not in continuation
-        and not (line_groups[i] & numeric_groups)
+        and i not in spread
         and any(sum(c.isalpha() for c in str(w[4])) >= 2 for w in line)
         for i, line in enumerate(lines)
     ]

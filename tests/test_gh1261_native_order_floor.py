@@ -239,6 +239,9 @@ def test_a_layer_line_holding_shipped_and_withheld_words_is_withheld_whole(
     ps.native_words = [
         (72.0, 60.0, 100.0, 70.0, "Intro", 0, 0, 0),
         (104.0, 60.0, 140.0, 70.0, "sentence", 0, 0, 1),
+        (142.0, 60.0, 160.0, 70.0, "of", 0, 0, 2),
+        (162.0, 60.0, 190.0, 70.0, "the", 0, 0, 3),
+        (192.0, 60.0, 230.0, 70.0, "page", 0, 0, 4),
         (72.0, 62.0, 100.0, 72.0, "Sales", 1, 0, 0),
         (80.0, 130.0, 110.0, 140.0, "12.5", 1, 0, 1),
         (80.0, 150.0, 110.0, 160.0, "13.5", 2, 0, 0),
@@ -246,7 +249,7 @@ def test_a_layer_line_holding_shipped_and_withheld_words_is_withheld_whole(
     body = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
     assert body is not None
     assert "12.5" not in body and "Sales" not in body
-    assert "Intro sentence" in body
+    assert "Intro sentence of the page" in body
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +365,9 @@ def test_a_layer_line_that_parses_as_table_syntax_is_withheld(tmp_path: Path) ->
     ps.native_words = [
         (72.0, 60.0, 100.0, 70.0, "Intro", 0, 0, 0),
         (104.0, 60.0, 150.0, 70.0, "sentence", 0, 0, 1),
+        (152.0, 60.0, 170.0, 70.0, "of", 0, 0, 2),
+        (172.0, 60.0, 200.0, 70.0, "the", 0, 0, 3),
+        (202.0, 60.0, 240.0, 70.0, "page", 0, 0, 4),
         (72.0, 80.0, 150.0, 90.0, "| Name | Remark |", 1, 0, 0),
         (72.0, 100.0, 150.0, 110.0, "|---|---|", 2, 0, 0),
         (72.0, 120.0, 150.0, 130.0, "| Alpha | beta |", 3, 0, 0),
@@ -369,7 +375,7 @@ def test_a_layer_line_that_parses_as_table_syntax_is_withheld(tmp_path: Path) ->
     body = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
     assert body is not None
     assert "|" not in body
-    assert "Intro sentence" in body
+    assert "Intro sentence of the page" in body
 
 
 # ---------------------------------------------------------------------------
@@ -453,16 +459,16 @@ def test_a_table_row_beside_prose_is_not_diluted_by_the_prose(tmp_path: Path) ->
     partly. DIFFERENCE: the left-column sentence on the same baseline ships."""
     _s, ps = _build(tmp_path, _columns, [GRID_BOX])
     ps.native_words = [
-        *_words_line(["Left", "column", "sentence", "here"], 300.0, 72.0, 0),
+        *_words_line(["Left", "column", "sentence", "is", "here"], 300.0, 72.0, 0),
         *_words_line(["Real", "GDP", "2.3"], 300.0, 330.0, 1),
         *_words_line(["2.5"], 300.0, 450.0, 2),
-        *_words_line(["Other", "words", "stay", "put"], 320.0, 72.0, 3),
+        *_words_line(["Other", "words", "stay", "put", "here"], 320.0, 72.0, 3),
     ]
     ps.detected_table_bboxes = [(500.0, 500.0, 520.0, 520.0)]
     body = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
     assert body is not None
     assert "Real" not in body and "2.3" not in body and "2.5" not in body
-    assert "Left column sentence here" in body and "Other words stay put" in body
+    assert "Left column sentence is here" in body and "Other words stay put here" in body
 
 
 def test_a_line_with_no_word_of_two_letters_is_withheld(tmp_path: Path) -> None:
@@ -520,3 +526,79 @@ def test_a_paragraph_breaks_where_the_layer_block_changes(tmp_path: Path) -> Non
     body = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
     assert body is not None
     assert "First line of block zero\nSecond line of block zero\n\nHeading of block one" in body
+
+
+# ---------------------------------------------------------------------------
+# review round 3 on PR #1324: the walk stops only at a sentence; no row fragment ships
+# ---------------------------------------------------------------------------
+
+
+def _subheading_then_row(page) -> None:
+    """Astra 1: a numeral-free subheading, then a numeric row INSIDE the box's span."""
+    page.insert_text((76, 182), "Pension liabilities", fontsize=9)
+    page.insert_text((76, 206), "Total pension obligation", fontsize=9)
+    page.insert_text((230, 206), "12 million dollars", fontsize=9)
+
+
+def _categorical_row(page) -> None:
+    """Astra 2: a categorical row under the clipped box."""
+    page.insert_text((76, 190), "Coverage included", fontsize=9)
+    page.insert_text((230, 190), "Yes", fontsize=9)
+
+
+@pytest.mark.parametrize(
+    ("extra", "cells"),
+    [
+        (_subheading_then_row, ("Pension", "Total", "12", "million", "dollars")),
+        (_categorical_row, ("Coverage", "included", "Yes")),
+    ],
+    ids=["numeral-free-subheading", "categorical-row"],
+)
+def test_the_walk_goes_on_past_text_that_is_not_a_sentence(tmp_path: Path, extra, cells) -> None:
+    """Astra's two reproductions: a subheading or a categorical row is not a sentence, so the
+    walk from the box does not stop there and the row after it is withheld. DIFFERENCE: the same
+    page without the rows ships the same prose, and the real sentence below them still ships."""
+    _s, withrows = _build(
+        tmp_path, lambda pg: _columns(pg, extra=extra), [CLIPPED_BOX], name="r.pdf"
+    )
+    _b, base = _build(tmp_path, _columns, [CLIPPED_BOX], name="n.pdf")
+    body = M._native_order_prose_body(withrows, 1, marker_line=MARKER, png_ref=PNG)
+    ref = M._native_order_prose_body(base, 1, marker_line=MARKER, png_ref=PNG)
+    assert body is not None and ref is not None
+    for cell in cells:
+        assert cell not in body, f"table text shipped: {cell!r}"
+    assert _own_lines(body) == _own_lines(ref)
+    assert LEFT_TAIL in body
+
+
+def test_a_split_table_row_beside_prose_ships_no_fragment(tmp_path: Path) -> None:
+    """Fable 1: cell gaps (60 pt) wider than the gutter (20 pt), so no single cut isolates the
+    row. ``2.5`` is a loose value and its neighbours up to the prose go with it. DIFFERENCE: the
+    same row without the ``2.5`` cell ships ``Real GDP 2.3``, so the cell is the cause."""
+    _s, ps = _build(tmp_path, _columns, [GRID_BOX])
+
+    def body_for(cells: list[tuple[list[str], float]]) -> str:
+        ps.native_words = [
+            *_words_line(["Policy", "path", "stays", "steady", "here"], 300.0, 72.0, 0),
+            *[
+                w
+                for k, (texts, x0) in enumerate(cells)
+                for w in _words_line(texts, 300.0, x0, 1 + k)
+            ],
+            *_words_line(["Other", "words", "stay", "put", "here"], 340.0, 72.0, 9),
+        ]
+        ps.detected_table_bboxes = [(500.0, 500.0, 520.0, 520.0)]
+        out = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
+        assert out is not None
+        return out
+
+    row = (["Real", "GDP", "2.3"], 280.0)
+    gap = 60.0
+    x_end = row[1] + 7.0 * 10 + 3.0 * 2
+    with_cell = body_for([row, (["2.5"], x_end + gap)])
+    without = body_for([row])
+    assert "Real GDP 2.3" in without
+    for frag in ("Real", "GDP", "2.3", "2.5"):
+        assert frag not in with_cell, f"row fragment shipped: {frag!r}"
+    assert "Policy path stays steady here" in with_cell
+    assert "Other words stay put here" in with_cell
