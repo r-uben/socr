@@ -182,7 +182,6 @@ from socr.core.verdict import (
     control_bytes_cli_line,
     control_bytes_note,
     numbers_disagree_note,
-    private_use_bullets_released,
     numbers_dropped_cli_line,
     numbers_dropped_event_data,
     numbers_dropped_note,
@@ -21283,12 +21282,9 @@ class UnifiedPipeline:
             _mp = state.pages.get(r.output.page_num)
             # #1005: a page whose shipped body is a model reading carries no native damage.
             _native_ships = native_math_damage_ships(r.output, r.selection_provenance)
-            # #1270 class 1: the same release the page guard applies, so the page and the
-            # document cannot disagree about a page whose private-use codepoints are bullets.
             _detail = (
                 unresolved_math_detail(
-                    has_unmapped_math_glyphs=bool(getattr(_mp, "has_unmapped_math_glyphs", False))
-                    and not private_use_bullets_released(r.output, _mp),
+                    has_unmapped_math_glyphs=bool(getattr(_mp, "has_unmapped_math_glyphs", False)),
                     evidence=getattr(_mp, "math_recovery_evidence", None),
                     text=r.output.text or "",
                     bullets_only=bool(getattr(_mp, "private_use_bullets_only", False)),

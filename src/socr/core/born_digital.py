@@ -2852,13 +2852,6 @@ class PageAssessment:
     #: layer is then the page's own text and agreement with it is a check. False is "not shown",
     #: never "damaged": every default and every other refusal leaves it False.
     layer_refused_for_shape_alone: bool = False
-    #: #1270 (review): the page's layer shows NONE of the glyph-level damage signals -- garbage
-    #: ratio over bound, any font-map mojibake glyph (``corrupt_math_glyph_count``), the #960
-    #: garbled-math scan, a U+FFFD -- and the scans could run. Stamped for EVERY page at the one
-    #: stamping point in ``_assess_page`` (the signals body has early returns that never compute
-    #: them). False is "not shown", never "damaged": every default, a restored page, and a scan
-    #: that raised leave it False, and the no-number clearance (class 2) requires True.
-    layer_glyphs_undamaged: bool = False
     has_corrupt_math: bool = False  # font-map mojibake in math (needs region OCR -> LaTeX)
     has_unmapped_math_glyphs: bool = False  # PUA glyphs (weak ToUnicode) -> silent math-glyph loss
     #: #1270 class 1: ``has_unmapped_math_glyphs`` holds and NO private-use codepoint is
@@ -3896,7 +3889,6 @@ class BornDigitalDetector:
             assessment.own_layer_figure_words,
         ) = self._own_layer_word_reference(page)
         assessment.painted_layer_text = self._painted_layer_text(page)
-        assessment.layer_glyphs_undamaged = self._layer_glyphs_are_undamaged(page)
         # #1144 round 4: the page's /Rotate value, needed by the prose-recovery
         # floor. ``get_text("words")`` reports UNROTATED coordinates while
         # ``find_tables()`` reports rotated ones, so on a /Rotate 90 page the two
@@ -3913,12 +3905,11 @@ class BornDigitalDetector:
 
     def _layer_glyphs_are_undamaged(self, page: fitz.Page, raw_text: str | None = None) -> bool:
         """#1270 (review): no glyph-level damage signal fires on this page's layer, and the
-        scans that look for it ran.
+        scans that look for it ran. Used by :meth:`_shape_refusal_layer_is_clean`.
 
         The early returns of ``_assess_page_signals`` skip the garbled-math scan and the
-        corrupt-math count, so a short or sparse layer that a model reads could carry a
-        SymbolMT private-use minus, a ``PðAÞ ¼ 2`` mojibake or a U+FFFD and still look "clean".
-        Any one of them, or a scan that raised, answers False (fail closed).
+        corrupt-math count. Any one of the signals, or a scan that raised, answers False
+        (fail closed).
         """
         try:
             if raw_text is None:
@@ -4024,8 +4015,8 @@ class BornDigitalDetector:
         # #1270: ``pua_count`` is every private-use codepoint, font-blind: a Wingdings or
         # SymbolMT list bullet (U+F0B7, U+F0A7, U+F074, U+F06E) counts as one. The flag stays
         # font-blind too (routing and the maths accounting read it); ``private_use_bullets_only``
-        # below says when no private-use codepoint is mathematics, and the VERDICT then rewords
-        # the mark, or lifts it only on independent page-scope evidence (the release rule).
+        # below says when no private-use codepoint is in a maths-font span, and the VERDICT then
+        # rewords the mark (it is never lifted: text-layer evidence cannot certify the page).
         has_unmapped_math_glyphs = pua_count > 0
         char_count = len(raw_text)
         words = raw_text.split()
@@ -4651,10 +4642,7 @@ class BornDigitalDetector:
             if private_use_bullets_only:
                 # #1270 class 1: the note above is the font-blind finding; this says what the
                 # span-level scan found, so the page's notes never claim mathematics alone.
-                notes.append(
-                    "no private-use codepoint is in a maths-font span: they are list bullets or "
-                    "dingbats, and the page is not otherwise checked"
-                )
+                notes.append("the private-use codepoints are bullet or dingbat glyphs")
 
         return PageAssessment(
             page_num=page_num,

@@ -302,9 +302,7 @@ def test_the_drops_and_words_checks_still_read_a_shape_refused_layer_as_damaged(
 
 # --- Astra's and Carbon's breaking inputs stay marked, even with every flag set in the page's favour
 
-EVERY_FLAG_IN_ITS_FAVOUR = dict(
-    text_coverage_verdict="passed", has_figures=False, layer_glyphs_undamaged=True
-)
+EVERY_FLAG_IN_ITS_FAVOUR = dict(text_coverage_verdict="passed", has_figures=False)
 
 
 def test_astra_a_truncated_contents_reading_stays_marked() -> None:
@@ -422,7 +420,6 @@ def _verdict_for(pa, layer: str, reading: str):
     page = _p(
         own_layer_text=layer,
         layer_refused_for_shape_alone=pa.layer_refused_for_shape_alone,
-        layer_glyphs_undamaged=pa.layer_glyphs_undamaged,
     )
     return text_layer_numbers_clause(_out(reading), page)
 
@@ -456,7 +453,6 @@ def test_a_contents_page_with_mojibake_math_is_not_shown_clean(tmp_path: Path):
     pa = _assess(_pdf(tmp_path / "k.pdf", ["PðAÞ ¼ 2", *CONTENTS_LINES[:11]]))
     assert pa.is_born_digital is False and any("avg word length" in n for n in pa.notes)
     assert pa.layer_refused_for_shape_alone is False
-    assert pa.layer_glyphs_undamaged is False
     clause = _verdict_for(pa, "PðAÞ ¼ 2", "PðAÞ ¼ 2")
     assert clause is not None and clause.result is CheckResult.UNKNOWN
 
@@ -522,3 +518,21 @@ def test_the_glyph_scan_has_a_veto_per_signal(tmp_path: Path, name, patch_target
     with patch.object(target, patch_target, repl):
         assert detector._layer_glyphs_are_undamaged(page, raw) is False
     doc.close()
+
+
+def test_the_refinalize_page_state_carries_the_shape_fact() -> None:
+    """The re-finalize tool rebuilds the page state from the analysis; the fact must survive,
+    and a stand-in analysis that predates it reads as "not shown"."""
+    from dataclasses import asdict
+
+    from socr.core.born_digital import PageAssessment
+    from socr.pipeline.refinalize_own_text import _page_state
+
+    sidecar = {"page_num": 1}
+    base = dict(page_num=1, is_born_digital=False, native_text="", confidence=0.0)
+    shown = _page_state(sidecar, PageAssessment(**base, layer_refused_for_shape_alone=True))
+    fields = asdict(PageAssessment(**base))
+    del fields["layer_refused_for_shape_alone"]
+    absent = _page_state(sidecar, SimpleNamespace(**fields))
+    assert shown.layer_refused_for_shape_alone is True
+    assert absent.layer_refused_for_shape_alone is False

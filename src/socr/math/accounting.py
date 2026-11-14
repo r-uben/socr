@@ -88,10 +88,7 @@ class UnresolvedMathDetail:
     def detail(self) -> str:
         """The audit-event / note prose. Deterministic: no counts of runs or time."""
         if self.bullets_only:
-            return (
-                "native text ships private-use bullet glyphs (no span in a maths font); "
-                "the page is not otherwise checked"
-            )
+            return "native text ships private-use bullet or dingbat glyphs"
         return (
             "born-digital native text shipped with unmapped math glyphs "
             "(private-use codepoints, weak ToUnicode) that no retained recovery "

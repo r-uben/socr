@@ -1,19 +1,14 @@
-"""#1270 (B4, class 1) under the RELEASE RULE: a list bullet is not unrecovered mathematics, and a
-page's mark is lifted only on independent page-scope evidence.
+"""#1270 (B4, class 1): a list bullet is not shown to be unrecovered mathematics, so the mark says
+what is true. NOTHING is released: a page with private-use codepoints keeps its mark and its
+status exactly as on main (text-layer and ink evidence cannot certify a page: coordinator ruling
+on PR #1341).
 
-Before: ``has_unmapped_math_glyphs = pua_count > 0`` counted every private-use codepoint,
-font-blind, so SymbolMT / Wingdings list bullets (U+F0B7, U+F0A7, U+F074, U+F06E) marked 292 of
-298 ``native_glyphs=FAIL`` pages in run 51270eb5 as "unrecovered mathematics".
-
-Now (a) the detector records ``private_use_bullets_only`` (the #960 span-level maths count found
-none), keeping the font-blind flag that routing and the maths accounting read; (b) the verdict
-REWORDS the mark to what is true (bullet glyphs, page not otherwise checked) and lifts it, with
-the page's demotion, only when the page has independent evidence on the text it ships:
-a native page, a digest-verified #1050 ink-vs-layer PASS and no FAIL/UNKNOWN entry; a model
-reading, ``independent_page_evidence``; and no private-use codepoint may still ship.
-
-Scope: only the PUA clause (``_native_glyph_clause``). ``NATIVE_GARBLED_MATH`` and
-``NATIVE_MINUS_AS_DIGIT`` also map to ``native_glyphs`` and are untouched here.
+The detector records ``private_use_bullets_only`` (the #960 span-level count found no private-use
+codepoint in a maths-font span), keeping the font-blind ``has_unmapped_math_glyphs`` that routing
+and the maths accounting read. The verdict clause keeps its check, result (FAIL) and scope and
+changes only its words: "private-use bullet or dingbat glyphs", with no claim about maths fonts
+(the scan checked codepoints, and a page may typeset maths in a maths font elsewhere) and none
+about what else was or was not checked (the pass trace may hold PASS or FAIL for other checks).
 """
 
 from __future__ import annotations
@@ -27,7 +22,6 @@ from unittest.mock import patch
 import fitz
 import pytest
 from test_gh165_unresolved_math_outcome import _prose_pdf, _state
-from verdict_marks_helper import assert_differs_only_by_marks
 
 from socr.core.born_digital import BornDigitalDetector, count_pua_chars
 from socr.core.config import EngineType, PipelineConfig
@@ -39,10 +33,6 @@ from socr.core.verdict import (
     Check,
     CheckResult,
     _native_glyph_clause,
-    independent_native_evidence,
-    native_coverage_outcome,
-    private_use_bullets_released,
-    stamp_text_digest,
 )
 from socr.math.accounting import UNRESOLVED_MATH_KIND
 from socr.pipeline.orchestrator import UnifiedPipeline
@@ -104,7 +94,7 @@ def test_a_bullet_is_recorded_as_bullets_only_and_the_flag_is_unchanged(
     assert pa.has_unmapped_math_glyphs is True
     # ... and the new fact says no private-use codepoint is mathematics
     assert pa.private_use_bullets_only is True
-    assert any("list bullets or dingbats" in n for n in pa.notes), "the note says what was found"
+    assert any("bullet or dingbat glyphs" in n for n in pa.notes), "the note says what was found"
     assert pa.needs_ocr_enhancement is False
 
 
@@ -138,8 +128,6 @@ def test_a_page_with_no_private_use_codepoint_is_not_bullets_only(tmp_path, monk
 
 # ------------------------------------------------------------------------------ the verdict
 
-LAYER = "Output grew 2.1 percent in the quarter"
-
 
 def _page(**over) -> SimpleNamespace:
     base = dict(
@@ -147,99 +135,49 @@ def _page(**over) -> SimpleNamespace:
         has_unmapped_math_glyphs=True,
         private_use_bullets_only=True,
         text_coverage_verdict="passed",
-        own_layer_text=LAYER,
-        own_layer_word_reference=LAYER,
-        own_layer_figure_words="",
         is_born_digital=True,
-        prior_ocr_layer_suspect=False,
-        has_unrecovered_symbol_glyphs=False,
-        table_ladder_disposition=None,
-        has_figures=False,
     )
     base.update(over)
     return SimpleNamespace(**base)
 
 
-def _native(text: str = LAYER, status=PageStatus.WARNING) -> PageOutput:
-    return PageOutput(page_num=1, text=text, status=status, engine="native", audit_passed=True)
-
-
-def _model(text: str = LAYER, status=PageStatus.WARNING) -> PageOutput:
-    return PageOutput(page_num=1, text=text, status=status, engine="qwen", audit_passed=True)
-
-
-def test_a_native_bullet_page_with_ink_evidence_is_released():
-    page, out = _page(), _native()
-    assert private_use_bullets_released(out, page) is True
-    assert _native_glyph_clause(page, out) is None
-
-
-@pytest.mark.parametrize(
-    "missing",
-    [
-        pytest.param({"text_coverage_verdict": "flagged"}, id="ink-unread"),
-        pytest.param({"text_coverage_verdict": "unknown"}, id="coverage-unknown"),
-        pytest.param({"text_coverage_verdict": ""}, id="coverage-not-run"),
-        pytest.param({"prior_ocr_layer_suspect": True}, id="prior-ocr-layer"),
-    ],
-)
-def test_each_missing_piece_of_evidence_keeps_the_reworded_mark(missing):
-    """The control arms: the SAME page, one piece of evidence removed at a time."""
-    out = _native()
-    assert private_use_bullets_released(out, _page()) is True, "premise"
-    page = _page(**missing)
-    assert private_use_bullets_released(out, page) is False
-    clause = _native_glyph_clause(page, out)
-    assert clause is not None
-    assert clause.check is Check.NATIVE_GLYPHS and clause.result is CheckResult.UNKNOWN
-    assert clause.reason == BULLET_GLYPHS_REASON
-    assert "mathematics" not in clause.reason
-
-
-def test_a_bullet_that_still_ships_as_a_private_use_codepoint_is_not_released():
-    """tealbook-partb 2018-05-02 p28 (a layer that repeats a paragraph four times) and three
-    tealbook-parta pages are hand-graded defective, carry coverage PASS, and ship raw bullets:
-    the evidence rule alone released all four. Same page and evidence; only the shipped bytes
-    differ."""
-    assert private_use_bullets_released(_native(LAYER), _page()) is True
-    raw = _native(LAYER + f"\n{BULLET} first item")
-    assert private_use_bullets_released(raw, _page()) is False
-    clause = _native_glyph_clause(_page(), raw)
-    assert clause is not None and clause.reason == BULLET_GLYPHS_REASON
-
-
-def test_maths_keeps_the_maths_claim_and_is_never_released():
-    page = _page(private_use_bullets_only=False)
-    out = _native()
-    assert private_use_bullets_released(out, page) is False
-    clause = _native_glyph_clause(page, out)
-    assert clause is not None and clause.result is CheckResult.FAIL
-    assert "unrecovered mathematics" in clause.reason
-
-
-def test_a_control_byte_in_the_text_is_a_fail_entry_and_blocks_the_release():
-    out = _native(LAYER + "\x03")
-    assert private_use_bullets_released(out, _page()) is False
-
-
-def test_the_native_evidence_is_digest_bound_to_the_shipped_text():
-    """A PASS computed on other text is dropped, so the evidence is gone."""
-    page = _page()
-    entry = stamp_text_digest(native_coverage_outcome(_native(), page).entry, LAYER)
-    assert independent_native_evidence([entry], LAYER) is True
-    assert independent_native_evidence([entry], LAYER + " edited") is False
-
-
-def test_a_model_reading_needs_independent_page_evidence():
-    page = _page()
-    assert private_use_bullets_released(_model(), page) is True
-    # the numbers it ships are not in the layer: the numbers check FAILs, no evidence
-    assert (
-        private_use_bullets_released(_model("Output grew 9.9 percent in the quarter"), page)
-        is False
+def _native(text: str = _PROSE) -> PageOutput:
+    return PageOutput(
+        page_num=1, text=text, status=PageStatus.WARNING, engine="native", audit_passed=True
     )
-    # the reading drops a word the layer prints: the words check FAILs
-    assert private_use_bullets_released(_model("Output grew 2.1 in the quarter"), page) is False
+
+
+def test_the_bullet_mark_states_only_what_is_true():
+    clause = _native_glyph_clause(_page(), _native())
+    assert clause is not None and clause.check is Check.NATIVE_GLYPHS
+    assert clause.reason == BULLET_GLYPHS_REASON
+    # no claim about mathematics, maths fonts, or what else was checked
+    for word in ("mathematics", "maths font", "otherwise checked", "not checked"):
+        assert word not in clause.reason
+
+
+def test_no_evidence_changes_the_mark():
+    """Differences, not values: the same page with every piece of independent evidence present
+    (ink check passed) and absent yields the identical clause. Nothing releases a page."""
+    out = _native()
+    with_evidence = _native_glyph_clause(_page(text_coverage_verdict="passed"), out)
+    without = _native_glyph_clause(_page(text_coverage_verdict=""), out)
+    assert with_evidence == without and with_evidence is not None
+
+
+def test_a_bullet_page_differs_from_a_maths_page_only_in_the_words():
+    out = _native()
+    bullets = _native_glyph_clause(_page(), out)
+    maths = _native_glyph_clause(_page(private_use_bullets_only=False), out)
+    assert bullets is not None and maths is not None
+    assert (bullets.check, bullets.result, bullets.scope) == (
+        maths.check,
+        maths.result,
+        maths.scope,
+    )
+    assert bullets.result is CheckResult.FAIL
+    assert bullets.reason != maths.reason
+    assert "unrecovered mathematics" in maths.reason
 
 
 def test_the_other_native_glyph_modes_are_untouched():
@@ -272,20 +210,12 @@ def test_the_clause_follows_the_flag_and_only_the_flag() -> None:
 # ------------------------------------------------------------- the shipping boundary, both states
 
 
-def _run(
-    tmp_path: Path,
-    *,
-    text: str,
-    bullets_only: bool,
-    coverage: bool,
-    providers: list,
-    fresh_flags: bool = False,
-):
+def _run(tmp_path: Path, *, text: str, bullets_only: bool, coverage: bool, providers: list):
     """The real agentic loop and assemble on ONE native page. Only the arguments differ between
     arms. Engines pinned; the ladder and the judge model supplied explicitly."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     pdf = tmp_path / "doc.pdf"
-    if not pdf.exists():  # a resume reads the SAME file: its checksum is part of the ledger gate
+    if not pdf.exists():
         _prose_pdf(pdf)
     pipeline = UnifiedPipeline(
         PipelineConfig(
@@ -304,11 +234,6 @@ def _run(
     pipeline._scan_root = pdf.parent
     state = _state(pdf, native_text=text, damaged=True)
     state.pages[1].private_use_bullets_only = bullets_only
-    if (
-        fresh_flags
-    ):  # a resumed run: nothing of the page's analysis is recomputed, only its sidecar speaks
-        state.pages[1].has_unmapped_math_glyphs = False
-        state.pages[1].private_use_bullets_only = False
     out_dir = tmp_path / "out"
     with ExitStack() as stack:
         stack.enter_context(
@@ -327,64 +252,57 @@ def _outcome(state, result):
 
     rec = finalized_page_record(state, 1)
     clauses = [(c.check.value, c.result.value, c.reason) for c in rec.verdict.clauses]
-    _NOTES[id(state)] = (
-        list(rec.output.audit_notes or []),
-        [e.detail for e in state.events if e.kind == UNRESOLVED_MATH_KIND],
-    )
-    return rec.output.status, clauses, rec.output.text, result.status
+    notes = list(rec.output.audit_notes or [])
+    events = [e.detail for e in state.events if e.kind == UNRESOLVED_MATH_KIND]
+    return rec.output.status, rec.output.failure_mode, clauses, notes, events, result.status
 
 
-_NOTES: dict = {}
-
-
-CLEAN = _PROSE
 WITH_BULLET = f"{_PROSE}\n{BULLET} first list item"
 
 
 @pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []], ids=["provider", "no-provider"])
-def test_the_shipped_page_differs_only_by_the_evidence(tmp_path, providers):
-    """Both provider states. Arm A has the evidence (no private-use byte ships, the ink check ran
-    and passed); B ships the raw bullet; C has the same bytes as A with the ink check off; D is a
-    maths page (not bullets only). Differences, not absolute tuples."""
-    arms, notes = {}, {}
+def test_the_page_keeps_its_status_and_only_the_words_change(tmp_path, providers):
+    """Arms differ in ONE thing each: ``bullets_only`` (the wording) and the ink check (the
+    would-be evidence). Status, failure mode and the glyph clause's result are identical across
+    all of them: nothing is released."""
+    arms = {}
     for name, kw in {
-        "evidence": dict(text=CLEAN, bullets_only=True, coverage=True),
-        "raw-bullet": dict(text=WITH_BULLET, bullets_only=True, coverage=True),
-        "no-ink-check": dict(text=CLEAN, bullets_only=True, coverage=False),
-        "maths": dict(text=CLEAN, bullets_only=False, coverage=True),
+        "bullets-ink": dict(bullets_only=True, coverage=True),
+        "bullets-no-ink": dict(bullets_only=True, coverage=False),
+        "maths-ink": dict(bullets_only=False, coverage=True),
     }.items():
-        state, result, _ = _run(tmp_path / name, providers=providers, **kw)
+        state, result, _ = _run(tmp_path / name, text=WITH_BULLET, providers=providers, **kw)
         arms[name] = _outcome(state, result)
-        notes[name] = _NOTES[id(state)]
 
-    def glyph_marks(arm):
-        return [c for c in arms[arm][1] if c[0] == "native_glyphs"]
+    def glyph(arm):
+        return [c for c in arms[arm][2] if c[0] == "native_glyphs"]
 
-    assert arms["evidence"][0] is PageStatus.SUCCESS and glyph_marks("evidence") == []
-    for name in ("raw-bullet", "no-ink-check"):
-        assert arms[name][0] is PageStatus.WARNING, name
-        assert [c[1:] for c in glyph_marks(name)] == [("UNKNOWN", BULLET_GLYPHS_REASON)], name
-    assert arms["maths"][0] is PageStatus.WARNING
-    assert [c[1] for c in glyph_marks("maths")] == ["FAIL"]
-    assert "unrecovered mathematics" in glyph_marks("maths")[0][2]
-    # the released page and the reworded page ship the same bytes apart from the mark block
-    assert_differs_only_by_marks(arms["no-ink-check"][2], arms["evidence"][2], 1)
-    # the page note and the document event say what is true: bullets, not mathematics
-    for name in ("raw-bullet", "no-ink-check"):
-        page_notes, doc_events = notes[name]
-        assert any("bullet glyphs" in n and "not otherwise checked" in n for n in page_notes), name
-        assert doc_events and all("bullet glyphs" in d for d in doc_events), name
-    assert notes["evidence"] == ([], []), "released: no demotion note, no document event"
-    maths_notes, maths_events = notes["maths"]
-    assert any("unmapped math glyphs" in n for n in maths_notes)
-    assert maths_events and not any("bullet glyphs" in d for d in maths_events)
-    # the document follows the pages: only the evidence arm is clean of the maths accounting
-    assert arms["evidence"][3] is not arms["no-ink-check"][3]
+    # no release: status, mode and document status do not depend on the evidence or the wording
+    assert arms["bullets-ink"][0] is arms["bullets-no-ink"][0] is arms["maths-ink"][0]
+    assert arms["bullets-ink"][0] is not PageStatus.SUCCESS
+    assert arms["bullets-ink"][1] == arms["bullets-no-ink"][1] == arms["maths-ink"][1]
+    assert arms["bullets-ink"][5] is arms["bullets-no-ink"][5] is arms["maths-ink"][5]
+    assert arms["bullets-ink"] == arms["bullets-no-ink"], "the ink evidence changes nothing"
+    # the wording differs, the clause result does not
+    assert [c[1] for c in glyph("bullets-ink")] == [c[1] for c in glyph("maths-ink")] == ["FAIL"]
+    assert [c[2] for c in glyph("bullets-ink")] == [BULLET_GLYPHS_REASON]
+    assert "unrecovered mathematics" in glyph("maths-ink")[0][2]
+    # page note and document event say what is true
+    notes, events = arms["bullets-ink"][3], arms["bullets-ink"][4]
+    assert any("bullet or dingbat glyphs" in n for n in notes)
+    assert events and all("bullet or dingbat glyphs" in d for d in events)
+    assert not any("mathematics" in d and "bullet" in d for d in events)
+    maths_events = arms["maths-ink"][4]
+    assert maths_events and not any("bullet" in d for d in maths_events)
 
 
 def test_the_sidecar_records_the_bullet_fact_with_the_flag(tmp_path):
-    _state_, _result, out_dir = _run(
-        tmp_path, text=WITH_BULLET, bullets_only=True, coverage=True, providers=[PROFILE_QWEN_LOCAL]
+    _s, _r, out_dir = _run(
+        tmp_path,
+        text=WITH_BULLET,
+        bullets_only=True,
+        coverage=True,
+        providers=[PROFILE_QWEN_LOCAL],
     )
     meta = json.loads(next(out_dir.rglob("00001.json")).read_text())
     assert meta["has_unmapped_math_glyphs"] is True
@@ -392,7 +310,7 @@ def test_the_sidecar_records_the_bullet_fact_with_the_flag(tmp_path):
     # maths: the flag is there, the bullet fact is not (sparse: other sidecars keep their bytes)
     _s2, _r2, out2 = _run(
         tmp_path / "maths",
-        text=CLEAN,
+        text=WITH_BULLET,
         bullets_only=False,
         coverage=True,
         providers=[PROFILE_QWEN_LOCAL],
@@ -402,24 +320,39 @@ def test_the_sidecar_records_the_bullet_fact_with_the_flag(tmp_path):
     assert "private_use_bullets_only" not in maths_meta
 
 
-@pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []], ids=["provider", "no-provider"])
-def test_a_released_page_stays_released_on_resume_and_its_bullet_fact_is_restored(
-    tmp_path, providers
-):
-    """The page ships SUCCESS, so run 2 skips it from its terminal sidecar. The restored page
-    state must carry the bullet fact again (the flag alone would restore a maths claim)."""
-    first_state, first, _ = _run(
-        tmp_path, text=CLEAN, bullets_only=True, coverage=True, providers=providers
+def test_the_bullet_fact_is_restored_on_resume_and_the_wording_follows(tmp_path):
+    """A resumed page is not re-assessed: the sidecar alone restores ``private_use_bullets_only``,
+    and without it the restored page would say "unrecovered mathematics" again."""
+    from socr.core.document import DocumentHandle
+    from socr.core.manifest import finalized_page_record
+    from socr.core.state import DocumentState
+
+    state, _r, out_dir = _run(
+        tmp_path, text=WITH_BULLET, bullets_only=True, coverage=True, providers=[PROFILE_QWEN_LOCAL]
     )
-    assert _outcome(first_state, first)[0] is PageStatus.SUCCESS, "premise"
-    again_state, again, _ = _run(
-        tmp_path,
-        text=CLEAN,
-        bullets_only=True,
-        coverage=True,
-        providers=providers,
-        fresh_flags=True,
+    pipeline = UnifiedPipeline(PipelineConfig(quiet=True, write_manifest=False))
+    resumed = DocumentState(handle=DocumentHandle.from_path(state.handle.path))
+    out = PageOutput(
+        page_num=1, text=WITH_BULLET, status=PageStatus.WARNING, engine="native", audit_passed=True
     )
-    ps = again_state.pages[1]
-    assert ps.has_unmapped_math_glyphs is True and ps.private_use_bullets_only is True
-    assert _outcome(again_state, again)[:3] == _outcome(first_state, first)[:3]
+    pipeline._restore_terminal_page_state(resumed, 1, out, out_dir)
+    assert resumed.pages[1].has_unmapped_math_glyphs is True
+    assert resumed.pages[1].private_use_bullets_only is True
+    rec = finalized_page_record(resumed, 1)
+    reasons = [c.reason for c in rec.verdict.clauses if c.check is Check.NATIVE_GLYPHS]
+    assert BULLET_GLYPHS_REASON in reasons
+    assert any("bullet or dingbat glyphs" in n for n in rec.output.audit_notes or [])
+
+
+def test_the_detector_fact_reaches_the_page_state(tmp_path):
+    """``PageState.apply_born_digital`` copies ``private_use_bullets_only`` from the assessment."""
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    pdf = _prose_pdf(tmp_path / "doc.pdf")
+    state = DocumentState(handle=DocumentHandle.from_path(pdf))
+    assessment = BornDigitalDetector().detect(str(pdf))
+    for fact in (True, False):
+        assessment.pages[0].private_use_bullets_only = fact
+        state.apply_born_digital(assessment)
+        assert state.pages[1].private_use_bullets_only is fact
