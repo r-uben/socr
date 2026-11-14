@@ -565,6 +565,45 @@ def _place_note(error: str, note: str, later_notes: tuple[str, ...]) -> str:
     return f"{error}; {note}"
 
 
+def _record_unfinished_pages(
+    doc_dir: Path, meta_path: Path, meta: dict, sidecar_paths: list[Path]
+) -> None:
+    """#1244 C1 completion rule, applied to a finished document: a ``completed`` status
+    becomes ``partial``, here and in the root index, with the run's note naming the pages
+    that are not SUCCESS with a true published ``audit_passed``. A worse status is left as
+    the run wrote it, and a document already off ``completed`` is not touched again."""
+    from ocr_output_contract import Status
+
+    from socr.core.verdict import pages_not_success_note
+
+    unfinished = sorted(
+        int(sc["page_num"])
+        for sc in map(_read_json, sidecar_paths)
+        if sc.get("terminal") is True
+        and not (sc.get("status") == "success" and sc.get("audit_passed") is True)
+    )
+    if not unfinished:
+        return
+    note = pages_not_success_note(unfinished)
+
+    def recorded(record: dict) -> bool:
+        if record.get("status") != Status.COMPLETED.value:
+            return False
+        record["status"] = Status.PARTIAL.value
+        error = record.get("error") or ""
+        record["error"] = f"{error}; {note}" if error else note
+        return True
+
+    if recorded(meta):
+        _write_json(meta_path, meta)
+    root_path = doc_dir.parent / "metadata.json"
+    if root_path.is_file():
+        root = _read_json(root_path)
+        entry = (root.get("files") or {}).get(meta.get("key"))
+        if isinstance(entry, dict) and recorded(entry):
+            _write_json(root_path, root)
+
+
 def _record_disagreement(
     doc_dir: Path,
     meta_path: Path,
@@ -999,6 +1038,10 @@ def refinalize_document(
         _record_disagreement(
             doc_dir, meta_path, meta, missing, words=True, data_by_page=words_by_page
         )
+    # #1244 C1: a document is completed only when every page is SUCCESS with a true published
+    # audit_passed. Read from the sidecars as they now are (an interrupted pass is finished
+    # by the next one), after the repairs above have re-derived the label.
+    _record_unfinished_pages(doc_dir, meta_path, meta, sidecar_paths)
     _recount_tables(doc_dir, meta_path, meta)
     return changes
 

@@ -340,6 +340,15 @@ class PageVerdict:
         )
 
 
+def pages_not_success_note(pages: list[int]) -> str:
+    """The named reason a document with otherwise clean buckets is still not COMPLETED."""
+    return (
+        "page(s) "
+        + ", ".join(str(n) for n in pages)
+        + " did not finish with status success and a passing audit"
+    )
+
+
 def published_audit_passed(
     status: Any, accepted: Any, verdict: PageVerdict | dict[str, Any] | None
 ) -> bool:

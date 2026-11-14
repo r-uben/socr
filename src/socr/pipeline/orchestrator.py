@@ -155,6 +155,7 @@ from socr.core.ollama_utils import probe_model_generation
 from socr.core.verdict import (
     NATIVE_TABLE_EXACT_PASS_KIND,
     published_audit_passed,
+    pages_not_success_note as _pages_not_success_note,
     NUMBERS_DISAGREE_EVENT_DETAIL,
     NUMBERS_DISAGREE_KIND,
     INVALID_FINAL_EMISSION_NOTE_PREFIX,
@@ -865,15 +866,6 @@ def _pages_not_success(records: list, page_count: int) -> list[int]:
         and published_audit_passed(rec.output.status, rec.output.audit_passed, rec.verdict)
     }
     return [n for n in range(1, page_count + 1) if n not in finished]
-
-
-def _pages_not_success_note(pages: list[int]) -> str:
-    """The named reason a document with otherwise clean buckets is still not COMPLETED."""
-    return (
-        "page(s) "
-        + ", ".join(str(n) for n in pages)
-        + " did not finish with status success and a passing audit"
-    )
 
 
 def _attempts_summary(ps) -> list[dict]:
@@ -22758,6 +22750,26 @@ class UnifiedPipeline:
                 # SUCCESS on the pre-figure records cannot stay completed on a body whose
                 # pages cannot be told apart.
                 _late_incomplete = _pages_not_success([], state.handle.page_count)
+                # The sidecars flushed above are terminal SUCCESS records of pages whose
+                # final body could not be confirmed. Demote them to provisional so the
+                # per-page resume gate (``_load_terminal_page``) reprocesses them instead
+                # of skipping a page this run could not vouch for.
+                for pnum in range(1, state.handle.page_count + 1):
+                    try:
+                        self._flush_page_sidecar(
+                            state,
+                            pnum,
+                            output_dir,
+                            terminal=False,
+                            extra_figures=list(getattr(final_result, "figures", []) or []),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "#1244 C1 [%s]: could not demote page %d sidecar (%s)",
+                            state.handle.path.name,
+                            pnum,
+                            exc,
+                        )
             if _late_incomplete and final_result.status == DocumentStatus.SUCCESS:
                 _late_note = _pages_not_success_note(_late_incomplete)
                 final_result.status = DocumentStatus.AUDIT_FAILED

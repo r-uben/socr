@@ -504,3 +504,43 @@ def test_the_control_helper_accepts_only_the_designed_unchecked_demotion() -> No
         check(_result(DocumentStatus.ERROR, _NOTE), pages=(2,))
     with pytest.raises(AssertionError):
         check(_result(DocumentStatus.AUDIT_FAILED, "page(s) 2: withheld table"), pages=(2,))
+
+
+@pytest.mark.parametrize("provider", [True, False])
+def test_a_body_that_does_not_split_leaves_no_page_skippable_on_resume(
+    tmp_path, monkeypatch, provider
+) -> None:
+    """The fail-closed document must not leave terminal SUCCESS sidecars behind: a rerun would
+    skip pages whose final body this run could not confirm. Difference on the first run only:
+    the same document with a body that splits resumes its pages; the one that does not splits
+    reprocesses every page (spy on ``_load_terminal_page``)."""
+    pdf = _prior_ocr_pdf(tmp_path / "doc.pdf")
+    resumed: dict[bool, list[int]] = {}
+    for split_fails in (False, True):
+        out = tmp_path / f"out-{split_fails}"
+        _process(out, pdf, monkeypatch, provider=provider, split_extra_page=split_fails)
+        for sidecar_path in out.rglob("pages/*.json"):
+            assert json.loads(sidecar_path.read_text())["terminal"] is not split_fails
+        # The document-level gate would skip a finished document whole; remove the saved .md
+        # so the per-page ledger is the gate under test, as ``_crash_after_page_one`` does.
+        for md in out.rglob("*.md"):
+            if "pages" not in md.parts:
+                md.unlink()
+        seen: list[int] = []
+        real = UnifiedPipeline._load_terminal_page
+
+        def spy(self, state, page_num, output_dir, _seen=seen, _real=real):
+            loaded = _real(self, state, page_num, output_dir)
+            if loaded is not None:
+                _seen.append(page_num)
+            return loaded
+
+        with monkeypatch.context() as m:
+            m.setattr(UnifiedPipeline, "_load_terminal_page", spy)
+            _process(out, pdf, monkeypatch, provider=provider)
+        resumed[split_fails] = sorted(seen)
+    if provider:
+        # With no provider the ladder is empty and no page is skippable in either arm, so the
+        # premise holds only here; the claim below holds in both states.
+        assert resumed[False], "fixture premise: a body that splits resumes its pages"
+    assert resumed[True] == []

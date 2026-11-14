@@ -38,7 +38,7 @@ def assert_clean_or_only_unchecked(
     assert named <= set(pages), f"C1 names pages {sorted(named)} outside the design {sorted(pages)}"
     allowed = tuple(other_notes)
     for sentence in (s.strip() for s in error.split(";")):
-        if not sentence or _C1_NOTE.search(sentence) or "passing audit" in sentence:
+        if not sentence or _C1_NOTE.search(sentence):
             continue
         # a note of its own: it must be one the fixture is designed to carry
         assert any(a in sentence for a in allowed), f"unrelated note in error: {sentence!r}"

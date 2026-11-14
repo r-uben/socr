@@ -167,9 +167,22 @@ page") is superseded by the C1 ruling.
 
 ## Resume cost
 
-A document that leaves `completed` is no longer skipped whole on the next run: its non-SUCCESS pages are
-re-read every run (a model page is paid again, and its text can differ). For the 11 Fed documents that left
-`completed` this is 15 pages in total (computed from the cached sidecars): 1 WARNING page each in the nine beige
-books, and 1 WARNING + 2 ERROR pages in each of the two greenbook supplements. A scanned corpus whose pages
-are all unchecked model readings would pay for every page of every document until #1208 provides an
-independent reader.
+Two gates decide what a rerun reads, and they differ.
+
+- Document gate, `_resume_skippable` (batch) and the root index: a document recorded `partial` is skipped
+  WHOLE when its recorded checksum and run fingerprint match the current ones, its output exists, and no
+  retry latch (`halt_retry_pending`, the equation, table-judge and table-escalation latches) is set and
+  reachable. A document that left `completed` for this change therefore costs nothing on a plain rerun;
+  `--reprocess` is what re-reads it. The batch outcome counts such a skipped file as partial (#897).
+- Page gate, `_load_terminal_page`: it only runs once a document is reopened (`--reprocess`, a changed
+  fingerprint or checksum, a latch, or no saved `.md`). Then the non-SUCCESS pages are re-read (a model page is
+  paid again, and its text can differ), and the SUCCESS pages are restored.
+
+So the 15 pages of the 11 Fed documents that left `completed` (computed from the cached sidecars: 1 WARNING page
+each in the nine beige books, and 1 WARNING + 2 ERROR pages in each of the two greenbook supplements) are paid
+only on a reopened document. A scanned corpus whose pages are all unchecked model readings pays for every page
+of every document each time one is reopened, until #1208 provides an independent reader.
+
+A document whose final body does not split into page_count bodies is demoted the same way, and its page
+sidecars are rewritten non-terminal, so a reopened document reprocesses those pages instead of skipping pages
+whose final body could not be confirmed.

@@ -480,6 +480,7 @@ class TestRuling6ChokePoint:
         assert _unverified(active.error) is True
         assert active.status == DocumentStatus.AUDIT_FAILED
         assert _unverified(unwired.error) is False
+        assert unwired.status != DocumentStatus.SUCCESS
         assert_clean_or_only_unchecked(
             unwired, pages=(1,), other_notes=("untrusted tables on",)
         )  # #1244 C1: see c1_support
