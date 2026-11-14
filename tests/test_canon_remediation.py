@@ -493,6 +493,9 @@ class TestConformance:
         handle = DocumentHandle.from_path(pdf)
         state = DocumentState(handle=handle)
         for i in (1, 2):
+            # #1244 C1: CHECKED needs a born-digital layer sharing a number with the reading.
+            state.pages[i].own_layer_text = f"Conformant content for page {i}."
+            state.pages[i].is_born_digital = True
             state.pages[i].best_output = PageOutput(
                 page_num=i,
                 text=f"Conformant content for page {i}.",

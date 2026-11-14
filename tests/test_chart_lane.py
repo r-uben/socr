@@ -722,6 +722,11 @@ def _run_chart_detection_case(tmp_path: Path, *, fail_detector: bool):
     # of this test and mask the difference it exists to measure.
     state.pages[1].detected_table_bboxes = [(72.0, 60.0, 540.0, 200.0)]
     state.pages[1].detected_table_count = 1
+    # #1244 C1: a model reading is CHECKED only against a born-digital layer of its own that
+    # shares a number with it. The control arm must be a clean SUCCESS page for the difference
+    # this test measures to show at the document level.
+    state.pages[1].own_layer_text = "Col A Col B 1.0 2.0"
+    state.pages[1].is_born_digital = True
     pipeline._last_assessment = state._last_assessment
     routed_output = PageOutput(
         page_num=1,
@@ -954,6 +959,9 @@ def test_gh682_clean_page_resumes_clean_no_chart_region_flags(tmp_path: Path) ->
     pdf = _make_vector_chart_pdf(tmp_path)
     pipeline = _make_agentic_pipeline()
     state = _make_state_with_page(pdf)
+    # #1244 C1: the resumed reading is CHECKED against a born-digital layer sharing its number.
+    state.pages[1].own_layer_text = "body 4.2"
+    state.pages[1].is_born_digital = True
     out_dir = tmp_path / "out"
 
     # A terminal sidecar from an earlier, clean run: none of the three keys
@@ -966,7 +974,7 @@ def test_gh682_clean_page_resumes_clean_no_chart_region_flags(tmp_path: Path) ->
     # THIS run never recorded a chart-region problem either.
     pipeline._scan_root = pdf.parent
     resumed = PageOutput(
-        page_num=1, text="body", status=PageStatus.SUCCESS, engine="qwen", audit_passed=True
+        page_num=1, text="body 4.2", status=PageStatus.SUCCESS, engine="qwen", audit_passed=True
     )
     pipeline._restore_terminal_page_state(state, 1, resumed, out_dir)
 

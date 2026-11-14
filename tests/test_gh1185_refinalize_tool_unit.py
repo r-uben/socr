@@ -350,3 +350,70 @@ def test_the_table_counts_follow_the_demoted_page(tmp_path: Path, monkeypatch) -
     assert change.result == "FAIL"
     after = json.loads((doc / "metadata.json").read_text())["tables"]
     assert after["verified_text"] == 0 and after == count_from_sidecars(doc).to_dict()
+
+
+def test_a_rerun_rederives_the_published_audit_passed_of_a_page_it_already_marked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#1244 C1: a page that already carries the clause is not re-finalized, but its published
+    ``audit_passed`` is still derived (status WARNING -> false). Difference on one input: the
+    sidecar as an earlier pass left it (stale ``true``) versus the same sidecar left alone."""
+    old_out, old_v = _old_run(_success(), SimpleNamespace())
+    _with_analysis(monkeypatch, tmp_path)
+    doc = _finished_doc(tmp_path, old_out, old_v, audit=True)
+    tool.refinalize_document(doc, tmp_path)
+    path = doc / "pages" / "00001.json"
+    marked = json.loads(path.read_text())
+    assert marked["status"] == "warning" and marked["audit_passed"] is False, "fixture premise"
+    nested = marked["winning_output"]["audit_passed"]
+
+    path.write_text(json.dumps({**marked, "audit_passed": True}))
+    tool.refinalize_document(doc, tmp_path)
+    repaired = json.loads(path.read_text())
+    assert repaired["audit_passed"] is False
+    assert repaired["winning_output"]["audit_passed"] == nested, "the internal flag is untouched"
+    assert repaired == marked
+
+
+def test_a_page_the_tool_demotes_to_a_false_label_takes_the_document_off_completed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#1244 C1 completion rule: a page marked UNKNOWN (WARNING, published false, no FAIL
+    clause) must also move the document, here and in the root index, off ``completed``; the
+    disagreement path does not, because there is no FAIL. The repaired sidecar's own label is
+    checked against the first pass's, and a rerun adds nothing."""
+    from socr.core.verdict import pages_not_success_note
+
+    old_out, old_v = _old_run(_success(), SimpleNamespace(prior_ocr_layer_suspect=False))
+    from socr.core.born_digital import DocumentAssessment
+
+    assessment = DocumentAssessment(path=tmp_path / "doc.pdf", pages=[_analysis(prior_ocr=True)])
+    monkeypatch.setattr(tool, "_analyse_pdf", lambda pdf_dir, meta: (assessment, None))
+    doc = _finished_doc(tmp_path, old_out, old_v, audit=True)
+    root_path = tmp_path / "metadata.json"
+    entry = {"status": "completed", "key": "dir/doc.pdf"}
+    root_path.write_text(json.dumps({"files": {"dir/doc.pdf": entry}}))
+
+    tool.refinalize_document(doc, tmp_path)
+    path = doc / "pages" / "00001.json"
+    marked = json.loads(path.read_text())
+    assert marked["status"] == "warning" and marked["audit_passed"] is False, "fixture premise"
+    assert "FAIL" not in [c["result"] for c in marked["verdict"]["clauses"]], "no FAIL clause"
+
+    # An earlier pass left the page marked but the document recorded completed.
+    (doc / "metadata.json").write_text(
+        json.dumps({"key": "dir/doc.pdf", "pages": 1, "status": "completed"})
+    )
+    root_path.write_text(json.dumps({"files": {"dir/doc.pdf": entry}}))
+    path.write_text(json.dumps({**marked, "audit_passed": True}))
+    tool.refinalize_document(doc, tmp_path)
+
+    meta = json.loads((doc / "metadata.json").read_text())
+    root = json.loads(root_path.read_text())["files"]["dir/doc.pdf"]
+    assert meta["status"] == root["status"] == "partial"
+    assert meta["error"] == root["error"] == pages_not_success_note([1])
+    assert json.loads(path.read_text())["audit_passed"] is False
+
+    # A rerun adds nothing.
+    tool.refinalize_document(doc, tmp_path)
+    assert json.loads((doc / "metadata.json").read_text()) == meta

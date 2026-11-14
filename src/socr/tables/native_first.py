@@ -42,6 +42,9 @@ CELLS = "cells"
 REFUSE = "refuse"
 DEFER = "defer"
 
+#: Reason on a CELLS plan: the failing cells' tokens disagree with the text layer.
+CELL_MISMATCH_REASON = "cell_mismatch"
+
 PlanAction = Literal["ship", "cells", "refuse", "defer"]
 
 # GH-917 / GH-916: reason on the DEFER that replaces a rotated exact-pass SHIP.
@@ -49,6 +52,29 @@ ROTATED_SHIP_QUARANTINED = "rotated_ship_quarantined"
 #: Audit-event kind recorded when a rotated exact-pass SHIP is quarantined. Both the
 #: emitter and the resume replay (``resume_restore_kinds``) import this one name.
 ROTATED_QUARANTINE_KIND = "rotated_native_table_quarantined"
+
+#: #1253 B3: audit-event kind written once per page whose refused native grid was
+#: handed to the model ladder. The emitter and the resume replay import this one name.
+MODEL_RETRY_KIND = "native_table_model_retry"
+
+#: #1253 B3: the refusal reasons on which a model gets one attempt at the page.
+#: ALLOWLIST by name, never "every REFUSE": a new refusal reason added to
+#: ``plan_native_table`` stays refused until someone decides here that a model read is
+#: wanted for it. ``header_unattributed`` and ``label_binding`` are deliberately absent
+#: (owner decision 2026-11-13: they stay refused; zero occurrences in the 156-document
+#: run), and so is ``"text layer unreadable"`` (no words to check any reading against).
+MODEL_RETRY_REFUSAL_REASONS: frozenset[str] = frozenset(
+    {
+        "row_count",
+        "structure_defective",
+        "unlocalizable_cells",
+        "region_unverifiable",
+        "numeric_orphan",
+        # A CELLS plan whose repair could not be confirmed, or whose spliced grid re-plans to
+        # a refusal, ends refused: the page was never read whole by a model.
+        CELL_MISMATCH_REASON,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -314,7 +340,7 @@ def plan_native_table(
         cells = locate_mismatched_cells(words, markdown)
         if not cells:
             return NativeTablePlan(REFUSE, reason="unlocalizable_cells")
-        return NativeTablePlan(CELLS, cells=tuple(cells), reason="cell_mismatch")
+        return NativeTablePlan(CELLS, cells=tuple(cells), reason=CELL_MISMATCH_REASON)
     if unverifiable:
         return NativeTablePlan(REFUSE, reason="region_unverifiable")
     return NativeTablePlan(DEFER, reason=verdict.state or VerifierState.AMBIGUOUS)

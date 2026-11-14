@@ -358,6 +358,43 @@ class PageVerdict:
         )
 
 
+def pages_not_success_note(pages: list[int]) -> str:
+    """The named reason a document with otherwise clean buckets is still not COMPLETED."""
+    return (
+        "page(s) "
+        + ", ".join(str(n) for n in pages)
+        + " did not finish with status success and a passing audit"
+    )
+
+
+def published_audit_passed(
+    status: Any, accepted: Any, verdict: PageVerdict | dict[str, Any] | None
+) -> bool:
+    """The PUBLISHED ``audit_passed`` label of a page sidecar (#1244 C1).
+
+    True only when the page is SUCCESS, the winner-selection acceptance was an explicit
+    ``True``, and the verdict holds no FAIL clause. UNKNOWN clauses do not block: the
+    status ladder already demotes what an UNKNOWN stops being allowed to ship as SUCCESS,
+    and a WARNING or ERROR page is false regardless of its clauses.
+
+    ``accepted`` is the INTERNAL acceptance (``PageOutput.audit_passed``, the #252
+    winner-selection flag, persisted as ``winning_output.audit_passed``). It is an input
+    here and is never written back: resume (``_load_terminal_page``) and selection read
+    the internal value, readers of the top-level key read this derivation.
+    """
+    if getattr(status, "value", status) != PageStatus.SUCCESS.value or accepted is not True:
+        return False
+    if verdict is None:
+        return True
+    if isinstance(verdict, PageVerdict):
+        results = [c.result.value for c in verdict.clauses]
+    else:
+        results = [
+            str(c.get("result")) for c in (verdict.get("clauses") or []) if isinstance(c, dict)
+        ]
+    return CheckResult.FAIL.value not in results
+
+
 def _flag(p: Any, name: str) -> bool:
     return bool(getattr(p, name, False))
 
@@ -760,6 +797,8 @@ PERMANENTLY_UNRESOLVABLE_MODES: frozenset[FailureMode] = frozenset(
         FailureMode.NUMBERS_DROPPED_FROM_READING,
         # #1294: the same page and config produce the same shipped words.
         FailureMode.WORDS_MISSING_FROM_PAGE,
+        # #1306: the same layer holds the same control bytes.
+        FailureMode.CONTROL_BYTES_REPLACED,
     }
 )
 
@@ -790,6 +829,8 @@ TEXT_LAYER_WORDS_MODES: dict[FailureMode, Check] = {
 LAYER_CHECK_MODES: dict[FailureMode, Check] = {
     **NUMBER_CHECK_MODES,
     **TEXT_LAYER_WORDS_MODES,
+    # #1306: the control-byte clause is a fact about the page's own layer too.
+    FailureMode.CONTROL_BYTES_REPLACED: Check.CONTROL_BYTES,
 }
 
 
@@ -1006,6 +1047,37 @@ def words_missing_cli_line(pages: list[int]) -> str:
 def words_missing_note(pages: list[int]) -> str:
     return (
         WORDS_MISSING_NOTE_PREFIX
+        + ": "
+        + ", ".join(str(n) for n in pages)
+        + " (named on each page)"
+    )
+
+
+#: #1306: the two page-level audit events of the damaged-layer guard, one per fact. Both are
+#: replayed on resume (``orchestrator._RESUME_REPLAYED``): the first run's guard changed the
+#: shipped text, a resumed page restores that text and never runs the guard again, so the
+#: events are the only record of what was changed.
+CONTROL_BYTES_KIND = "control_bytes_replaced"
+CONTROL_BYTES_EVENT_DETAIL = (
+    "control bytes of this page's own text layer shipped as U+FFFD, never deleted: a deleted "
+    "minus would turn a negative number positive. The mark states the count (#1306)"
+)
+HIDDEN_FOOTNOTE_KIND = "hidden_footnote_stripped"
+HIDDEN_FOOTNOTE_EVENT_DETAIL = (
+    "the invisible tagged copy of a footnote in the page's text layer was removed because the "
+    "page also carries the printed footnote with the same number and the same full text; "
+    "one event per wrapper (#1306)"
+)
+CONTROL_BYTES_NOTE_PREFIX = "page(s) ship control characters of their own text layer as U+FFFD"
+
+
+def control_bytes_cli_line(pages: list[int]) -> str:
+    return f"{len(pages)} {CONTROL_BYTES_NOTE_PREFIX} (named on each page): {pages}"
+
+
+def control_bytes_note(pages: list[int]) -> str:
+    return (
+        CONTROL_BYTES_NOTE_PREFIX
         + ": "
         + ", ".join(str(n) for n in pages)
         + " (named on each page)"
@@ -1508,6 +1580,19 @@ def _word_layer_is_damaged(p: Any) -> bool:
     return not _flag(p, "is_born_digital") or _flag(p, "has_unrecovered_symbol_glyphs")
 
 
+def _stripped_footnote_words(output: PageOutput, p: Any) -> str:
+    """#1306: the words of the hidden footnote wrappers the damaged-layer guard stripped from
+    this page, which its own layer (the words reference) holds twice (hidden and printed) and
+    the page now ships once. Only for a page that ships the layer's own text: a model reading
+    never carried the wrapper, and a field left by an earlier finalisation must not excuse it."""
+    from socr.core.manifest import engine_ships_native_text
+
+    words = getattr(p, "hidden_footnote_words", "")
+    if not isinstance(words, str) or not words:
+        return ""
+    return words if engine_ships_native_text(output.engine) else ""
+
+
 def page_missing_words(output: PageOutput, p: Any) -> tuple[str, ...] | None:
     """#1294: the words the page's own layer prints and the shipped page lacks, in layer
     order; ``()`` when none; ``None`` when the check does not apply.
@@ -1539,6 +1624,7 @@ def page_missing_words(output: PageOutput, p: Any) -> tuple[str, ...] | None:
             WordReference(reference, figure),
             reading_numbers_text(shipped, output.page_num),
             figure_shipped=bool(_IMAGE_LINK_RE.search(text)),
+            excused=_stripped_footnote_words(output, p),
         )
     )
 
@@ -1564,6 +1650,34 @@ def page_word_check_record(output: PageOutput, p: Any) -> dict | None:
 
 def _name_words(words: tuple[str, ...]) -> str:
     return ", ".join(dict.fromkeys(words))
+
+
+#: #1306: the reason of a ``control_bytes`` clause. A control byte stands for a glyph the layer
+#: could not map; in this corpus it is often a minus, so the numbers beside it may be wrong, and
+#: the page ships U+FFFD where it stood rather than a clean-looking number.
+CONTROL_BYTES_REASON = (
+    "{count} control character(s) in this page's own text layer ({codes}) could not be read "
+    "and ship as U+FFFD; each stood for a glyph (often a minus), so numbers beside them "
+    "may be wrong"
+)
+
+
+def control_bytes_clause(output: PageOutput, p: Any) -> VerdictClause | None:
+    """#1306: FAIL when the damaged-layer guard replaced control bytes in this page's text.
+
+    Both halves are required: the guard's record on the page state, and U+FFFD in the bytes
+    that ship. The record alone could be left by an earlier finalisation of a text a later
+    one replaced; the character alone could be any reading's. Status-independent, so a page
+    already WARNING for another reason gains the true second reason (see ``derive_clauses``).
+    """
+    from socr.core.damaged_layer import REPLACEMENT_CHAR
+
+    found = getattr(p, "control_bytes_replaced", None)
+    if not isinstance(found, dict) or not found or REPLACEMENT_CHAR not in (output.text or ""):
+        return None
+    codes = ", ".join(f"{code} x{n}" for code, n in sorted(found.items()))
+    reason = CONTROL_BYTES_REASON.format(count=sum(found.values()), codes=codes)
+    return VerdictClause(Check.CONTROL_BYTES, CheckResult.FAIL, SCOPE_PAGE, reason)
 
 
 def text_layer_words_clause(output: PageOutput, p: Any) -> VerdictClause | None:
@@ -1599,6 +1713,8 @@ _SILENT_SUCCESS_ORDER: tuple[tuple[Check, str], ...] = (
     # #1294: after #1218's, for the same reason: the count of clauses ahead of #1185's slot
     # is unchanged.
     (Check.TEXT_LAYER_WORDS, SCOPE_PAGE),
+    # #1306: last again, for the same reason.
+    (Check.CONTROL_BYTES, SCOPE_PAGE),
 )
 
 
@@ -1640,11 +1756,13 @@ def silent_success_clauses(
     numbers = text_layer_numbers_clause(output, p)
     drops = text_layer_drops_clause(output, p)
     words = text_layer_words_clause(output, p)
+    control = control_bytes_clause(output, p)
     return (
         *_clauses_ahead_of_text_layer_numbers(output, p, event_kinds),
         *((numbers,) if numbers is not None else ()),
         *((drops,) if drops is not None else ()),
         *((words,) if words is not None else ()),
+        *((control,) if control is not None else ()),
     )
 
 

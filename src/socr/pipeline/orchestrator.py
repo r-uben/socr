@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import functools
 import logging
 import math
@@ -111,7 +112,15 @@ from socr.figures.chart_reconcile import (
     GRID_RECONCILED,
 )
 from socr.tables.ditto import DITTO_UNRESOLVED_KIND
-from socr.tables.native_first import ROTATED_QUARANTINE_KIND
+from socr.tables.native_first import (
+    CELL_MISMATCH_REASON,
+    MODEL_RETRY_KIND,
+    MODEL_RETRY_REFUSAL_REASONS,
+    REFUSE,
+    ROTATED_QUARANTINE_KIND,
+    NativeTableFirstWork,
+    NativeTablePlan,
+)
 from socr.tables.ship_gate import SHIP_GATE_KIND
 from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND, NO_WITNESS_BACKEND_KIND
 from socr.judge.table_rung_gemini import gemini_rung_reachable as table_judge_gemini_rung_reachable
@@ -155,13 +164,21 @@ from socr.pipeline.agentic import (
 from socr.core.ollama_utils import probe_model_generation
 from socr.core.verdict import (
     NATIVE_TABLE_EXACT_PASS_KIND,
+    published_audit_passed,
+    pages_not_success_note as _pages_not_success_note,
     NUMBERS_DISAGREE_EVENT_DETAIL,
     NUMBERS_DISAGREE_KIND,
     INVALID_FINAL_EMISSION_NOTE_PREFIX,
     NUMBERS_DROPPED_EVENT_DETAIL,
     NUMBERS_DROPPED_KIND,
+    CONTROL_BYTES_EVENT_DETAIL,
+    CONTROL_BYTES_KIND,
+    HIDDEN_FOOTNOTE_EVENT_DETAIL,
+    HIDDEN_FOOTNOTE_KIND,
     WORDS_MISSING_EVENT_DETAIL,
     WORDS_MISSING_KIND,
+    control_bytes_cli_line,
+    control_bytes_note,
     numbers_disagree_note,
     numbers_dropped_cli_line,
     numbers_dropped_event_data,
@@ -458,6 +475,17 @@ _RESUME_REPLAYED: dict[str, str] = {
         )
         for kind in UNSHIPPED_FIGURE_EVENT_KINDS
     },
+    CONTROL_BYTES_KIND: (
+        "#1306: the finalisation guard replaced control bytes of the layer with U+FFFD; a resumed "
+        "terminal page restores the repaired text and never runs the guard again, so this event "
+        "is the only record of how many bytes of which code points stood there. The page's mark "
+        "comes from the published verdict"
+    ),
+    HIDDEN_FOOTNOTE_KIND: (
+        "#1306: the guard removed the invisible tagged copy of a footnote because the printed "
+        "copy is on the page; one event per wrapper. The restored page ships the stripped text, "
+        "so without the replay the removal would have no record at all"
+    ),
     TABLE_BLANK_LINES_DROPPED_KIND: (
         "the model's table had blank rows/columns removed before it was checked and shipped; the "
         "counts live only on this event, and a terminal resumed page skips the gate"
@@ -603,6 +631,11 @@ _RESUME_REPLAYED: dict[str, str] = {
     ROTATED_QUARANTINE_KIND: (
         "GH-917: emitted by _plan_native_table_first, which runs only over pages not "
         "resumed; the quarantine is a standing property of the page's source grid"
+    ),
+    MODEL_RETRY_KIND: (
+        "#1253 B3: emitted at the end of the page loop for a refused native grid handed to the "
+        "model; a terminal resumed page skips that step, and the record of the attempt and "
+        "its outcome lives only on this event"
     ),
     SHIP_GATE_KIND: (
         "GH-916: emitted by _plan_native_table_first (upright and rotated); the fault is "
@@ -827,6 +860,27 @@ def _derive_disposition_buckets(
 #: The full reason lives on the attempt in the audit log; the sidecar carries a compact
 #: pointer, so a reasoning-heavy judge cannot bloat every page file.
 ATTEMPT_SUMMARY_REASON_MAX_CHARS = 200
+
+
+def _pages_not_success(records: list, page_count: int) -> list[int]:
+    """#1244 C1: every page of 1..page_count without a FINAL record that publishes as SUCCESS.
+
+    The document-level invariant. A page with no record counts as incomplete, so a record
+    list that is empty or covers a subset can never read as a clean document (``all()`` over
+    such a list is vacuously true, which is the shape this exists to refuse). Every status
+    other than SUCCESS is incomplete: WARNING, ERROR, SKIPPED and PENDING alike, and so is a
+    SUCCESS page whose published ``audit_passed`` is false (``published_audit_passed``).
+    """
+    finished = {
+        rec.output.page_num
+        for rec in records
+        if rec.output.status == PageStatus.SUCCESS
+        # The PUBLISHED label, not only the status: a SUCCESS page whose sidecar publishes
+        # ``audit_passed=false`` (a FAIL clause, or an internal acceptance that is not True)
+        # is not a finished page, so the document must not read ``completed`` over it.
+        and published_audit_passed(rec.output.status, rec.output.audit_passed, rec.verdict)
+    }
+    return [n for n in range(1, page_count + 1) if n not in finished]
 
 
 def _attempts_summary(ps) -> list[dict]:
@@ -12322,6 +12376,11 @@ class UnifiedPipeline:
         _routed_pages: set[int] = set()
         _before_page: dict[int, tuple[PageState, int]] = {}
         _retried_pages: list[int] = []
+        # #1253 B3: per page handed to the model retry, the plan that was dropped and the
+        # flags the refusal overwrote. Kept here, not on PageState: a --retry-failed-pages
+        # reset restores the page to before its first attempt and would lose both.
+        _retry_plans_kept: dict[int, NativeTableFirstWork] = {}
+        _retry_prior_flags: dict[int, dict] = {}
 
         def _pages_in_order():
             nonlocal ladder
@@ -12465,6 +12524,24 @@ class UnifiedPipeline:
                         )
                     if _cell_md is not None:
                         native_cell_repairs[page_num] = _cell_md
+                    elif (
+                        ladder
+                        and (_replan is None or _replan.action == "refuse")
+                        and (_replan.reason if _replan is not None else CELL_MISMATCH_REASON)
+                        in MODEL_RETRY_REFUSAL_REASONS
+                    ):
+                        # #1253 B3: the repair could not confirm the cells, or the spliced
+                        # grid re-plans to a REFUSE the allowlist names: the page is a
+                        # refusal like any other, so the retry below takes it. The plan is
+                        # replaced only when a provider exists; without one the page keeps
+                        # the plan it had and ends as it did before.
+                        _cells_work = native_table_plans[page_num]
+                        native_table_plans[page_num] = dataclasses.replace(
+                            _cells_work,
+                            plan=_replan
+                            if _replan is not None
+                            else NativeTablePlan(REFUSE, reason=CELL_MISMATCH_REASON),
+                        )
                     elif _replan is not None and _replan.action == "defer":
                         self._record_native_ship_gate(state, page_num, _replan)
                         del native_table_plans[page_num]
@@ -12487,6 +12564,58 @@ class UnifiedPipeline:
                                 )
                                 ps.attempts.append(_fallback)
                                 ps.best_output = _fallback
+                # #1253 B3: a REFUSED native grid whose refusal reason is on the retry
+                # allowlist gets one model attempt instead of going straight to the
+                # failed-table marker. The refusal bookkeeping runs FIRST and unchanged
+                # (``_refuse_native_table_first``: ``native_table_structure_failed`` /
+                # ``native_table_unverifiable``, the floor PNG, the native attempt, the
+                # ``native_table_cell_unresolved`` event). Those flags are what keep a model
+                # attempt that is not accepted from routing to NATIVE_FALLBACK and shipping
+                # the refused grid. The plan is then dropped so the page takes the
+                # whole-page route below, like a DEFER, with every downstream table check.
+                # An empty ladder never gets here: with no provider nothing changes.
+                if (
+                    page_num in _retried_pages
+                    and page_num not in native_table_plans
+                    and page_num in _retry_plans_kept
+                ):
+                    # --retry-failed-pages: the reset restored the page to before its first
+                    # attempt, and that attempt had dropped the plan. The second pass is the
+                    # same page under the same refusal, so it gets the same plan and the same
+                    # bookkeeping; without them a rejected grid ships through #262.
+                    native_table_plans[page_num] = _retry_plans_kept[page_num]
+                _retry_work = native_table_plans.get(page_num)
+                if (
+                    _retry_work is not None
+                    and _retry_work.plan.action == "refuse"
+                    and _retry_work.plan.reason in MODEL_RETRY_REFUSAL_REASONS
+                    and ladder
+                    and not is_native
+                    and page_num not in blank_pages
+                    and page_num not in math_recovery_pages
+                    and page_num not in chart_winner_pages
+                    and page_num not in equation_lane_pages
+                    and page_num not in no_ocr_provider_pages
+                ):
+                    # What the refusal is about to set, so an ACCEPTED model reading can put
+                    # the page back where a page that was never refused stands (as
+                    # ``_crop_repair`` does): the refusal is the floor for a reading that is
+                    # NOT accepted, not a verdict on one that is.
+                    _retry_prior_flags[page_num] = {
+                        "native_table_structure_failed": ps.native_table_structure_failed,
+                        "native_table_unverifiable": ps.native_table_unverifiable,
+                        "native_table_unverifiable_ordinals": list(
+                            getattr(ps, "native_table_unverifiable_ordinals", []) or []
+                        ),
+                        "d3_floor_png_ref": getattr(ps, "d3_floor_png_ref", ""),
+                    }
+                    with clock.span("tables"):
+                        self._refuse_native_table_first(
+                            state, page_num, ps, _retry_work.plan, _chart_figures_dir
+                        )
+                    ps.native_table_model_retry = _retry_work.plan.reason
+                    _retry_plans_kept[page_num] = _retry_work
+                    del native_table_plans[page_num]
                 # #1100: no text and no ink — ship the note, never a model.
                 if page_num in blank_pages:
                     with clock.span("extract"):
@@ -12642,6 +12771,10 @@ class UnifiedPipeline:
 
                             ps.attempts.append(att.output)
                         ps.best_output = decision.final_output
+                        if ps.native_table_model_retry and decision.accepted:
+                            self._lift_native_table_refusal(
+                                ps, page_num, _retry_prior_flags.get(page_num), _chart_figures_dir
+                            )
 
                         # GH-90: scanned-table source-evidence fail-closed floor.
                         _source_ev_attempts = [
@@ -13394,6 +13527,11 @@ class UnifiedPipeline:
                                 state, page_num, _whole_doc_page_texts(state)
                             )
                         _repairs_committed = True
+                        # #1253 B3: recorded last, on the record that ships after the
+                        # row-binding withhold and the point repairs; assemble updates it once
+                        # more against the final-body guard.
+                        if ps.native_table_model_retry:
+                            self._record_native_table_model_retry(state, page_num, ps, _record)
 
                         # Strip any leading ## Page N marker so the provisional fragment
                         # body matches what assemble would produce (modulo
@@ -15823,6 +15961,137 @@ class UnifiedPipeline:
         )
         self._agentic_native_page(state, page_num, ps)
 
+    @staticmethod
+    def _lift_native_table_refusal(
+        ps: PageState, page_num: int, prior: dict | None, figures_dir: Path | None
+    ) -> None:
+        """#1253 B3: an ACCEPTED model reading retires the refusal that handed the page to it.
+
+        ``_refuse_native_table_first`` set the floor flags so that a reading that is not
+        accepted ends as the failed-table marker. An accepted reading is a normal model page:
+        left set, those flags put it in ``d3_floor_pages`` (a false ``table_region_unverifiable``
+        event, a red CLI line, a distrusted table, a document error) and the floor picture
+        suppresses the scanned-figure lane. The flags go back to what they were before the
+        refusal; a page the refusal did not touch keeps what it had.
+        """
+        if prior is None:
+            return
+        ps.native_table_structure_failed = prior["native_table_structure_failed"]
+        ps.native_table_unverifiable = prior["native_table_unverifiable"]
+        ps.native_table_unverifiable_ordinals = list(prior["native_table_unverifiable_ordinals"])
+        if not prior["d3_floor_png_ref"] and getattr(ps, "d3_floor_png_ref", ""):
+            ps.d3_floor_png_ref = ""
+            if figures_dir is not None:
+                try:
+                    (figures_dir / f"failed_table_p{page_num}.png").unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.debug("p%d: floor picture not removed (%s)", page_num, exc)
+
+    @staticmethod
+    def _restate_native_table_model_retry(state: DocumentState, record) -> None:
+        """#1253 B3: bring the page's retry event in line with the final bodies.
+
+        The loop records the outcome before assemble's final-body table guard, which can turn
+        an accepted reading into a failure marker. The event is edited, not rebuilt: a page
+        restored from a terminal sidecar has no attempts to rebuild it from, and its event is
+        already the record of what was done.
+        """
+        page_num = record.output.page_num
+        for ev in state.events:
+            if getattr(ev, "page_num", None) != page_num or ev.kind != MODEL_RETRY_KIND:
+                continue
+            data = ev.data
+            data["ending"] = record.disposition.ending.value
+            data["primary_reason"] = record.disposition.primary_reason.value
+            data["selection_provenance"] = record.selection_provenance.value
+            if data.get("accepted") and record.output.status is PageStatus.ERROR:
+                data["accepted"] = False
+                data["why_not_accepted"] = (
+                    f"the reading shipped as a failure marker ({record.output.failure_mode.value})"
+                )
+                ev.detail = (
+                    f"refused native table ({data.get('reason', '')}) was handed to the model "
+                    f"ladder: reading not accepted ({data['why_not_accepted']}); "
+                    "the failed-table floor ships"
+                )
+
+    @staticmethod
+    def _record_native_table_model_retry(
+        state: DocumentState, page_num: int, ps: PageState, record
+    ) -> None:
+        """#1253 B3: one record per retried page: the attempt, whether it was accepted, why not.
+
+        ``accepted`` is true only when the page ships a non-native reading the ladder
+        accepted (selection took ``PASSING_BEST_OUTPUT``). Anything else, including a
+        rejected model reading, ships the failed-table floor. ``shipped_refused_native_grid``
+        is the P0-1 tripwire: it is true only if selection fell to a native ending, which the
+        refusal flags are there to prevent.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.core.manifest import SelectionProvenance
+
+        # One record per page: a later call (assemble, with the final bodies) replaces the
+        # loop-time one rather than adding a second.
+        state.events[:] = [
+            ev
+            for ev in state.events
+            if not (getattr(ev, "page_num", None) == page_num and ev.kind == MODEL_RETRY_KIND)
+        ]
+        model_attempts = [
+            a
+            for a in ps.attempts
+            if (a.engine or "") and not (a.engine or "").startswith(("native", "chart_asset"))
+        ]
+        winner = ps.best_output
+        provenance = record.selection_provenance
+        # What SHIPS decides it: a reading the ladder accepted that a later gate withheld
+        # (row binding, the final-body table guard) ships a failure marker, an ERROR page.
+        accepted = (
+            provenance is SelectionProvenance.PASSING_BEST_OUTPUT
+            and record.output.status is not PageStatus.ERROR
+            and winner is not None
+            and not (winner.engine or "").startswith(("native", "chart_asset"))
+            and bool(winner.audit_passed)
+        )
+        shipped_native = provenance in (
+            SelectionProvenance.NATIVE_FALLBACK,
+            SelectionProvenance.NATIVE_CLEAN,
+        )
+        why = ""
+        if not accepted:
+            why = (
+                (getattr(winner, "judge_reason", "") or "")
+                or (getattr(winner, "rejection_class", "") or "")
+                or ("no model reading was produced" if not model_attempts else "not accepted")
+            )
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=MODEL_RETRY_KIND,
+                engine=(model_attempts[-1].engine if model_attempts else "") or "",
+                detail=(
+                    f"refused native table ({ps.native_table_model_retry}) was handed to the "
+                    "model ladder: "
+                    + (
+                        "reading accepted"
+                        if accepted
+                        else f"reading not accepted ({why}); the failed-table floor ships"
+                    )
+                ),
+                data={
+                    "reason": ps.native_table_model_retry,
+                    "attempted": bool(model_attempts),
+                    "accepted": accepted,
+                    "why_not_accepted": why,
+                    "model_attempts": len(model_attempts),
+                    "selection_provenance": provenance.value,
+                    "ending": record.disposition.ending.value,
+                    "primary_reason": record.disposition.primary_reason.value,
+                    "shipped_refused_native_grid": shipped_native,
+                },
+            )
+        )
+
     def _available_engines_for_agentic(self) -> list:
         """Probe which known providers are actually usable right now.
 
@@ -17392,6 +17661,59 @@ class UnifiedPipeline:
         tmp_path.rename(frag_path)
         return frag_path
 
+    @staticmethod
+    def _record_damaged_layer_events(state: DocumentState, page_num: int, ps, winning_out) -> None:
+        """#1306: one aggregated control-byte event per page and one event per hidden footnote stripped.
+
+        Called by every sidecar flush, so an event equal to one the page already has is not
+        added again. A page restored on resume carries none of the guard's page state and
+        adds nothing; its events come back from the sidecar (``_RESUME_REPLAYED``).
+        """
+        if ps is None or winning_out is None:
+            return
+        import json
+
+        from socr.core.audit_log import AuditEvent
+        from socr.core.damaged_layer import REPLACEMENT_CHAR
+        from socr.core.manifest import engine_ships_native_text
+
+        wanted: list[tuple[str, str, dict]] = []
+        controls = getattr(ps, "control_bytes_replaced", None) or {}
+        if controls and REPLACEMENT_CHAR in (winning_out.text or ""):
+            wanted.append(
+                (
+                    CONTROL_BYTES_KIND,
+                    CONTROL_BYTES_EVENT_DETAIL,
+                    {"page": page_num, "count": sum(controls.values()), "codes": dict(controls)},
+                )
+            )
+        if engine_ships_native_text(winning_out.engine):
+            for stripped in getattr(ps, "hidden_footnotes_stripped", None) or []:
+                wanted.append(
+                    (
+                        HIDDEN_FOOTNOTE_KIND,
+                        HIDDEN_FOOTNOTE_EVENT_DETAIL,
+                        {"page": page_num, **stripped},
+                    )
+                )
+        have = {
+            (ev.kind, json.dumps(ev.data or {}, sort_keys=True))
+            for ev in state.events
+            if ev.page_num == page_num and ev.kind in (CONTROL_BYTES_KIND, HIDDEN_FOOTNOTE_KIND)
+        }
+        for kind, detail, data in wanted:
+            if (kind, json.dumps(data, sort_keys=True)) in have:
+                continue
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=kind,
+                    engine=winning_out.engine or "",
+                    detail=detail,
+                    data=data,
+                )
+            )
+
     def _flush_page_sidecar(
         self,
         state: DocumentState,
@@ -17474,6 +17796,7 @@ class UnifiedPipeline:
             record = finalized_page_record(state, page_num, whole_doc)
 
         winning_out = record.output if record is not None else None
+        self._record_damaged_layer_events(state, page_num, ps, winning_out)
         winning_dict = winning_out.to_dict() if winning_out is not None else {}
         disp = record.disposition if record is not None else None
         disposition_dict = disp.to_dict() if disp is not None else None
@@ -17535,7 +17858,14 @@ class UnifiedPipeline:
             # Keep the terminal disposition directly addressable for consumers
             # that inspect the sidecar without unpacking ``winning_output``.
             "failure_mode": winning_dict.get("failure_mode", "none"),
-            "audit_passed": winning_dict.get("audit_passed", False),
+            # #1244 C1: the PUBLISHED label, derived from status and the verdict. The
+            # internal winner-selection acceptance (#252) is ``winning_output.audit_passed``
+            # below and is what resume reads; this key is never read back for selection.
+            "audit_passed": published_audit_passed(
+                winning_dict.get("status", "missing"),
+                winning_dict.get("audit_passed", False),
+                record.verdict if record is not None else None,
+            ),
             # terminal: True when this is the definitive sidecar written at
             # assembly time; False for a provisional mid-run incremental
             # flush from PP-2 that may be superseded by the authoritative write.
@@ -17657,6 +17987,11 @@ class UnifiedPipeline:
             # TR-3: per-region geometry hard-fail flag (D3 floor trigger).
             "native_table_unverifiable": (
                 bool(getattr(ps, "native_table_unverifiable", False)) if ps else False
+            ),
+            # #1253 B3: the refusal reason a model retry ran on ("" = none). Persisted so a
+            # resumed page keeps the #262 exemption and the restored record agrees.
+            "native_table_model_retry": (
+                str(getattr(ps, "native_table_model_retry", "") or "") if ps else ""
             ),
             # GH-371: native failed-region identity and the expected number of
             # regions, used to preserve surrounding prose on D3 resume.
@@ -19102,6 +19437,8 @@ class UnifiedPipeline:
             )
             # TR-3: restore per-region verifier flag and D3 PNG ref.
             ps.native_table_unverifiable = bool(meta.get("native_table_unverifiable", False))
+            _retry_reason = meta.get("native_table_model_retry", "")
+            ps.native_table_model_retry = _retry_reason if isinstance(_retry_reason, str) else ""
             # #1156 (Argon, stack review): without this a resumed page comes back with
             # no suspicion, so the assemble re-flush drops the flag and its mark, and the
             # page reads as checked on evidence nothing can see.
@@ -20554,6 +20891,18 @@ class UnifiedPipeline:
             )
         }
         words_missing_pages = sorted(words_missing_by_page)
+        # #1306: pages that ship a control byte of their own layer as U+FFFD. A repaired page
+        # is still not a CHECKED one (the glyph it stood for is unknown), so the document must
+        # not report SUCCESS over it. Read from the verdict, which survives a resume.
+        control_bytes_pages = sorted(
+            r.output.page_num
+            for r in pre_records
+            if r.verdict is not None
+            and any(
+                c.check is _Check.CONTROL_BYTES and c.result is _CheckResult.FAIL
+                for c in r.verdict.clauses
+            )
+        )
         # #961: the same retained-native condition for a scan's invisible OCR layer.
         invisible_retained_pages = [
             n
@@ -20779,6 +21128,7 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not numbers_disagree_pages
         pages_ok = pages_ok and not numbers_dropped_pages
         pages_ok = pages_ok and not words_missing_pages
+        pages_ok = pages_ok and not control_bytes_pages
         pages_ok = pages_ok and not garbled_math_retained_pages
         pages_ok = pages_ok and not flattened_table_pages
         pages_ok = pages_ok and not figure_unread_pages
@@ -20921,6 +21271,17 @@ class UnifiedPipeline:
             # document, for the same reason a withheld table is not.
             and not unshipped_figure_marked_pages
         )
+        # #697/#1244: the recovered-prose bucket was computed and reported but never gated.
+        pages_ok = pages_ok and not scanned_prose_recovered_pages
+        # #1244 C1: the invariant behind every bucket above. A document is clean only if
+        # EVERY page has a final record with status SUCCESS; the bucket list is an allowlist
+        # of known defects, so a new defect class would repeat the hole. ``pages_ok`` is
+        # recorded first so the reason is named only where no bucket already names one.
+        incomplete_only_pages: list[int] = []
+        _incomplete_pages = _pages_not_success(pre_records, state.handle.page_count)
+        if pages_ok and _incomplete_pages:
+            incomplete_only_pages = _incomplete_pages
+        pages_ok = pages_ok and not _incomplete_pages
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS
@@ -21110,6 +21471,7 @@ class UnifiedPipeline:
             or numbers_disagree_pages
             or numbers_dropped_pages
             or words_missing_pages
+            or control_bytes_pages
             or garbled_math_retained_pages
             or flattened_table_pages
             or figure_unread_pages
@@ -21724,6 +22086,10 @@ class UnifiedPipeline:
                     console.print(
                         f"  [yellow]{words_missing_cli_line(words_missing_pages)}[/yellow]"
                     )
+                if control_bytes_pages:
+                    console.print(
+                        f"  [yellow]{control_bytes_cli_line(control_bytes_pages)}[/yellow]"
+                    )
                 if garbled_math_retained_pages:
                     console.print(
                         f"  [yellow]{len(garbled_math_retained_pages)} page(s) shipped native "
@@ -22126,6 +22492,8 @@ class UnifiedPipeline:
             cost=state.total_cost,
             audit_passed=status == DocumentStatus.SUCCESS,
         )
+        if incomplete_only_pages:
+            final_result.error = _pages_not_success_note(incomplete_only_pages)
         # GH-189 piece 7: the chart crops must reach ``figure_refs`` even with
         # ordinary figure extraction switched off, and ``final_result.figures``
         # is the carrier every terminal sidecar writer reads.
@@ -22367,6 +22735,13 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_words_note}"
             else:
                 final_result.error = _words_note
+        # #1306: and the pages that ship control bytes of their own layer as U+FFFD.
+        if control_bytes_pages:
+            _control_note = control_bytes_note(control_bytes_pages)
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_control_note}"
+            else:
+                final_result.error = _control_note
 
         # Save markdown + metadata BEFORE the figure phase: the describe loop
         # makes long paid API calls, and any exception there used to lose the
@@ -22559,6 +22934,10 @@ class UnifiedPipeline:
                 # #1282: the page loop committed its repairs against the page's loop-time
                 # record; this one is authoritative.
                 self._reconcile_point_repairs(state, final_records)
+                for _final in final_records:
+                    _final_ps = state.pages.get(_final.output.page_num)
+                    if _final_ps is not None and _final_ps.native_table_model_retry:
+                        self._restate_native_table_model_retry(state, _final)
                 final_page_outputs = [record.output for record in final_records]
                 self._record_table_counts(state, final_records)
                 emission_failures = [
@@ -22631,6 +23010,11 @@ class UnifiedPipeline:
                     )
                     final_result.pages[0].text = final_text
                     self._save_markdown(state, final_text, output_dir)
+                # #1244 C1: the FINAL records are authoritative. A page the figure phase,
+                # the final-body guard or ``_preserve_chart_regions`` demoted after
+                # ``pre_records`` was read must carry up to the document status, the
+                # metadata and the CLI result, not only to its own sidecar.
+                _late_incomplete = _pages_not_success(final_records, state.handle.page_count)
             else:
                 logger.warning(
                     "GH-226 final-body guard: split yielded %d page(s), expected %d; "
@@ -22638,6 +23022,47 @@ class UnifiedPipeline:
                     len(final_bodies),
                     state.handle.page_count,
                 )
+                # #1244 C1: no final record exists to read, so FAIL CLOSED: every page is
+                # a page without a final record, hence incomplete. A document that was
+                # SUCCESS on the pre-figure records cannot stay completed on a body whose
+                # pages cannot be told apart.
+                _late_incomplete = _pages_not_success([], state.handle.page_count)
+                # The sidecars flushed above are terminal SUCCESS records of pages whose
+                # final body could not be confirmed. Demote them to provisional so the
+                # per-page resume gate (``_load_terminal_page``) reprocesses them instead
+                # of skipping a page this run could not vouch for.
+                for pnum in range(1, state.handle.page_count + 1):
+                    try:
+                        self._flush_page_sidecar(
+                            state,
+                            pnum,
+                            output_dir,
+                            terminal=False,
+                            extra_figures=list(getattr(final_result, "figures", []) or []),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "#1244 C1 [%s]: could not demote page %d sidecar (%s)",
+                            state.handle.path.name,
+                            pnum,
+                            exc,
+                        )
+            if _late_incomplete and final_result.status == DocumentStatus.SUCCESS:
+                _late_note = _pages_not_success_note(_late_incomplete)
+                final_result.status = DocumentStatus.AUDIT_FAILED
+                final_result.audit_passed = False
+                state.status = DocumentStatus.AUDIT_FAILED
+                final_result.error = (
+                    f"{final_result.error}; {_late_note}" if final_result.error else _late_note
+                )
+                self._write_metadata(
+                    state,
+                    final_result,
+                    output_dir,
+                    has_text,
+                    provisional=figure_phase_failed,
+                )
+                metadata_rewritten = True
 
         # GH-993: a final recount that differs from the one already persisted (a caption
         # table the figure phase added, a guard rewrite) must reach metadata.json, which

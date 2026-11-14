@@ -106,16 +106,22 @@ def _joins(parts: list[str], targets: set[str]) -> Counter:
     return found
 
 
-def missing_words(reference: WordReference, shipped: str, *, figure_shipped: bool) -> list[str]:
+def missing_words(
+    reference: WordReference, shipped: str, *, figure_shipped: bool, excused: str = ""
+) -> list[str]:
     """The reference's words *shipped* does not carry, in reference order, with repeats.
 
     *shipped* is the page's own reading (socr's marks and notes already removed by the
     caller). *figure_shipped* is whether the page ships a picture, which carries the words
-    inside chart and image boxes.
+    inside chart and image boxes. *excused* is text the page deliberately does not ship although
+    its layer prints it (#1306: a hidden footnote wrapper stripped because the printed copy of the
+    note is on the page); its words are subtracted from what is owed, one for one, so removing the
+    duplicate causes no missing word and a word printed only there stays owed.
     """
     owed = word_tokens(reference.text)
     if not figure_shipped:
         owed += word_tokens(reference.figure_text)
+    owed -= word_tokens(excused)
     joined = _INWORD_HYPHEN_RE.sub(r"\1\2", _BREAK_HYPHEN_RE.sub(r"\1\2", shipped or ""))
     have = word_tokens(shipped) | word_tokens(joined)
     ligatures = set().union(*(_ligature_variants(w) for w in have)) if have else set()

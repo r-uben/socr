@@ -26,6 +26,7 @@ from socr.core.text_coverage import (
 )
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables import image_locate
+from c1_support import assert_clean_or_only_unchecked
 
 
 def test_loaded_source_is_this_checkout() -> None:
@@ -272,10 +273,15 @@ def test_vector_drawn_text_is_flagged(tmp_path: Path, providers) -> None:
     # process() returns a one-page EngineResult (whole-doc text). Per-page
     # status lives on the sidecar; document status is the difference pin.
     assert on.status is DocumentStatus.AUDIT_FAILED
+    # The off arm is a plain page with no defect of its own (asserted again below: SUCCESS, no
+    # coverage verdict): the document stays SUCCESS and the check is the whole difference.
     assert off.status is DocumentStatus.SUCCESS
-    assert on.status != off.status
+    assert on.status is not off.status
     sidecar = next((tmp_path / "on").rglob("pages/00001.json"))
     rec = json.loads(sidecar.read_text())
+    off_rec = json.loads(next((tmp_path / "off").rglob("pages/00001.json")).read_text())
+    assert off_rec["failure_mode"] != rec["failure_mode"]
+    assert uncovered_text_marker(1) not in (off.pages[0].text or "")
     assert rec["status"] == PageStatus.WARNING.value
     assert rec["failure_mode"] == FailureMode.TEXT_INK_UNREAD.value
     assert rec["text_coverage"] == "flagged"
@@ -340,10 +346,19 @@ def test_light_on_dark_vector_is_flagged(tmp_path: Path, providers) -> None:
     on = _run(_pipeline(check_text_coverage=True), pdf, tmp_path / "on", providers)
     off = _run(_pipeline(check_text_coverage=False), pdf, tmp_path / "off", providers)
     assert on.status is DocumentStatus.AUDIT_FAILED
-    assert off.status is DocumentStatus.SUCCESS
-    assert on.status != off.status
+    # #1244 C1: white lettering over a dark field is vector-drawn, so the off arm ships the figure
+    # without its values (``visual values not transcribed``): its page is WARNING for that reason,
+    # and its document is no longer SUCCESS. What the coverage check adds is read off the page.
+    assert_clean_or_only_unchecked(
+        off,
+        pages=(1,),
+        other_notes=("visual values not transcribed", "in-image text on these figures"),
+    )
     sidecar = next((tmp_path / "on").rglob("pages/00001.json"))
     rec = json.loads(sidecar.read_text())
+    off_rec = json.loads(next((tmp_path / "off").rglob("pages/00001.json")).read_text())
+    assert off_rec["failure_mode"] != rec["failure_mode"]
+    assert uncovered_text_marker(1) not in (off.pages[0].text or "")
     assert rec["status"] == PageStatus.WARNING.value
     assert rec["failure_mode"] == FailureMode.TEXT_INK_UNREAD.value
     assert rec["text_coverage"] == "flagged"
@@ -520,10 +535,15 @@ def test_unknown_does_not_ship_success(tmp_path: Path) -> None:
         on = _run(on_pipe, pdf, tmp_path / "on", [PROFILE_QWEN_LOCAL])
     off = _run(off_pipe, pdf, tmp_path / "off", [PROFILE_QWEN_LOCAL])
     assert on.status is DocumentStatus.AUDIT_FAILED
+    # The off arm is a clean text page; the render failure only exists in the on arm. The document
+    # stays SUCCESS without the check, so the check is the whole difference.
     assert off.status is DocumentStatus.SUCCESS
-    assert on.status != off.status
+    assert on.status is not off.status
     sidecar = next((tmp_path / "on").rglob("pages/00001.json"))
     rec = json.loads(sidecar.read_text())
+    off_rec = json.loads(next((tmp_path / "off").rglob("pages/00001.json")).read_text())
+    assert off_rec["failure_mode"] != rec["failure_mode"]
+    assert uncovered_text_marker(1) not in (off.pages[0].text or "")
     assert rec["status"] == PageStatus.WARNING.value
     assert rec["failure_mode"] == FailureMode.TEXT_COVERAGE_UNKNOWN.value
     assert rec["text_coverage"] == "unknown"
@@ -587,10 +607,19 @@ def test_chart_asset_flag_demotes_document(tmp_path: Path, providers) -> None:
     with patch.object(off_pipe, "_is_chart_asset_page", return_value=True):
         off = _run(off_pipe, pdf, tmp_path / "off", providers)
     assert on.status is DocumentStatus.AUDIT_FAILED
-    assert off.status is DocumentStatus.SUCCESS
-    assert on.status != off.status
+    # #1244 C1: ``_is_chart_asset_page`` is forced, so the chart ships as an image asset without
+    # its values (``visual values not transcribed``) and the off page is WARNING for that reason.
+    # What the coverage check adds is read off the page, not the document status.
+    assert_clean_or_only_unchecked(
+        off,
+        pages=(1,),
+        other_notes=("visual values not transcribed", "in-image text on these figures"),
+    )
     sidecar = next((tmp_path / "on").rglob("pages/00001.json"))
     rec = json.loads(sidecar.read_text())
+    off_rec = json.loads(next((tmp_path / "off").rglob("pages/00001.json")).read_text())
+    assert off_rec["failure_mode"] != rec["failure_mode"]
+    assert uncovered_text_marker(1) not in (off.pages[0].text or "")
     assert rec["engine"] == "chart_asset"
     assert rec["status"] == PageStatus.WARNING.value
     assert rec["failure_mode"] == FailureMode.TEXT_INK_UNREAD.value
@@ -812,11 +841,19 @@ def test_coverage_keeps_preexisting_failure_mode(tmp_path: Path, providers) -> N
         patch("socr.pipeline.orchestrator.minus_as_digit_suspect", return_value=True),
     ):
         on = _run(on_pipe, pdf, tmp_path / "on", providers)
-    assert off.status is DocumentStatus.SUCCESS
+    # #1244 C1: the chart is forced to an image asset in both arms, so the off page is WARNING
+    # for the shipped-without-values reason; the on arm differs by its failure mode (MINUS wins).
+    assert_clean_or_only_unchecked(
+        off,
+        pages=(1,),
+        other_notes=("visual values not transcribed", "in-image text on these figures"),
+    )
     assert on.status is DocumentStatus.AUDIT_FAILED
-    assert on.status != off.status
     sidecar = next((tmp_path / "on").rglob("pages/00001.json"))
     rec = json.loads(sidecar.read_text())
+    off_rec = json.loads(next((tmp_path / "off").rglob("pages/00001.json")).read_text())
+    assert off_rec["failure_mode"] != rec["failure_mode"]
+    assert uncovered_text_marker(1) not in (off.pages[0].text or "")
     assert rec["engine"] == "chart_asset"
     assert rec["status"] == PageStatus.WARNING.value
     assert rec["failure_mode"] == FailureMode.NATIVE_MINUS_AS_DIGIT.value

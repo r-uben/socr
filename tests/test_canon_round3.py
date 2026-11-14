@@ -90,6 +90,12 @@ def _backbone_writing_pages(text_by_page):
 
     def _fake(self, state, output_dir):
         for page_num, text in text_by_page.items():
+            # #1244 C1: a document is completed only when every page is SUCCESS, and a model
+            # reading is CHECKED only against a born-digital layer of its own that shares a
+            # number with it. Give the stand-in page one, so the fixture stays a clean page.
+            text = f"{text} 4.2"
+            state.pages[page_num].own_layer_text = text
+            state.pages[page_num].is_born_digital = True
             state.pages[page_num].best_output = PageOutput(
                 page_num=page_num,
                 text=text,
@@ -329,7 +335,10 @@ class TestFailureRecordConformance:
         def _selective_backbone(self, state, output_dir):
             # "bad.pdf" produces no text (failure); "ok.pdf" succeeds.
             if state.handle.path.stem == "ok":
-                for n, t in ({1: "ok one", 2: "ok two"}).items():
+                for n, t in ({1: "ok one 4.2", 2: "ok two 4.2"}).items():
+                    # #1244 C1: CHECKED needs a born-digital layer sharing a number.
+                    state.pages[n].own_layer_text = t
+                    state.pages[n].is_born_digital = True
                     state.pages[n].best_output = PageOutput(
                         page_num=n,
                         text=t,

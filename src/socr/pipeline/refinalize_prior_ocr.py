@@ -35,6 +35,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from socr.core.verdict import published_audit_passed
 
 #: The floors this tool may replace. Both are reachable only on a POSITIVE prior-OCR
 #: finding, so the recorded ending is itself the evidence the page qualifies.
@@ -349,7 +350,9 @@ def _updated_sidecar(sidecar: dict, record) -> dict:
     out["disposition"] = record.disposition.to_dict()
     out["status"] = winning.get("status", "missing")
     out["failure_mode"] = winning.get("failure_mode", "none")
-    out["audit_passed"] = winning.get("audit_passed", False)
+    out["audit_passed"] = published_audit_passed(
+        out["status"], winning.get("audit_passed", False), record.verdict
+    )
     out["engine"] = winning.get("engine", "")
     out["provider"] = winning.get("provider_id", "")
     if record.verdict is not None:

@@ -48,6 +48,10 @@ _TABLE_CAPTION_RE = re.compile(r"^\s*(Table|TABLE)\s+([0-9]+[A-Za-z]?|[IVXLC]+)\
 # GH-994: a horizontal stroke is a drawn line within this many pt of level, or a filled
 # rect thinner than the second bound. Booktabs rules are hairlines; both are the cut-offs
 # the GH-994 census measured with.
+#: #1306: MuPDF's ``char_flags`` bits for a glyph that is inked (``FZ_STEXT_FILLED`` 16,
+#: ``FZ_STEXT_STROKED`` 32). Text drawn in render mode 3 has neither. A span without the key is
+#: taken as inked (kept, fail closed).
+_INKED_FLAGS = 16 | 32
 _HRULE_LINE_SLOPE_PT = 1.0
 _HRULE_RECT_MAX_HEIGHT_PT = 2.0
 
@@ -208,6 +212,23 @@ _GLUE_PUNCT = _OPENERS + _CLOSERS + _HYPHENS + "−"
 #: The one-letter English article. It is the only single letter that is a word, so it is
 #: the only one ``_is_printed_fraction`` has to tell apart from a variable.
 _ARTICLE = "a"
+#: Words that unit a number as "%" does: a fraction glued to a number and followed by one
+#: is a printed rate whatever comes next.
+_PERCENT_WORDS = frozenset({"percent", "pct"})
+#: Names that start a math operand in an equation. After a number they are the right-hand
+#: side of '=' ("2 = sin x"), never prose: "2 ¼ sin x" must not read as a printed fraction.
+#: A fixed list of standard function names, not corpus-tuned.
+_MATH_FUNCTIONS = frozenset({"sin", "cos", "tan", "log", "ln", "exp", "max", "min", "lim", "det"})
+#: Characters of a bare operator token ("x ¼ y + z", "x ¼ y 2"): ASCII arithmetic and
+#: relations, the Unicode relations (<= >= != ~= ==) and arithmetic signs (minus, times,
+#: divide, dot, plus-minus, asterisk and dot operators), and the set/logic relations.
+_OPERATOR_CHARS = frozenset("+-−*/^=<>×÷·±≤≥≠≈≡≅∼∝∗⋅∘∈∉⊂⊃⊆⊇∪∩∧∨")
+#: Short English words that are vowel-free or one-syllable connectives. They are prose in
+#: "2 ½ by 4" (dimensions), never a compact variable.
+_PROSE_FUNCTION_WORDS = frozenset({"by", "to", "of", "or", "in", "on", "at", "per", "and", "with"})
+#: A math function counts as an operand only with a math-shaped continuation. "min" is
+#: also minutes: "2 ½ min", "3 ¼ min later" stay printed.
+_FUNCTION_HEAD = re.compile(r"([A-Za-z]+)(.*)", re.DOTALL)
 
 
 def _is_plain_word(token: str) -> bool:
@@ -259,6 +280,59 @@ def _is_operator_shape(left_tok: str, right_tok: str) -> bool:
     )
 
 
+def _is_math_operand(right: list[str]) -> bool:
+    """True if the right-hand side after a number starts an equation operand.
+
+    A math function (``sin``, ``log``), a single-letter variable (``x``), or a vowel-free
+    compact variable followed by an operator or a number (``xy + 1``, ``xy 2``). Greek
+    and bracketed expressions are already not plain words, so they never reach this test.
+    """
+    if not right:
+        return False
+    word = _edge_piece(right[0], last=False).strip(_WORD_EDGE_PUNCT)
+    head = _FUNCTION_HEAD.match(right[0].lstrip(_OPENERS))
+    if head and head.group(1).lower() in _MATH_FUNCTIONS:
+        return _is_math_continuation(head.group(2), right[1:])
+    if len(word) == 1 and _is_latin_word(word):
+        return True
+    if (
+        word.lower() in _PROSE_FUNCTION_WORDS
+        or not (_is_compact_variable(word) and _is_vowel_free(word))
+        or len(right) < 2
+    ):
+        return False
+    nxt = right[1].strip(_WORD_EDGE_PUNCT)
+    return _is_number(nxt) or bool(nxt) and set(nxt) <= _OPERATOR_CHARS
+
+
+def _is_math_continuation(rest: str, after: list[str]) -> bool:
+    """True if what follows a function name is math-shaped: ``min(x, y)``, ``sin x``.
+
+    ``rest`` is the remainder of the function's own token; ``after`` the tokens behind
+    it. A bracket, digit or operator glued to the name, or a next token that is a variable,
+    number, operator, bracketed or non-Latin (Greek) is math. A name at the end of the
+    line, or before prose ("min later", "min."), is not.
+    """
+    if rest and rest[0] in _OPENERS + "".join(_OPERATOR_CHARS) + "0123456789":
+        return True
+    if rest.strip(_WORD_EDGE_PUNCT) or not after:
+        return False
+    nxt = after[0].strip(_WORD_EDGE_PUNCT)
+    if not nxt:
+        return after[0][0] in _OPENERS
+    return (
+        after[0][0] in _OPENERS
+        or _is_number(nxt)
+        or set(nxt) <= _OPERATOR_CHARS
+        or not _is_latin_word(nxt.translate({ord(h): None for h in _HYPHENS}))
+        or (
+            _is_compact_variable(nxt)
+            and nxt.lower() not in _PROSE_FUNCTION_WORDS
+            and (len(nxt) == 1 or _is_vowel_free(nxt))
+        )
+    )
+
+
 def _is_number(token: str) -> bool:
     word = token.strip(_WORD_EDGE_PUNCT).lstrip(_NUMBER_SIGNS)
     return bool(word) and all(ch.isdigit() or ch in ".," for ch in word)
@@ -284,6 +358,11 @@ def _operand_tokens(text: str) -> list[str]:
     ]
 
 
+def _is_percent_word(token: str) -> bool:
+    """True for the words that unit a number like '%' does ("2 ½ percent", "2 ½ pct")."""
+    return token.strip(_WORD_EDGE_PUNCT).lower() in _PERCENT_WORDS
+
+
 def _is_printed_fraction(line: str, i: int) -> bool:
     """True if the fraction glyph at ``line[i]`` is a real printed fraction.
 
@@ -300,6 +379,8 @@ def _is_printed_fraction(line: str, i: int) -> bool:
     * L is a number: printed iff a ``%``, a word or the end of the line follows
       (``1 ¼ percent``, ``8 ½%``, ``is 2 ½`` + wrapped ``percent``). A line never ends on
       the '=' of ``2 ¼``: mojibake '=' sits between two operands.
+      A math function, a one-letter variable or a vowel-free variable before an operator or
+      number after the glyph is an operand: ``2 ¼ sin x``, ``1 ¼ x + y`` are operator.
     * L is the article "a": printed iff a word follows and the word after that is a word
       or absent (``a ¼ point cut``). ``a ¼ sin x`` ends on a variable: operator.
     * L and R are both compact (at most two letters, or no vowel) and one is vowel-free
@@ -337,9 +418,13 @@ def _is_printed_fraction(line: str, i: int) -> bool:
     # The neighbour is the piece against the glyph: "mid-2018—about ½" -> "about".
     left_tok = _edge_piece(left[-1], last=True) if left else ""
     right_tok = _edge_piece(right[0], last=False) if right else ""
+    if _is_number(left_tok) and (percent or _is_percent_word(right_tok)):
+        return True  # "2 ½% a year", "2 ½% by 2027", "8 ½%, then": a rate, whatever follows
     if not (left_tok or right_tok) or _is_number(right_tok):
         return False
     if _is_number(left_tok):
+        if _is_math_operand(right):
+            return False  # "2 ¼ sin x", "1 ¼ x + y": the '=' of an equation
         return percent or not right_tok or _is_plain_word(right_tok)
     if left_tok.lower() == _ARTICLE:
         return _is_plain_word(right_tok) and (len(right) < 2 or _is_plain_word(right[1]))
@@ -2830,6 +2915,12 @@ class PageAssessment:
     #: layer, a failed computation, or no word), never "nothing missing". In memory only.
     own_layer_word_reference: str = ""
     own_layer_figure_words: str = ""
+    #: #1306: the glyphs the page PAINTS (``damaged_layer.painted_form``): the text read
+    #: ignoring ``/ActualText`` replacement text, minus invisible (render mode 3 or alpha 0)
+    #: and off-page text. A hidden accessibility wrapper is in the extracted layer but not
+    #: here; that difference is the evidence the wrapper is hidden. ``None`` = not read (a
+    #: failed scan), which keeps every wrapper.
+    painted_layer_text: str | None = None
     #: #961: the scan raised, so the page is UNKNOWN. Treated exactly as a hit (fail closed).
     invisible_text_scan_failed: bool = False
     #: #960: the non-zero :class:`GarbledMathSignals` counts (empty when clean). Any entry
@@ -3667,6 +3758,41 @@ class BornDigitalDetector:
             logger.warning("#1294: the layer's words could not be read", exc_info=True)
             return "", ""
 
+    def _painted_layer_text(self, page: fitz.Page) -> str | None:
+        """#1306: the page's painted glyphs, or ``None`` when they could not be read.
+
+        The page's text read with ``TEXT_IGNORE_ACTUALTEXT`` (the glyphs the content stream
+        draws, not the replacement text a tagged PDF attaches to them: the Fed's hidden
+        footnote wrapper is such replacement text) and clipped to the page, minus spans whose
+        alpha is 0 (fully transparent text) or that have neither the filled nor the stroked
+        ``char_flags`` bit (render mode 3 at any opacity). Not
+        ``get_texttrace``: on PyMuPDF 1.27.2 it corrupts a refcount and kills the interpreter
+        after a few hundred pages of the Fed corpus. A failure returns ``None``, logged: the
+        caller keeps what it cannot show is hidden.
+        """
+        try:
+            from socr.core.damaged_layer import painted_form
+
+            flags = (
+                fitz.TEXT_PRESERVE_LIGATURES
+                | fitz.TEXT_PRESERVE_WHITESPACE
+                | fitz.TEXT_MEDIABOX_CLIP
+                | fitz.TEXT_IGNORE_ACTUALTEXT
+            )
+            chars: list[str] = []
+            for block in page.get_text("dict", flags=flags)["blocks"]:
+                for line in block.get("lines", ()):
+                    for span in line["spans"]:
+                        # alpha is opacity; the filled / stroked bits say the glyph is
+                        # inked at all (render mode 3 has neither, at any opacity).
+                        inked = span.get("char_flags", _INKED_FLAGS) & _INKED_FLAGS
+                        if span.get("alpha", 255) and inked:
+                            chars.append(span["text"])
+            return painted_form(" ".join(chars))
+        except Exception:
+            logger.warning("#1306: the page's painted glyphs could not be read", exc_info=True)
+            return None
+
     def _assess_page(self, page: fitz.Page, page_num: int) -> PageAssessment:
         """Assess a page and stamp its dominant text direction onto the result.
 
@@ -3759,6 +3885,7 @@ class BornDigitalDetector:
             assessment.own_layer_word_reference,
             assessment.own_layer_figure_words,
         ) = self._own_layer_word_reference(page)
+        assessment.painted_layer_text = self._painted_layer_text(page)
         # #1144 round 4: the page's /Rotate value, needed by the prose-recovery
         # floor. ``get_text("words")`` reports UNROTATED coordinates while
         # ``find_tables()`` reports rotated ones, so on a /Rotate 90 page the two

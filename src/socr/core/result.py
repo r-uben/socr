@@ -287,6 +287,9 @@ class FailureMode(str, Enum):
     #: FAIL or UNKNOWN). Shipped, marked with the words, never CHECKED. In
     #: ``PERMANENTLY_UNRESOLVABLE_MODES``: the same config produces the same page.
     WORDS_MISSING_FROM_PAGE = "words_missing_from_page"
+    #: #1306: the page's own text layer holds control bytes, shipped as U+FFFD under a mark.
+    #: In ``PERMANENTLY_UNRESOLVABLE_MODES``: the same layer gives the same bytes.
+    CONTROL_BYTES_REPLACED = "control_bytes_replaced"
     #: #658: a scanned table page failed the source-evidence gate because this
     #: host has NO classical OCR backend, so the gate never read the pixels and
     #: holds no evidence about the table at all.

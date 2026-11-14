@@ -50,6 +50,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
+from socr.core.verdict import published_audit_passed
 
 #: The per-document record of what this tool changed and what the run had shipped.
 LOG_NAME = "refinalized_own_text.json"
@@ -158,6 +159,8 @@ def _page_state(sidecar: dict, pa):
             setattr(p, name, getattr(pa, name))
     # #1270: tolerant of a stand-in analysis that predates the field; absent is "not shown".
     p.layer_refused_for_shape_alone = bool(getattr(pa, "layer_refused_for_shape_alone", False))
+    # #1306: the footnote wrapper strip reads the painted glyphs; None (not read) keeps wrappers.
+    p.painted_layer_text = getattr(pa, "painted_layer_text", None)
     p.prior_ocr_layer_suspect = bool(
         sidecar.get("prior_ocr_layer_suspect")
     ) or _analysis_finds_prior_ocr(pa)
@@ -457,7 +460,9 @@ def _updated_sidecar(
     out = dict(sidecar)
     out["status"] = winning.get("status", "missing")
     out["failure_mode"] = winning.get("failure_mode", "none")
-    out["audit_passed"] = winning.get("audit_passed", False)
+    out["audit_passed"] = published_audit_passed(
+        out["status"], winning.get("audit_passed", False), verdict
+    )
     out["verdict"] = verdict.to_dict()
     out["winning_output"] = winning
     out["page_fingerprint"] = (
@@ -560,6 +565,45 @@ def _place_note(error: str, note: str, later_notes: tuple[str, ...]) -> str:
     if at >= 0:
         return f"{error[:at]}; {note}{error[at:]}"
     return f"{error}; {note}"
+
+
+def _record_unfinished_pages(
+    doc_dir: Path, meta_path: Path, meta: dict, sidecar_paths: list[Path]
+) -> None:
+    """#1244 C1 completion rule, applied to a finished document: a ``completed`` status
+    becomes ``partial``, here and in the root index, with the run's note naming the pages
+    that are not SUCCESS with a true published ``audit_passed``. A worse status is left as
+    the run wrote it, and a document already off ``completed`` is not touched again."""
+    from ocr_output_contract import Status
+
+    from socr.core.verdict import pages_not_success_note
+
+    unfinished = sorted(
+        int(sc["page_num"])
+        for sc in map(_read_json, sidecar_paths)
+        if sc.get("terminal") is True
+        and not (sc.get("status") == "success" and sc.get("audit_passed") is True)
+    )
+    if not unfinished:
+        return
+    note = pages_not_success_note(unfinished)
+
+    def recorded(record: dict) -> bool:
+        if record.get("status") != Status.COMPLETED.value:
+            return False
+        record["status"] = Status.PARTIAL.value
+        error = record.get("error") or ""
+        record["error"] = f"{error}; {note}" if error else note
+        return True
+
+    if recorded(meta):
+        _write_json(meta_path, meta)
+    root_path = doc_dir.parent / "metadata.json"
+    if root_path.is_file():
+        root = _read_json(root_path)
+        entry = (root.get("files") or {}).get(meta.get("key"))
+        if isinstance(entry, dict) and recorded(entry):
+            _write_json(root_path, root)
 
 
 def _record_disagreement(
@@ -830,6 +874,18 @@ def refinalize_document(
             record = page_word_check_record(shipped, state)
             if record is not None and "text_layer_words" not in sidecar:
                 whole = {**(whole if whole is not None else sidecar), "text_layer_words": record}
+            # #1244 C1: re-derive the PUBLISHED audit_passed here too. A page an earlier pass
+            # (or a run from before the derivation) demoted keeps a stale ``true`` otherwise,
+            # because this path never goes through ``_updated_sidecar``.
+            if sidecar.get("terminal") is True:
+                published = published_audit_passed(
+                    sidecar.get("status"),
+                    (sidecar.get("winning_output") or {}).get("audit_passed", False),
+                    sidecar.get("verdict"),
+                )
+                current = whole if whole is not None else sidecar
+                if current.get("audit_passed") != published:
+                    whole = {**current, "audit_passed": published}
             if whole is not None:
                 repairs.append((path, whole))
             continue
@@ -984,6 +1040,10 @@ def refinalize_document(
         _record_disagreement(
             doc_dir, meta_path, meta, missing, words=True, data_by_page=words_by_page
         )
+    # #1244 C1: a document is completed only when every page is SUCCESS with a true published
+    # audit_passed. Read from the sidecars as they now are (an interrupted pass is finished
+    # by the next one), after the repairs above have re-derived the label.
+    _record_unfinished_pages(doc_dir, meta_path, meta, sidecar_paths)
     _recount_tables(doc_dir, meta_path, meta)
     return changes
 

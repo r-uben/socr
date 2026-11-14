@@ -785,9 +785,11 @@ def test_the_document_is_not_clean_when_a_model_wins_on_a_suspect_scan(tmp_path:
         p.is_born_digital = True
         p.native_text = "the earlier OCR layer, numbers included: 3 Y, per cent"
         p.prior_ocr_layer_suspect = suspect
+        # #1244 C1: the control reading is CHECKED only against a layer sharing a number with it.
+        p.own_layer_text = "A MODEL READING THE JUDGE ACCEPTED 3"
         winner = PageOutput(
             page_num=1,
-            text="A MODEL READING THE JUDGE ACCEPTED",
+            text="A MODEL READING THE JUDGE ACCEPTED 3",
             status=PageStatus.SUCCESS,
             engine="qwen",
             audit_passed=True,

@@ -48,9 +48,19 @@ _VERDICTS = [
     ("deflator are now likely to top out in the 2 ½ % to 2 ¾% range in 2011Q3.", True),
     ("it grew 1 ¼ percent", True),
     ("1 ¼ percent", True),
+    # printed: a rate glued to a number, whatever follows the unit
+    ("2 ½% a year", True),
+    ("2 ½% by 2027", True),
+    ("2½% in 2026", True),
+    ("8 ½%, then", True),
+    ("2 ½ percent a year", True),
+    ("2 ½ pct 2027", True),
     # printed: after an article or word, before a word
     ("the Committee raised rates by a ¼ percentage point cut in rates today", True),
     ("a ¼ point cut", True),
+    ("8 ½%", True),
+    ("2 ½ million", True),
+    ("2 ½ to 3 percent", True),
     ("the ½ share of output", True),
     ("raised it ¼ percentage point", True),
     # printed: hyphen compound, bracketed series
@@ -99,6 +109,29 @@ _VERDICTS = [
     ("y ¼ sin x and then the model holds up", False),
     ("the state-of-the-art model y ¼ x holds", False),
     ("rate ¼ 3", False),
+    ("2 ¼ sin x", False),
+    ("3 ¼ log y", False),
+    ("1 ¼ x + y", False),
+    ("2 ¼ xy + 1", False),
+    # Unicode operators after a vowel-free variable (cubic P1)
+    ("2 ¼ xy ≤ 1", False),
+    ("2 ¼ xy ≥ 1", False),
+    ("2 ¼ xy ≠ z", False),
+    ("2 ¼ xy × 3", False),
+    ("2 ¼ xy − 1", False),
+    # math function: operand only with a math-shaped continuation (cubic P2)
+    ("2 ¼ min x", False),
+    ("2 ¼ min(x, y)", False),
+    ("2 ¼ max 3", False),
+    ("2 ¼ log α", False),
+    ("2 ½ min", True),
+    ("2 ½ min.", True),
+    ("3 ¼ min later", True),
+    ("2 ½ max of the two", True),
+    # prose function words are not compact variables (cubic P3)
+    ("2 ½ by 4", True),
+    ("2 ½ by 4 inches", True),
+    ("3 ¼ per 4", True),
 ]
 _PRINTED = [line for line, printed in _VERDICTS if printed]
 _OPERATOR = [line for line, printed in _VERDICTS if not printed]

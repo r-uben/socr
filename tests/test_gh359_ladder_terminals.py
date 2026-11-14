@@ -28,6 +28,7 @@ from socr.core.state import DocumentHandle, DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 from _adjudicator_doubles import mismatching_adjudicator
 from socr.tables.binding import BindingEvidence, BindingResult, ContradictedCell
+from c1_support import assert_clean_or_only_unchecked
 
 _TABLE_MD = (
     "| c0 | c1 | c2 | c3 |\n"
@@ -277,7 +278,14 @@ class TestRuling1LastRungPassLow:
 
         assert _unverified(result_high.error) is False
         assert _unverified(result_low.error) is True
-        assert result_high.status != result_low.status
+        # #1244 C1: both control pages are unchecked model readings, so the status no longer
+        # separates the arms; the named table_unverified reason below does.
+        assert_clean_or_only_unchecked(
+            result_high, pages=(1,), other_notes=("untrusted tables on",)
+        )
+        # The failing arm keeps its own non-SUCCESS status: a low-confidence last rung may not
+        # ship as SUCCESS with only the reason text.
+        assert result_low.status is not DocumentStatus.SUCCESS
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +480,10 @@ class TestRuling6ChokePoint:
         assert _unverified(active.error) is True
         assert active.status == DocumentStatus.AUDIT_FAILED
         assert _unverified(unwired.error) is False
-        assert unwired.status == DocumentStatus.SUCCESS
+        assert unwired.status != DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(
+            unwired, pages=(1,), other_notes=("untrusted tables on",)
+        )  # #1244 C1: see c1_support
 
     def test_live_helper_reject_differs_from_skipped_helper_unverified(
         self, tmp_path: Path
