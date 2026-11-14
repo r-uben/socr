@@ -1607,6 +1607,21 @@ NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES: list[ExpectedDiff] = [
 ]
 
 
+_PASS_TRACE_TEXT_SHA_1183: dict[int, str] = {
+    1: "sha256:73b3775e5a93748c02a7f4e87d5297afda0af2925614dbc0538177a360a4ffc0",
+    2: "sha256:3e790875859f78f22383f41d7b4e9d76feb233e06dd9b2f7c05f13af8b7d2c69",
+    3: "sha256:dc7f9869d6c234611468306849db53b0996983599bb7445a6ebb7f50161cc3ac",
+    4: "sha256:f53afb515c19b86183da507056134a31146c9502e4036b7f6382219d57e583fe",
+    5: "sha256:7ff046b5bd4b7a5718c91730559bb7df5fac42a377ab16155ecfbd0df8c37599",
+    7: "sha256:6b2b60fbc77bd067bb0a4430986e73df0491a9a90a69d02d9a497c115cfcb973",
+    8: "sha256:136f647f1e6ca917a24f313b97c45fcbb58137d99f42eb63ee91c77f313a5275",
+    9: "sha256:dea206055e5212e2977bc7db3bde16382a3b16644c71ac0256c32b7743a323f4",
+    10: "sha256:3d002892f8596fdf9c830cde54adcec02bbc76551481b71016027caa99ea075d",
+    11: "sha256:f633ba59b5b886802661b3875d43ff8ac78e7e1916e631cbfce0639688c72280",
+    12: "sha256:63fbef504a2c3db7669c068ea9d2c7b0cebced8b83dc4d20f36fb8bb3d8c4f81",
+}
+
+
 def _pass_trace_1183_pages() -> dict[int, list[dict]]:
     """The exact pass trace each page of this corpus gets from ``capture()``.
 
@@ -1621,7 +1636,7 @@ def _pass_trace_1183_pages() -> dict[int, list[dict]]:
     def e(check, result, scope, reason):
         return {"check": check, "result": result, "scope": scope, "reason": reason}
 
-    return {
+    pages = {
         1: [
             e("control_bytes", "PASS", "page", V.CONTROL_BYTES_PASS_REASON),
             e(
@@ -1917,6 +1932,13 @@ def _pass_trace_1183_pages() -> dict[int, list[dict]]:
             e("text_layer_words", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
         ],
     }
+    # Every PASS names the text it was computed on (#1183 review round 2): the sha256 of the page
+    # text the corpus ships, pinned like the other text digests of this oracle.
+    for page, trace in pages.items():
+        for entry in trace:
+            if entry["result"] == "PASS":
+                entry["text_sha"] = _PASS_TRACE_TEXT_SHA_1183[page]
+    return pages
 
 
 PASS_TRACE_SIDECAR_1183_DIFFERENCES: list[ExpectedDiff] = [

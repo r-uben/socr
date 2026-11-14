@@ -1889,6 +1889,18 @@ CONTROL_BYTES_RAW_REASON = (
 )
 
 
+def _recorded_control_bytes_clause(output: PageOutput, p: Any) -> VerdictClause | None:
+    """The clause for control bytes the guard replaced (its record and U+FFFD in the bytes)."""
+    from socr.core.damaged_layer import REPLACEMENT_CHAR
+
+    found = getattr(p, "control_bytes_replaced", None)
+    if isinstance(found, dict) and found and REPLACEMENT_CHAR in (output.text or ""):
+        codes = ", ".join(f"{code} x{n}" for code, n in sorted(found.items()))
+        reason = CONTROL_BYTES_REASON.format(count=sum(found.values()), codes=codes)
+        return VerdictClause(Check.CONTROL_BYTES, CheckResult.FAIL, SCOPE_PAGE, reason)
+    return None
+
+
 def control_bytes_clause(output: PageOutput, p: Any) -> VerdictClause | None:
     """#1306: FAIL when the damaged-layer guard replaced control bytes in this page's text.
 
@@ -1896,8 +1908,11 @@ def control_bytes_clause(output: PageOutput, p: Any) -> VerdictClause | None:
     that ship. The record alone could be left by an earlier finalisation of a text a later
     one replaced; the character alone could be any reading's. Status-independent, so a page
     already WARNING for another reason gains the true second reason (see ``derive_clauses``).
+
+    A raw control byte the guard never replaced is a finding of the TRACE only
+    (:func:`control_bytes_outcome`): it does not move the status, which is the guard's to set.
     """
-    return control_bytes_outcome(output, p).clause
+    return _recorded_control_bytes_clause(output, p)
 
 
 CONTROL_BYTES_PASS_REASON = (
@@ -1908,24 +1923,27 @@ CONTROL_BYTES_PASS_REASON = (
 def control_bytes_outcome(output: PageOutput, p: Any) -> CheckOutcome:
     """:func:`control_bytes_clause` with its outcome (#1183). ``_apply_damaged_layer_guard``
     scans every shipped text that is not a failure marker, whatever its engine, so on such a
-    page a clean scan is a recorded negative (PASS)."""
-    from socr.core.damaged_layer import CONTROL_BYTE_RE, REPLACEMENT_CHAR
+    page a clean scan is a recorded negative (PASS).
+
+    The shipped bytes are the evidence, not the guard's bookkeeping: a tool that rewrote the page
+    offline (a spliced layer cell, a masked body) never ran the guard, so a raw control byte in
+    the text is a FAIL entry whatever the page state says, and PASS needs a clean scan of the
+    text itself. That entry carries no clause: it records the finding without changing a status
+    the guard did not set."""
+    from socr.core.damaged_layer import CONTROL_BYTE_RE
     from socr.core.manifest import is_page_failed_marker
 
     text = output.text or ""
-    # The shipped bytes are the evidence, not the guard's bookkeeping: a tool that rewrote the
-    # page offline (a spliced layer cell, a masked body) never ran the guard, so a raw control
-    # byte in the text is a finding whatever the page state says, and PASS needs a clean scan.
+    recorded = _recorded_control_bytes_clause(output, p)
+    if recorded is not None:
+        return _found(recorded)
     raw = Counter(f"U+{ord(m.group()):04X}" for m in CONTROL_BYTE_RE.finditer(text))
     if raw:
         codes = ", ".join(f"{code} x{n}" for code, n in sorted(raw.items()))
         reason = CONTROL_BYTES_RAW_REASON.format(count=sum(raw.values()), codes=codes)
-        return _found(VerdictClause(Check.CONTROL_BYTES, CheckResult.FAIL, SCOPE_PAGE, reason))
-    found = getattr(p, "control_bytes_replaced", None)
-    if isinstance(found, dict) and found and REPLACEMENT_CHAR in text:
-        codes = ", ".join(f"{code} x{n}" for code, n in sorted(found.items()))
-        reason = CONTROL_BYTES_REASON.format(count=sum(found.values()), codes=codes)
-        return _found(VerdictClause(Check.CONTROL_BYTES, CheckResult.FAIL, SCOPE_PAGE, reason))
+        return CheckOutcome(
+            TraceEntry(Check.CONTROL_BYTES.value, TraceResult.FAIL, SCOPE_PAGE, reason)
+        )
     if not text.strip():
         return _not_applicable(Check.CONTROL_BYTES, NO_TEXT_REASON)
     if is_page_failed_marker(text):

@@ -260,8 +260,10 @@ def test_a_raw_control_byte_in_the_shipped_text_is_a_finding_not_a_pass(engine: 
     out = _out("Korea \x01 4.0\nChina 6.9", engine)
     outcome = control_bytes_outcome(out, _p(control_bytes_replaced=None))
     assert outcome.entry.result is TraceResult.FAIL
-    assert outcome.clause is not None and "U+0001" in outcome.clause.reason
-    assert control_bytes_clause(out, _p()) is not None
+    assert "U+0001" in outcome.entry.reason
+    # a record, not a status: the guard sets the status, so no clause moves with the finding
+    assert outcome.clause is None
+    assert control_bytes_clause(out, _p()) is None
     clean = control_bytes_outcome(_out("Korea 4.0\nChina 6.9", engine), _p())
     assert clean.entry.result is TraceResult.PASS
 

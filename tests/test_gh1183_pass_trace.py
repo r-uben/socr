@@ -70,6 +70,15 @@ def _out(text: str = LAYER, engine: str = "qwen") -> PageOutput:
     return PageOutput(page_num=1, text=text, status=PageStatus.SUCCESS, engine=engine)
 
 
+def _rb(text: str, index: int, outcome: str) -> dict:
+    """A row-binding record as the check writes it: with the digest of the table block it ran on."""
+    return {
+        "table_index": index,
+        "outcome": outcome,
+        "table_sha": verdict_module.table_block_digest(text, index),
+    }
+
+
 def _scope(check: str) -> str:
     """The scope a check's non-clause entry sits at: the drops check reads table rows only."""
     return SCOPE_TABLE_ROWS if check == "text_layer_drops" else "page"
@@ -108,7 +117,7 @@ THREE_TABLES = "\n\ntext\n\n".join([TABLE] * 3)
 
 
 def test_row_binding_pass_keeps_its_table_scope_and_never_reads_as_a_page_pass() -> None:
-    p = _p(row_binding={"p1-t1": {"table_index": 1, "outcome": "bound"}})
+    p = _p(row_binding={"p1-t1": _rb(THREE_TABLES, 1, "bound")})
     trace = _trace(_out(THREE_TABLES), p)
     assert trace[(ROW_BINDING_CHECK, "table:2")].result is TraceResult.PASS
     assert (ROW_BINDING_CHECK, "page") not in trace
@@ -117,9 +126,9 @@ def test_row_binding_pass_keeps_its_table_scope_and_never_reads_as_a_page_pass()
 def test_row_binding_records_state_their_own_outcome() -> None:
     p = _p(
         row_binding={
-            "p1-t0": {"table_index": 0, "outcome": "bound"},
-            "p1-t1": {"table_index": 1, "outcome": "contradicted"},
-            "p1-t2": {"table_index": 2, "outcome": "unverifiable"},
+            "p1-t0": _rb(THREE_TABLES, 0, "bound"),
+            "p1-t1": _rb(THREE_TABLES, 1, "contradicted"),
+            "p1-t2": _rb(THREE_TABLES, 2, "unverifiable"),
         }
     )
     trace = _trace(_out(THREE_TABLES), p)
@@ -237,7 +246,15 @@ def test_a_table_scope_clause_never_hides_the_page_scope_outcome() -> None:
 
 
 def test_replay_is_returned_unchanged_and_a_page_without_one_is_not_run() -> None:
-    stored = (TraceEntry("text_layer_numbers", TraceResult.PASS, "page", "kept"),)
+    stored = (
+        TraceEntry(
+            "text_layer_numbers",
+            TraceResult.PASS,
+            "page",
+            "kept",
+            text_sha=verdict_module.page_text_digest(_out().text),
+        ),
+    )
     assert build_pass_trace(_out(), _p(), PageVerdict(1), replay=stored) == stored
     trace = _trace(_out(), _p(), resumed_without_trace=True)
     assert {k for k in trace} == set(PASS_TRACE_SLOTS)
@@ -476,12 +493,12 @@ def test_drops_checks_table_rows_only_so_its_scope_is_never_page() -> None:
 def test_row_binding_states_only_tables_that_ship() -> None:
     """Carbon 3 and Fable 1/2: a record never speaks for a table the output does not carry, and
     every shipped table without a record is NOT_RUN."""
-    bound = {"table_index": 0, "outcome": "bound"}
+    bound = _rb(THREE_TABLES, 0, "bound")
     marker = _out("[page 1 failed: unverifiable table -- see image]")
     entry = _trace(marker, _p(row_binding={"p1-t0": bound}))[(ROW_BINDING_CHECK, "table:1")]
     assert entry.result is TraceResult.NOT_RUN and "does not ship" in entry.reason
     # a record for a third table on a page that ships one
-    far = {"p1-t2": {"table_index": 2, "outcome": "bound"}}
+    far = {"p1-t2": _rb(THREE_TABLES, 2, "bound")}
     trace = _trace(_out(TABLE), _p(row_binding=far))
     assert trace[(ROW_BINDING_CHECK, "table:3")].result is TraceResult.NOT_RUN
     assert trace[(ROW_BINDING_CHECK, "table:1")].result is TraceResult.NOT_RUN
