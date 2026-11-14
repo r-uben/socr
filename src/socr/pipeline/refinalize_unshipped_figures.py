@@ -422,6 +422,21 @@ def _lane_pages(answered: list[dict]) -> tuple[list[int], list[int], list[int]]:
     return shipped, marked, skeleton
 
 
+def _presence_pages(answered: list[dict]) -> tuple[list[int], list[int], list[int]]:
+    """#1276: ``(chart shipped as an image, chart crop lost, unmatched placeholder)`` pages, from
+    the sidecars' own kind, so the rebuilt note keeps the sentences a live run wrote."""
+    from socr.figures import figure_presence as fp
+
+    def pages(kind: str) -> list[int]:
+        return [int(d["page_num"]) for d in answered if d.get("unshipped_figure_kind") == kind]
+
+    return (
+        pages(fp.PRESENCE_SHIPPED_KIND),
+        pages(fp.PRESENCE_RENDER_FAILED_KIND),
+        pages(fp.PLACEHOLDER_KIND),
+    )
+
+
 def refinalize_document(
     doc_dir: Path,
     *,
@@ -522,7 +537,15 @@ def refinalize_document(
                 ]
         _write_json(manifest_path, manifest)
     shipped_pages, marked_pages, skeleton_pages = _lane_pages(answered)
-    note = document_note(shipped_pages, marked_pages, skeleton_pages)
+    chart_shipped, chart_lost, placeholder = _presence_pages(answered)
+    note = document_note(
+        [n for n in shipped_pages if n not in chart_shipped],
+        marked_pages,
+        skeleton_pages,
+        chart_shipped=chart_shipped,
+        chart_lost=chart_lost,
+        placeholder=placeholder,
+    )
 
     def _record(record: dict) -> None:
         """The note, and -- when this lane MARKED a page -- the demotion a live run makes.

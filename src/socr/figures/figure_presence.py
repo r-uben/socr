@@ -94,9 +94,9 @@ def crop_filename(page_num: int, index: int) -> str:
     return f"{CROP_STEM}_p{page_num}_{index}.png"
 
 
-def _outside_fences(body: str) -> list[str]:
-    """The lines of *body* that are not inside a fenced code block (same fence character
-    closes it, as ``tick_run`` does)."""
+def _fence_scanned_lines(body: str) -> list[str]:
+    """Fallback when the markdown tokenizer is unavailable: lines outside fenced code (the
+    same fence character closes it)."""
     out: list[str] = []
     fence = ""
     for line in (body or "").split("\n"):
@@ -112,9 +112,48 @@ def _outside_fences(body: str) -> list[str]:
     return out
 
 
+_INLINE_CODE_RE = re.compile(r"(`+)(?:(?!\1).)+?\1")
+
+
+def _outside_fences(body: str) -> list[str]:
+    """The lines of *body* that are not code, with inline code spans blanked out.
+
+    Block context is CommonMark's (``markdown-it-py``, the tokenizer ``figures.chart_regions``
+    already uses): a four-backtick block is not closed by an inner three-backtick line, and
+    indented code is code. An HTML block is NOT excluded: a model's ``<!-- Image -->``
+    placeholder is one. Inline code (a prose line quoting ``<!-- Image (x) -->``) is blanked, so
+    a placeholder shown rather than used is not counted (carbon2 5).
+    """
+    lines = (body or "").split("\n")
+    try:
+        from markdown_it import MarkdownIt
+
+        tokens = MarkdownIt("commonmark").parse("\n".join(lines))
+    except Exception:  # noqa: BLE001 -- the scanner below is the fallback, never a silent pass
+        kept = _fence_scanned_lines(body)
+    else:
+        literal: set[int] = set()
+        for token in tokens:
+            if token.type in ("fence", "code_block") and token.map:
+                literal.update(range(token.map[0], min(token.map[1], len(lines))))
+        kept = [line for i, line in enumerate(lines) if i not in literal]
+    return [_INLINE_CODE_RE.sub("", line) for line in kept]
+
+
+def _is_table_row(line: str) -> bool:
+    """A markdown table row: a leading pipe, or at least two pipes. A placeholder in a cell is
+    the cell's text, not a figure the reading marked on the page."""
+    stripped = line.strip()
+    return stripped.startswith("|") or stripped.count("|") >= 2
+
+
 def placeholder_count(body: str) -> int:
-    """``<!-- Image`` placeholders in *body*, ignoring fenced code blocks."""
-    return sum(len(_PLACEHOLDER_RE.findall(line)) for line in _outside_fences(body))
+    """``<!-- Image`` placeholders in *body*, ignoring code (block and inline) and table cells."""
+    return sum(
+        len(_PLACEHOLDER_RE.findall(line))
+        for line in _outside_fences(body)
+        if not _is_table_row(line)
+    )
 
 
 #: A tick run must be carried by at least this many lines of the text layer, or by two axes: a
@@ -347,6 +386,18 @@ def decide_presence(assessments: list[RegionAssessment], render) -> PresenceDeci
     )
 
 
+_TRAILING_ORDINAL_RE = re.compile(r"(\d+)\s*$")
+
+
+def label_ordinal(label: str, position: int) -> int:
+    """The region / placeholder ordinal a label names (``chart region 2``, ``image placeholder
+    3``), which is what the scope must carry: failed region 2 alone is ``figure:2``, not
+    ``figure:1`` by its position in the list. A label with no trailing number falls back to its
+    list position."""
+    match = _TRAILING_ORDINAL_RE.search(label or "")
+    return int(match.group(1)) if match else position
+
+
 def clause_records(page_num: int, labels: tuple[str, ...], kind: str) -> tuple[dict, ...]:
     """One figure-specific, machine-readable mark clause per lost region / unmatched
     placeholder. UNKNOWN: socr did not establish the figure is absent; it failed to show it."""
@@ -357,10 +408,10 @@ def clause_records(page_num: int, labels: tuple[str, ...], kind: str) -> tuple[d
         {
             "check": Check.FIGURE_TEXT.value,
             "result": CheckResult.UNKNOWN.value,
-            "scope": region_scope("figure", index),
+            "scope": region_scope("figure", label_ordinal(label, position)),
             "reason": f"{label}: {reason}",
         }
-        for index, label in enumerate(labels, start=1)
+        for position, label in enumerate(labels, start=1)
     )
 
 

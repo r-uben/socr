@@ -211,13 +211,7 @@ Remaining defects, seen in those crops:
    ("left to the chart-region pass") and a page with no chart box records `figure_presence_pass`
    ("no chart box ... not a statement that the page carries no figure"). Neither marks. Cost: one
    small event per native page that reaches the lane (8,605 + 93 on the cached run).
-6. Fable nit, cubic and Carbon items not changed in this round: placeholders inside a table cell
-   or inline code are counted; the `chart_region_` boxes counted for a table-signal page are not
-   proven cropped before assembly (cubic P2); the early return on a #1187 outcome (cubic P2);
-   clause scope uses list position, not the region ordinal (cubic P2); resume does not retry a
-   failed native crop (cubic P1: the guard returns for the restored kind); the document note
-   and CLI sentence for the presence kinds still name "a figure socr could not locate" (Carbon 4,
-   cubic); only the first ref in the #1174 record. Each is real until shown otherwise.
+6. Fable nit, cubic and Carbon items: fixed in the next section.
 
 ### Mutants for this round (src+tests copied outside the repo; `socr.__file__` asserted inside the
 copy; uncapped anchor count asserted == 1 before editing; the guard removed; the test must fail)
@@ -237,3 +231,50 @@ copy; uncapped anchor count asserted == 1 before editing; the guard removed; the
 | no-box record not written | `test_a_page_with_no_chart_box_is_recorded_not_silent` |
 
 No mutant for item 4: nothing was changed there.
+
+## Review round 3 (PR #1309): the items left open above
+
+| item | change | test |
+| --- | --- | --- |
+| clause scope used the list position | `label_ordinal` reads the region / placeholder ordinal from the label (`chart region 2` is `figure:2`); the position is only the fallback for a label with no number | `test_the_clause_scope_carries_the_region_ordinal_not_the_list_position`, `test_a_failed_second_region_reaches_the_verdict_with_its_own_scope` |
+| resume did not retry a render failure | the native lane's guard lets `figure_presence_render_failed` through, and the retry drops the old event, the #1174 lines, the refs and the labels before recording its answer. Through `process()` a failed page is already reprocessed from scratch (its status is not SUCCESS), so the lane saw no restored kind there; the guard is reached by the replay path, which the unit test drives | `test_a_render_failure_is_retried_on_resume_and_the_old_record_goes` (process, both runs), `test_a_restored_render_failure_is_retried_in_place` |
+| table-signal boxes counted as shipped before GH-189 cropped | nothing is credited at the page loop. The page records `placeholder_pending` (placeholders, images, the boxes with regional tick evidence) and `_reconcile_pending_placeholders` runs right after `_preserve_chart_regions` in `_phase_assemble`, crediting only the regions in `state._chart_region_preserved` (rendered AND linked). A page GH-189 skips (floor, #1187 crop), a failed crop and an unreadable PDF credit nothing | `test_a_table_pages_placeholder_is_excused_only_by_a_crop_gh189_preserved`, `test_a_table_page_gh189_skipped_credits_nothing`, `test_assembly_reconciles_the_pending_placeholders_after_the_chart_region_pass` |
+| early return on a #1187 outcome | kept, and stated: the #1187 event is that page's record, its kind is a MARKED kind (demoted, in the note and the CLI), and a second count would restate one loss under two kinds. `NOT_FOUND` marked nothing, so it is still decided. The `unshipped_figure_refs` term in the image count was always 0 on the path that reaches it and is gone | `test_a_page_the_1187_lane_answered_keeps_that_record_and_adds_none` |
+| note and CLI said only "a figure socr could not locate" | `document_note` takes `chart_shipped`, `chart_lost`, `placeholder`; each has its own sentence ("draw a chart that ships as an image crop", "whose crop could not be saved", "an unmatched figure placeholder"), the live note, the CLI and the re-finalize tool read the same split | `test_the_note_words_the_presence_cases_and_not_as_a_figure_socr_could_not_locate`, `test_the_live_note_and_the_cli_line_read_the_same_events` |
+| #1174 record named the first crop only | one `visual_values_not_transcribed` event per shipped crop | `test_a_page_with_two_shipped_crops_records_every_crop` |
+| placeholders in table cells and inline code counted | block context from `markdown-it-py` (a longer fence is not closed by an inner shorter one), inline code blanked, table rows skipped for placeholders (an image in a cell is still an image) | `test_placeholders_in_table_cells_and_inline_code_are_not_counted`, `test_a_longer_fence_is_not_closed_by_an_inner_shorter_one` |
+| model rule not driven through `process()` | stub model engine, both provider states, the placeholder in the reading as the only difference | `test_process_marks_an_unmatched_model_placeholder_and_only_when_a_model_read_the_page` |
+
+Crop geometry is unchanged in this round.
+
+### Re-measured, with the disk check (`2026-11-13_1276-measure.py`, same 156 docs)
+
+| | |
+| --- | --- |
+| native pages that ship a crop | 80 (43 SUCCESS, 37 WARNING), 126 crops (2 merged panels = 128 regions) |
+| pass record | 248; table-signal pages left to GH-189: 93 |
+| model pages with a placeholder | 34 (33 WARNING, 1 SUCCESS) |
+| marked by the rule (placeholders > images on disk) | 22 pages, 57 unmatched placeholders |
+| marked by link count only (no disk check) | 22 |
+| table-signal pages among the 22 | 6 (judged after GH-189 in the live loop; the script cannot run GH-189, so counts them as marked) |
+
+The disk check changes nothing on this corpus (every linked figure file exists), so the earlier
+numbers stand; it is tested synthetically. The inline-code and table-cell exclusions also move no
+page here (same 34 pages, same 22). Table-signal pages: the live rule credits a GH-189 crop where
+one is preserved, so the live count among those 6 can be lower than the script's.
+
+### Mutants for this round
+
+| mutant | killed by |
+| --- | --- |
+| scope from list position | `test_the_clause_scope_carries_the_region_ordinal_not_the_list_position`, `test_a_failed_second_region_reaches_the_verdict_with_its_own_scope` |
+| guard returns for the restored render failure | `test_a_restored_render_failure_is_retried_in_place` (the `process()` resume test survives it, as explained above) |
+| credit every pending region without the preserved check | the two `crop-failed` / `gh189_skipped` tests |
+| table rows counted as placeholders | `test_placeholders_in_table_cells_and_inline_code_are_not_counted` |
+| inline code not blanked | same |
+
+### Still open
+
+* Item 4 (lane chosen from `bo`, not the finalised record) is unchanged.
+* The refinalize tool (`socr-refinalize-unshipped-figures`) does not run the presence lane; it
+  only rebuilds the note from the sidecars' kinds.

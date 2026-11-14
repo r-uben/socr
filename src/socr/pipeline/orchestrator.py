@@ -7423,6 +7423,7 @@ class UnifiedPipeline:
         shipped: list[int] = []
         marked: list[int] = []
         skeleton: list[int] = []
+        chart_shipped, chart_lost, placeholder = UnifiedPipeline._presence_pages(state)
         for event in state.events:
             kind = getattr(event, "kind", "")
             page = getattr(event, "page_num", None)
@@ -7440,7 +7441,37 @@ class UnifiedPipeline:
                 marked.append(int(page))
             if kind == UNSHIPPED_FIGURE_CHART_SKELETON_KIND:
                 skeleton.append(int(page))
-        return _unshipped_figures.document_note(shipped, marked, skeleton) or None
+        return (
+            _unshipped_figures.document_note(
+                shipped,
+                marked,
+                skeleton,
+                chart_shipped=chart_shipped,
+                chart_lost=chart_lost,
+                placeholder=placeholder,
+            )
+            or None
+        )
+
+    @staticmethod
+    def _presence_pages(state) -> tuple[list[int], list[int], list[int]]:
+        """#1276: ``(chart shipped as an image, chart crop lost, unmatched figure placeholder)``
+        pages. One derivation for the document note and the CLI line."""
+        by_kind: dict[str, set[int]] = {
+            _figure_presence.PRESENCE_SHIPPED_KIND: set(),
+            _figure_presence.PRESENCE_RENDER_FAILED_KIND: set(),
+            _figure_presence.PLACEHOLDER_KIND: set(),
+        }
+        for event in state.events:
+            page = getattr(event, "page_num", None)
+            bucket = by_kind.get(getattr(event, "kind", ""))
+            if page is not None and bucket is not None:
+                bucket.add(int(page))
+        return (
+            sorted(by_kind[_figure_presence.PRESENCE_SHIPPED_KIND]),
+            sorted(by_kind[_figure_presence.PRESENCE_RENDER_FAILED_KIND]),
+            sorted(by_kind[_figure_presence.PLACEHOLDER_KIND]),
+        )
 
     @staticmethod
     def _scanned_figure_split(state, records) -> tuple[list[int], list[int], list[int]]:
@@ -14082,7 +14113,12 @@ class UnifiedPipeline:
         from socr.figures.chart_regions import render_chart_region_crops
         from socr.tables.reconstruct import chart_region_clusters
 
-        if getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, ""):
+        # A page this lane or #1187 already answered is not decided twice -- except the one
+        # TRANSIENT answer, a crop that could not be saved. It is retried on resume (the replay
+        # restores the kind, and the manifest reprocesses the page), and the retry replaces the
+        # old record instead of being refused by it (cubic, PR #1309).
+        recorded = getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, "")
+        if recorded and recorded != _figure_presence.PRESENCE_RENDER_FAILED_KIND:
             return
         if self._page_has_tables(page_num, ps):
             self._apply_presence_decision(
@@ -14154,9 +14190,33 @@ class UnifiedPipeline:
             return
         self._apply_presence_decision(state, page_num, ps, decision)
 
+    @staticmethod
+    def _drop_presence_record(state: DocumentState, page_num: int, ps, recorded: str) -> None:
+        """Remove what a superseded render failure left: its event, the #1174 lines its partial
+        crops wrote, the located-labels and the refs. One page, one answer."""
+        state.events[:] = [
+            e
+            for e in state.events
+            if not (
+                getattr(e, "page_num", None) == page_num
+                and (
+                    e.kind == recorded
+                    or (
+                        e.kind == VISUAL_VALUES_NOT_TRANSCRIBED_KIND
+                        and getattr(e, "engine", "") == "figure_presence"
+                    )
+                )
+            )
+        ]
+        ps.unshipped_figure_refs = []
+        ps.unshipped_figure_unlocated = []
+
     def _apply_presence_decision(self, state: DocumentState, page_num: int, ps, decision) -> None:
         from socr.core.audit_log import AuditEvent
 
+        recorded = getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, "")
+        if recorded == _figure_presence.PRESENCE_RENDER_FAILED_KIND:
+            self._drop_presence_record(state, page_num, ps, recorded)
         setattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, decision.kind)
         if decision.refs:
             ps.unshipped_figure_refs = list(decision.refs)
@@ -14171,16 +14231,17 @@ class UnifiedPipeline:
                 data=decision.event_data(),
             )
         )
-        if decision.refs:
-            # The #1174 statement, through its own event so the clause, the visible line, the
-            # document note and the resume replay are the ones the chart lane already has.
+        # The #1174 statement, through its own event so the clause, the visible line, the
+        # document note and the resume replay are the ones the chart lane already has. One
+        # event per shipped crop: a multi-region page names every one, not the first.
+        for ref in decision.refs:
             state.events.append(
                 AuditEvent(
                     page_num=page_num,
                     kind=VISUAL_VALUES_NOT_TRANSCRIBED_KIND,
                     engine="figure_presence",
                     detail="figure shipped as image, values not transcribed",
-                    data={"png_saved": True, "png_path": decision.refs[0]},
+                    data={"png_saved": True, "png_path": ref},
                 )
             )
 
@@ -14195,14 +14256,23 @@ class UnifiedPipeline:
         """A model reading's ``<!-- Image`` placeholders, matched one-to-one by shipped images.
 
         Images counted: figure images already in the body that resolve to a file on disk under
-        *doc_dir* (a link to a file nobody saved ships nothing), plus the crops ``_agentic_
-        unshipped_figure_page`` just recorded for this page (appended at finalisation), plus,
-        on a page GH-189 will reconcile at assembly, the chart boxes that pass the SAME regional
-        tick test the native lane applies (a bare box is one in eight real charts: #1268). A placeholder beyond
-        that count is a figure nothing ships: the page gets a figure-specific mark. A page the
-        #1187 lane already marked for a figure keeps that mark and is not decided twice.
+        *doc_dir* (a link to a file nobody saved ships nothing). A placeholder beyond that count
+        is a figure nothing ships: the page gets a figure-specific mark.
+
+        A page with a table signal is different: GH-189's ``_preserve_chart_regions`` crops its
+        chart boxes at assembly, so a placeholder there may be matched by a crop that does not
+        exist yet. Nothing is credited for it here. The page records which of its boxes carry the
+        regional tick evidence (``placeholder_pending``) and
+        ``_reconcile_pending_placeholders`` credits only the crops GH-189 actually preserved,
+        after it ran (cubic, PR #1309: a crop that fails at assembly never excuses a placeholder).
+
+        A page #1187 already answered (a figure it located, one it could not, one it could not
+        save, a chart skeleton) is not decided twice, and it is not left without a record: the
+        #1187 event IS its record, that kind is a MARKED one (the page is demoted, the document
+        note and the CLI name it), and a second placeholder count would only restate the same
+        loss under a second kind. ``NOT_FOUND`` marked nothing, so it is decided here and its
+        event replaced.
         """
-        from socr.core.audit_log import AuditEvent
         from socr.figures import figure_presence as fp
 
         placeholders = fp.placeholder_count(body)
@@ -14211,33 +14281,50 @@ class UnifiedPipeline:
         recorded = getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, "")
         if recorded and recorded != _unshipped_figures.NOT_FOUND_KIND:
             return
-        shipped = fp.shipped_image_count(body, doc_dir) + len(
-            getattr(ps, "unshipped_figure_refs", None) or []
-        )
-        if shipped < placeholders and self._page_has_tables(page_num, ps):
+        shipped = fp.shipped_image_count(body, doc_dir)
+        if shipped >= placeholders:
+            return
+        regions: list[int] = []
+        if self._page_has_tables(page_num, ps):
             from socr.core.pdf import open_pdf
             from socr.tables.reconstruct import chart_region_bboxes
 
             try:
                 with open_pdf(str(state.handle.path)) as _doc:
                     _page = _doc[page_num - 1]
-                    _boxes = chart_region_bboxes(_page)
-                    shipped += sum(
-                        1
+                    regions = [
+                        a.index
                         for a in fp.assess_regions(
                             list(_page.get_text("words") or []),
-                            _boxes,
+                            chart_region_bboxes(_page),
                             set(),
                             list(getattr(ps, "detected_table_bboxes", []) or []),
                             page_shipped=False,
                         )
                         if a.has_evidence
-                    )
-            except Exception:  # noqa: BLE001 -- unreadable: count nothing extra, mark
-                pass
+                    ]
+            except Exception:  # noqa: BLE001 -- unreadable: credit nothing, mark
+                regions = []
+        if regions:
+            ps.placeholder_pending = {
+                "placeholders": placeholders,
+                "images": shipped,
+                "regions": regions,
+            }
+            return
+        self._mark_unmatched_placeholders(state, page_num, ps, placeholders, shipped)
+
+    def _mark_unmatched_placeholders(
+        self, state: DocumentState, page_num: int, ps, placeholders: int, shipped: int
+    ) -> None:
+        """Record and mark the placeholders nothing ships. No-op when every one is matched."""
+        from socr.core.audit_log import AuditEvent
+        from socr.figures import figure_presence as fp
+
         unmatched = placeholders - shipped
         if unmatched <= 0:
             return
+        recorded = getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, "")
         if recorded:
             state.events[:] = [
                 e
@@ -14260,6 +14347,26 @@ class UnifiedPipeline:
                 data={"placeholders": placeholders, "images": shipped, "unmatched": unmatched},
             )
         )
+
+    def _reconcile_pending_placeholders(self, state: DocumentState) -> None:
+        """After GH-189 ran: credit a table page's placeholders with the crops it PRESERVED.
+
+        Only a chart box that has the regional tick evidence AND whose crop
+        ``_preserve_chart_regions`` rendered and linked counts. A page it skipped (a floor, a
+        #1187 crop), one whose crop failed, and one it could not read credit nothing.
+        """
+        preserved_by_page = getattr(state, "_chart_region_preserved", {}) or {}
+        for page_num in sorted(state.pages):
+            ps = state.pages[page_num]
+            pending = getattr(ps, "placeholder_pending", None)
+            if not pending:
+                continue
+            ps.placeholder_pending = None
+            preserved = set(preserved_by_page.get(page_num, ()))
+            credited = len(preserved & set(pending["regions"]))
+            self._mark_unmatched_placeholders(
+                state, page_num, ps, pending["placeholders"], pending["images"] + credited
+            )
 
     def _agentic_scanned_figure_page(
         self,
@@ -19828,6 +19935,9 @@ class UnifiedPipeline:
         # flush, the status aggregation, the initial save and the metadata --
         # so every terminal writer serializes the same reconciled text.
         page_texts = self._preserve_chart_regions(state, page_texts, output_dir)
+        # #1276: a model page with a table signal had its placeholders judged only now, against
+        # the crops GH-189 actually preserved.
+        self._reconcile_pending_placeholders(state)
 
         # #635 Stage 0, CLI surface. Counted from the document's own events so a
         # resumed run reports what THIS run's body actually contains rather than
@@ -21797,6 +21907,7 @@ class UnifiedPipeline:
                         and getattr(e, "page_num", None) is not None
                     }
                 )
+                _pr_shipped, _pr_lost, _pr_placeholder = self._presence_pages(state)
                 _uf_marked = sorted(
                     {
                         int(e.page_num)
@@ -21805,6 +21916,8 @@ class UnifiedPipeline:
                         and getattr(e, "page_num", None) is not None
                     }
                     - set(_uf_skeleton)
+                    - set(_pr_lost)
+                    - set(_pr_placeholder)
                 )
                 if _uf_shipped:
                     console.print(
@@ -21817,6 +21930,23 @@ class UnifiedPipeline:
                         f"  [red]{len(_uf_marked)} page(s) named a figure socr could not "
                         f"locate, could not save, or could not tell apart from the others the "
                         f"page names; the page is marked: {_uf_marked}[/red]"
+                    )
+                if _pr_shipped:
+                    console.print(
+                        f"  [cyan]{len(_pr_shipped)} page(s) draw a chart that ships as an "
+                        f"image crop, its values untranscribed: {_pr_shipped}[/cyan]"
+                    )
+                if _pr_lost:
+                    console.print(
+                        f"  [red]{len(_pr_lost)} page(s) draw a chart with axis ticks whose "
+                        f"crop could not be saved; it is preserved nowhere; the page is "
+                        f"marked: {_pr_lost}[/red]"
+                    )
+                if _pr_placeholder:
+                    console.print(
+                        f"  [red]{len(_pr_placeholder)} page(s) carry an unmatched figure "
+                        f"placeholder (a figure the reading marked, with no picture of it); "
+                        f"the page is marked: {_pr_placeholder}[/red]"
                     )
                 if _uf_skeleton:
                     console.print(

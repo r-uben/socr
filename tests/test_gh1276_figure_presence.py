@@ -860,3 +860,372 @@ def test_a_bare_box_does_not_excuse_a_placeholder_on_a_table_page(tmp_path: Path
         _pipe()._agentic_figure_presence_page(state, 1, ps, out, root / "figures")
         outcome[ticks] = ps.unshipped_figure_kind
     assert outcome == {True: "", False: fp.PLACEHOLDER_KIND}
+
+
+# ---------------------------------------------------------------------------
+# Review round on PR #1309: scope ordinal, resume retry, shipped-only credit, records,
+# wording, literal context, and the model rule through process()
+# ---------------------------------------------------------------------------
+
+
+def test_the_clause_scope_carries_the_region_ordinal_not_the_list_position() -> None:
+    """cubic: failed region 2 alone is ``figure:2`` while the reason says ``chart region 2``."""
+    from socr.core.marks import region_scope
+
+    (record,) = fp.clause_records(1, ("chart region 2",), fp.PRESENCE_RENDER_FAILED_KIND)
+    assert record["scope"] == region_scope("figure", 2)
+    assert record["reason"].startswith("chart region 2:")
+    # Two placeholders owed (2 and 3 of 3): each keeps its own ordinal.
+    scopes = [
+        r["scope"]
+        for r in fp.clause_records(
+            1, ("image placeholder 2", "image placeholder 3"), fp.PLACEHOLDER_KIND
+        )
+    ]
+    assert scopes == [region_scope("figure", 2), region_scope("figure", 3)]
+    # No number in a label: the list position is the fallback, never a crash.
+    (fallback,) = fp.clause_records(1, ("a figure",), fp.PLACEHOLDER_KIND)
+    assert fallback["scope"] == region_scope("figure", 1)
+
+
+def test_a_failed_second_region_reaches_the_verdict_with_its_own_scope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import socr.figures.chart_regions as cr
+
+    real = cr.render_chart_region_crops
+
+    def only_the_first(*args, **kwargs):
+        return [a for a in real(*args, **kwargs) if a.region_index == 1]
+
+    monkeypatch.setattr(cr, "render_chart_region_crops", only_the_first)
+    pdf = _chart_pdf(tmp_path / "two.pdf", ticks=True, charts=2)
+    st, ps, out = _decide_native(
+        pdf, tmp_path, engine="native", status=PageStatus.SUCCESS, body=_PROSE
+    )
+    assert ps.unshipped_figure_unlocated == ["chart region 2"]
+    rec = _finalize(st, ps, out)
+    scopes = [c.scope for c in rec.verdict.clauses if c.scope.startswith("figure:")]
+    assert scopes == ["figure:2"]
+
+
+def test_a_page_with_two_shipped_crops_records_every_crop(tmp_path: Path) -> None:
+    """The #1174 record names each shipped crop, not the first only."""
+    pdf = _chart_pdf(tmp_path / "two.pdf", ticks=True, charts=2)
+    st, ps, _ = _decide_native(
+        pdf, tmp_path, engine="native", status=PageStatus.SUCCESS, body=_PROSE
+    )
+    assert len(ps.unshipped_figure_refs) == 2
+    recorded = [e.data["png_path"] for e in st.events if e.kind == "visual_values_not_transcribed"]
+    assert recorded == ps.unshipped_figure_refs
+
+
+def test_a_render_failure_is_retried_on_resume_and_the_old_record_goes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """cubic P1: the replay restores ``figure_presence_render_failed`` and the lane returned
+    for it. The ONLY difference between the runs is whether the crop can be saved."""
+    import socr.figures.chart_regions as cr
+
+    pdf = _chart_pdf(tmp_path / "on.pdf", ticks=True)
+    with monkeypatch.context() as m:
+        m.setattr(cr, "render_chart_region_crops", lambda *a, **k: [])
+        side1, _t1, log1, out = _process_native(tmp_path, monkeypatch, "rf", pdf, providers=True)
+    assert side1["unshipped_figure_kind"] == fp.PRESENCE_RENDER_FAILED_KIND
+    for md in out.rglob("*.md"):
+        if "pages" not in md.parts:
+            md.unlink()
+    side2, text2, log2, _ = _process_native(
+        tmp_path, monkeypatch, "rf", pdf, providers=True, out=out
+    )
+    kinds = [e["kind"] for e in log2["events"]]
+    assert side2["unshipped_figure_kind"] == fp.PRESENCE_SHIPPED_KIND
+    assert side2["unshipped_figure_refs"] and f"]({side2['unshipped_figure_refs'][0]})" in text2
+    assert not side2["unshipped_figure_unlocated"]
+    assert fp.PRESENCE_RENDER_FAILED_KIND not in kinds, "the superseded failure is not kept"
+    assert kinds.count(fp.PRESENCE_SHIPPED_KIND) == 1
+
+
+def test_a_shipped_record_is_not_decided_again_on_the_same_page(tmp_path: Path) -> None:
+    """The retry exception is the render failure ONLY."""
+    pdf = _chart_pdf(tmp_path / "c.pdf", ticks=True)
+    st, ps, out = _decide_native(
+        pdf, tmp_path, engine="native", status=PageStatus.SUCCESS, body=_PROSE
+    )
+    before = [e.kind for e in st.events]
+    _pipe()._agentic_figure_presence_page(st, 1, ps, out, tmp_path / "figures")
+    assert [e.kind for e in st.events] == before
+
+
+# -- (c) table-signal pages: only crops GH-189 preserved are credited -------------------------
+
+
+def _table_page_state(tmp_path: Path, ticks: bool):
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    pdf = _chart_pdf(tmp_path / "c.pdf", ticks=ticks)
+    state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+    ps = PageState(page_num=1)
+    ps.has_tables = True
+    state.pages[1] = ps
+    out = PageOutput(
+        page_num=1,
+        text="<!-- Image (1, 2, 3, 4) -->\n\nA table follows.",
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+    )
+    _pipe()._agentic_figure_presence_page(state, 1, ps, out, tmp_path / "figures")
+    return state, ps
+
+
+@pytest.mark.parametrize("preserved", [{1}, set()], ids=["crop-preserved", "crop-failed"])
+def test_a_table_pages_placeholder_is_excused_only_by_a_crop_gh189_preserved(
+    tmp_path: Path, preserved: set[int]
+) -> None:
+    """Same page, same box, same placeholder; only whether GH-189's crop landed differs."""
+    state, ps = _table_page_state(tmp_path, ticks=True)
+    assert ps.placeholder_pending and not ps.unshipped_figure_kind, "judged after assembly"
+    assert not state.events
+    state._chart_region_preserved = {1: set(preserved)}
+    _pipe()._reconcile_pending_placeholders(state)
+    assert ps.placeholder_pending is None
+    assert ps.unshipped_figure_kind == (fp.PLACEHOLDER_KIND if not preserved else "")
+    assert bool(state.events) == (not preserved)
+
+
+def test_a_table_page_gh189_skipped_credits_nothing(tmp_path: Path) -> None:
+    """GH-189 never ran its crop for the page (no ``_chart_region_preserved`` entry)."""
+    state, ps = _table_page_state(tmp_path, ticks=True)
+    _pipe()._reconcile_pending_placeholders(state)
+    assert ps.unshipped_figure_kind == fp.PLACEHOLDER_KIND
+
+
+def test_assembly_reconciles_the_pending_placeholders_after_the_chart_region_pass() -> None:
+    """The call site: a reverted call leaves a table page's placeholder judged by nobody."""
+    import inspect
+
+    from socr.pipeline.orchestrator import UnifiedPipeline as U
+
+    src = inspect.getsource(U._phase_assemble)
+    assert src.index("_preserve_chart_regions(") < src.index("_reconcile_pending_placeholders(")
+
+
+# -- (d) a #1187-answered page keeps exactly its #1187 record ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "unshipped_figure_rendered",
+        "unshipped_figure_render_failed",
+        "unshipped_figure_unlocated",
+        "unshipped_figure_chart_skeleton",
+    ],
+)
+def test_a_page_the_1187_lane_answered_keeps_that_record_and_adds_none(
+    tmp_path: Path, kind: str
+) -> None:
+    st, ps, out = _decide_model(
+        tmp_path,
+        _TWO_FIGURES,
+        unshipped_figure_kind=kind,
+        unshipped_figure_unlocated=["Figure 7"],
+    )
+    assert ps.unshipped_figure_kind == kind and not st.events
+    from socr.pipeline.orchestrator import UNSHIPPED_FIGURE_MARKED_KINDS
+
+    assert kind in UNSHIPPED_FIGURE_MARKED_KINDS, "that record already marks the page"
+
+
+# -- (e) the document note and the CLI name the new cases -------------------------------------
+
+
+def test_the_note_words_the_presence_cases_and_not_as_a_figure_socr_could_not_locate() -> None:
+    from socr.figures.unshipped_figures import document_note
+
+    note = document_note([], [3, 5], [], chart_shipped=[2], chart_lost=[3], placeholder=[5])
+    assert "page(s) 2 draw a chart that ships as an image" in note
+    assert "page(s) 3 draw a chart with axis ticks whose crop could not be saved" in note
+    assert "page(s) 5 carry an unmatched figure placeholder" in note
+    assert "could not locate" not in note, "pages 3 and 5 are not figures socr could not locate"
+    assert ";" not in note, "a note with ';' cannot be replaced as a unit"
+    # A plain unshipped-figure page keeps the old sentence beside them.
+    assert "page(s) 9 name a figure socr could not locate" in document_note(
+        [], [9, 3], [], chart_lost=[3]
+    )
+
+
+def test_the_live_note_and_the_cli_line_read_the_same_events() -> None:
+    from socr.core.audit_log import AuditEvent
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+
+    state = DocumentState(handle=DocumentHandle(path=Path("x.pdf"), page_count=6))
+    for page, kind in (
+        (2, fp.PRESENCE_SHIPPED_KIND),
+        (3, fp.PRESENCE_RENDER_FAILED_KIND),
+        (5, fp.PLACEHOLDER_KIND),
+    ):
+        state.events.append(AuditEvent(page_num=page, kind=kind, engine="", detail="d"))
+    assert UnifiedPipeline._presence_pages(state) == ([2], [3], [5])
+    note = UnifiedPipeline._unshipped_figure_note(state)
+    assert "unmatched figure placeholder" in note and "ships as an image" in note
+    assert "could not locate" not in note
+
+
+# -- (g) literal context ----------------------------------------------------------------------
+
+
+def test_placeholders_in_table_cells_and_inline_code_are_not_counted() -> None:
+    assert fp.placeholder_count("| a | <!-- Image (1) --> |\n| b | c |") == 0
+    assert fp.placeholder_count("a `<!-- Image (x) -->` quoted") == 0
+    assert fp.placeholder_count("a ``<!-- Image (x) -->`` quoted") == 0
+    assert fp.placeholder_count("<!-- Image (1, 2, 3, 4) -->") == 1
+    assert fp.placeholder_count("text `code` then <!-- Image (1) -->") == 1
+
+
+def test_a_longer_fence_is_not_closed_by_an_inner_shorter_one() -> None:
+    body = "````md\n```\n<!-- Image (x) -->\n```\n<!-- Image (y) -->\n````\n\n<!-- Image (z) -->"
+    assert fp.placeholder_count(body) == 1
+
+
+# -- (h) the model rule through the real process(), both provider states -----------------------
+
+_PLACEHOLDER_BODY = (
+    "Quarterly results\n\n<!-- Image (10, 20, 300, 200) -->\n\n"
+    "The estimated effect of the policy change on output is reported above."
+)
+_PLAIN_BODY = _PLACEHOLDER_BODY.replace("<!-- Image (10, 20, 300, 200) -->\n\n", "")
+
+
+class _ModelEngine:
+    name = "qwen"
+    BODY = _PLACEHOLDER_BODY
+
+    def is_available(self) -> bool:
+        return True
+
+    def process_pages(self, pdf_path, page_nums, config, dpi, subprocess_timeout=None, **_kw):
+        return [
+            PageOutput(page_num=n, text=self.BODY, status=PageStatus.SUCCESS, engine="qwen")
+            for n in page_nums
+        ]
+
+
+class _AcceptJudge:
+    def assess(self, output, provider):
+        from socr.pipeline.agentic import AcceptDecision
+
+        return AcceptDecision(accept=True, reason="")
+
+
+def _process_model(tmp_path: Path, monkeypatch, tag: str, body: str, *, providers: bool):
+    from socr.core.config import EngineType, PipelineConfig
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+    from socr.pipeline import orchestrator as orch
+
+    engine = _ModelEngine()
+    engine.BODY = body
+    pdf = _chart_pdf(tmp_path / f"{tag}.pdf", ticks=False, charts=0)
+    with monkeypatch.context() as m:
+        m.setattr(orch, "get_engine", lambda engine_type: engine)
+        m.setattr(UnifiedPipeline, "_is_chart_asset_page", lambda self, *a, **k: False)
+        m.setattr(UnifiedPipeline, "_is_agentic_trusted_native", lambda self, *a, **k: False)
+        pipe = UnifiedPipeline(
+            PipelineConfig(
+                agentic=True,
+                quiet=True,
+                primary_engine=EngineType.QWEN,
+                local_engine=EngineType.QWEN,
+                enabled_engines=[EngineType.QWEN],
+                native_first=True,
+                write_manifest=False,
+                judge_backend="heuristic",
+                dual_pass_tables=False,
+                detect_equations=False,
+                save_figures=False,
+            )
+        )
+        pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL] if providers else []
+        pipe._build_page_judge = lambda state: _AcceptJudge()
+        pipe._resolve_crop_vlm_model = lambda: None
+        pipe._resolve_judge_model = lambda *a, **k: ""
+        pipe.process(pdf, output_dir=tmp_path / f"out-{tag}")
+    out = tmp_path / f"out-{tag}"
+    side = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
+    text = next(iter(out.rglob("pages/00001.md"))).read_text()
+    # A run with no event writes no audit log at all.
+    log_path = next(iter(out.rglob("audit_log.json")), None)
+    log = json.loads(log_path.read_text()) if log_path else {"events": []}
+    return side, text, log
+
+
+def test_process_marks_an_unmatched_model_placeholder_and_only_when_a_model_read_the_page(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """One difference per provider state: the placeholder in the model's reading. With a
+    provider the model reads the page and the rule fires; with none the engine is never asked,
+    the page is the native text in both arms, and the rule has nothing to judge."""
+    arms = {}
+    for providers in (True, False):
+        for tag, body in (("on", _PLACEHOLDER_BODY), ("off", _PLAIN_BODY)):
+            side, text, log = _process_model(
+                tmp_path, monkeypatch, f"{tag}-{providers}", body, providers=providers
+            )
+            arms[providers, tag] = (side, text, {e["kind"] for e in log["events"]})
+
+    on, off = arms[True, "on"], arms[True, "off"]
+    assert on[0]["engine"] == off[0]["engine"] == "qwen", "the fixture must drive a MODEL page"
+    assert on[0]["unshipped_figure_kind"] == fp.PLACEHOLDER_KIND
+    assert off[0]["unshipped_figure_kind"] != fp.PLACEHOLDER_KIND
+    assert fp.PLACEHOLDER_KIND in on[2] and fp.PLACEHOLDER_KIND not in off[2]
+    assert leading_marks(on[1], 1) and on[0]["status"] != "success"
+    assert any("image placeholder" in str(v) for v in on[0].get("verdict", {}).get("clauses", []))
+
+    noprov_on, noprov_off = arms[False, "on"], arms[False, "off"]
+    assert noprov_on[0]["unshipped_figure_kind"] == noprov_off[0]["unshipped_figure_kind"]
+    assert noprov_on[1] == noprov_off[1], "no provider: the model never read the page"
+    assert fp.PLACEHOLDER_KIND not in noprov_on[2]
+
+
+def test_a_restored_render_failure_is_retried_in_place(tmp_path: Path) -> None:
+    """The lane reached with the restored kind (a replayed event and a restored state), the
+    crop now savable: the retry replaces the old failure instead of being refused by it. One
+    difference: only the recorded kind. Through ``process()`` a failed page is reprocessed
+    from scratch (its status is not SUCCESS), so this state is reached by the replay path."""
+    from socr.core.audit_log import AuditEvent
+
+    pdf = _chart_pdf(tmp_path / "c.pdf", ticks=True)
+    outcomes = {}
+    for restored in (False, True):
+        from socr.core.document import DocumentHandle
+        from socr.core.state import DocumentState
+
+        state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+        ps = PageState(page_num=1)
+        ps.is_born_digital = True
+        state.pages[1] = ps
+        if restored:
+            ps.unshipped_figure_kind = fp.PRESENCE_RENDER_FAILED_KIND
+            ps.unshipped_figure_unlocated = ["chart region 1"]
+            state.events.append(
+                AuditEvent(
+                    page_num=1,
+                    kind=fp.PRESENCE_RENDER_FAILED_KIND,
+                    engine="figure_presence",
+                    detail="old",
+                )
+            )
+        out = PageOutput(page_num=1, text=_PROSE, status=PageStatus.SUCCESS, engine="native")
+        ps.best_output = out
+        _pipe()._agentic_figure_presence_page(state, 1, ps, out, tmp_path / "figures")
+        outcomes[restored] = (
+            ps.unshipped_figure_kind,
+            [e.kind for e in state.events],
+            ps.unshipped_figure_unlocated,
+        )
+    assert outcomes[True] == outcomes[False]
+    assert outcomes[True][0] == fp.PRESENCE_SHIPPED_KIND
+    assert fp.PRESENCE_RENDER_FAILED_KIND not in outcomes[True][1]
+    assert outcomes[True][2] == []
