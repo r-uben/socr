@@ -163,8 +163,14 @@ from socr.core.verdict import (
     INVALID_FINAL_EMISSION_NOTE_PREFIX,
     NUMBERS_DROPPED_EVENT_DETAIL,
     NUMBERS_DROPPED_KIND,
+    CONTROL_BYTES_EVENT_DETAIL,
+    CONTROL_BYTES_KIND,
+    HIDDEN_FOOTNOTE_EVENT_DETAIL,
+    HIDDEN_FOOTNOTE_KIND,
     WORDS_MISSING_EVENT_DETAIL,
     WORDS_MISSING_KIND,
+    control_bytes_cli_line,
+    control_bytes_note,
     numbers_disagree_note,
     numbers_dropped_cli_line,
     numbers_dropped_event_data,
@@ -461,6 +467,17 @@ _RESUME_REPLAYED: dict[str, str] = {
         )
         for kind in UNSHIPPED_FIGURE_EVENT_KINDS
     },
+    CONTROL_BYTES_KIND: (
+        "#1306: the finalisation guard replaced control bytes of the layer with U+FFFD; a resumed "
+        "terminal page restores the repaired text and never runs the guard again, so this event "
+        "is the only record of how many bytes of which code points stood there. The page's mark "
+        "comes from the published verdict"
+    ),
+    HIDDEN_FOOTNOTE_KIND: (
+        "#1306: the guard removed the invisible tagged copy of a footnote because the printed "
+        "copy is on the page; one event per wrapper. The restored page ships the stripped text, "
+        "so without the replay the removal would have no record at all"
+    ),
     TABLE_BLANK_LINES_DROPPED_KIND: (
         "the model's table had blank rows/columns removed before it was checked and shipped; the "
         "counts live only on this event, and a terminal resumed page skips the gate"
@@ -17469,6 +17486,59 @@ class UnifiedPipeline:
         tmp_path.rename(frag_path)
         return frag_path
 
+    @staticmethod
+    def _record_damaged_layer_events(state: DocumentState, page_num: int, ps, winning_out) -> None:
+        """#1306: one aggregated control-byte event per page and one event per hidden footnote stripped.
+
+        Called by every sidecar flush, so an event equal to one the page already has is not
+        added again. A page restored on resume carries none of the guard's page state and
+        adds nothing; its events come back from the sidecar (``_RESUME_REPLAYED``).
+        """
+        if ps is None or winning_out is None:
+            return
+        import json
+
+        from socr.core.audit_log import AuditEvent
+        from socr.core.damaged_layer import REPLACEMENT_CHAR
+        from socr.core.manifest import engine_ships_native_text
+
+        wanted: list[tuple[str, str, dict]] = []
+        controls = getattr(ps, "control_bytes_replaced", None) or {}
+        if controls and REPLACEMENT_CHAR in (winning_out.text or ""):
+            wanted.append(
+                (
+                    CONTROL_BYTES_KIND,
+                    CONTROL_BYTES_EVENT_DETAIL,
+                    {"page": page_num, "count": sum(controls.values()), "codes": dict(controls)},
+                )
+            )
+        if engine_ships_native_text(winning_out.engine):
+            for stripped in getattr(ps, "hidden_footnotes_stripped", None) or []:
+                wanted.append(
+                    (
+                        HIDDEN_FOOTNOTE_KIND,
+                        HIDDEN_FOOTNOTE_EVENT_DETAIL,
+                        {"page": page_num, **stripped},
+                    )
+                )
+        have = {
+            (ev.kind, json.dumps(ev.data or {}, sort_keys=True))
+            for ev in state.events
+            if ev.page_num == page_num and ev.kind in (CONTROL_BYTES_KIND, HIDDEN_FOOTNOTE_KIND)
+        }
+        for kind, detail, data in wanted:
+            if (kind, json.dumps(data, sort_keys=True)) in have:
+                continue
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=kind,
+                    engine=winning_out.engine or "",
+                    detail=detail,
+                    data=data,
+                )
+            )
+
     def _flush_page_sidecar(
         self,
         state: DocumentState,
@@ -17551,6 +17621,7 @@ class UnifiedPipeline:
             record = finalized_page_record(state, page_num, whole_doc)
 
         winning_out = record.output if record is not None else None
+        self._record_damaged_layer_events(state, page_num, ps, winning_out)
         winning_dict = winning_out.to_dict() if winning_out is not None else {}
         disp = record.disposition if record is not None else None
         disposition_dict = disp.to_dict() if disp is not None else None
@@ -20631,6 +20702,18 @@ class UnifiedPipeline:
             )
         }
         words_missing_pages = sorted(words_missing_by_page)
+        # #1306: pages that ship a control byte of their own layer as U+FFFD. A repaired page
+        # is still not a CHECKED one (the glyph it stood for is unknown), so the document must
+        # not report SUCCESS over it. Read from the verdict, which survives a resume.
+        control_bytes_pages = sorted(
+            r.output.page_num
+            for r in pre_records
+            if r.verdict is not None
+            and any(
+                c.check is _Check.CONTROL_BYTES and c.result is _CheckResult.FAIL
+                for c in r.verdict.clauses
+            )
+        )
         # #961: the same retained-native condition for a scan's invisible OCR layer.
         invisible_retained_pages = [
             n
@@ -20856,6 +20939,7 @@ class UnifiedPipeline:
         pages_ok = pages_ok and not numbers_disagree_pages
         pages_ok = pages_ok and not numbers_dropped_pages
         pages_ok = pages_ok and not words_missing_pages
+        pages_ok = pages_ok and not control_bytes_pages
         pages_ok = pages_ok and not garbled_math_retained_pages
         pages_ok = pages_ok and not flattened_table_pages
         pages_ok = pages_ok and not figure_unread_pages
@@ -21187,6 +21271,7 @@ class UnifiedPipeline:
             or numbers_disagree_pages
             or numbers_dropped_pages
             or words_missing_pages
+            or control_bytes_pages
             or garbled_math_retained_pages
             or flattened_table_pages
             or figure_unread_pages
@@ -21800,6 +21885,10 @@ class UnifiedPipeline:
                 if words_missing_pages:
                     console.print(
                         f"  [yellow]{words_missing_cli_line(words_missing_pages)}[/yellow]"
+                    )
+                if control_bytes_pages:
+                    console.print(
+                        f"  [yellow]{control_bytes_cli_line(control_bytes_pages)}[/yellow]"
                     )
                 if garbled_math_retained_pages:
                     console.print(
@@ -22444,6 +22533,13 @@ class UnifiedPipeline:
                 final_result.error = f"{final_result.error}; {_words_note}"
             else:
                 final_result.error = _words_note
+        # #1306: and the pages that ship control bytes of their own layer as U+FFFD.
+        if control_bytes_pages:
+            _control_note = control_bytes_note(control_bytes_pages)
+            if final_result.error:
+                final_result.error = f"{final_result.error}; {_control_note}"
+            else:
+                final_result.error = _control_note
 
         # Save markdown + metadata BEFORE the figure phase: the describe loop
         # makes long paid API calls, and any exception there used to lose the
