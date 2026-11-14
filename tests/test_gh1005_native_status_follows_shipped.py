@@ -21,6 +21,7 @@ import pytest
 
 fitz = pytest.importorskip("fitz")
 
+from c3_support import give_word_evidence  # noqa: E402
 from socr.core.config import EngineType, PipelineConfig  # noqa: E402
 from socr.core.document import DocumentHandle  # noqa: E402
 from socr.core.manifest import finalized_page_record  # noqa: E402
@@ -143,6 +144,8 @@ def test_unmapped_math_document_level_follows_the_shipped_output(tmp_path: Path)
     model_page = model_state.pages[1]
     model_page.own_layer_text = "Prose of the page with the equation T = f(T) in it, 4.2."
     model_page.best_output.text = MODEL_TEXT + " 4.2"
+    # #1251: a judge's acceptance is not a check; the layer's words are the independent evidence.
+    give_word_evidence(model_page)
     native_result = _assemble(tmp_path, native_state, "n")
     model_result = _assemble(tmp_path, model_state, "m")
 

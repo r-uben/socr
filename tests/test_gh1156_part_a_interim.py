@@ -28,6 +28,7 @@ import pytest
 
 fitz = pytest.importorskip("fitz")
 
+from c3_support import give_word_evidence  # noqa: E402
 from socr.core.born_digital import BornDigitalDetector  # noqa: E402
 from socr.core.document import DocumentHandle  # noqa: E402
 from socr.core.manifest import (  # noqa: E402
@@ -787,6 +788,7 @@ def test_the_document_is_not_clean_when_a_model_wins_on_a_suspect_scan(tmp_path:
         p.prior_ocr_layer_suspect = suspect
         # #1244 C1: the control reading is CHECKED only against a layer sharing a number with it.
         p.own_layer_text = "A MODEL READING THE JUDGE ACCEPTED 3"
+        give_word_evidence(p, p.own_layer_text)  # #1251: the layer's words, independent evidence
         winner = PageOutput(
             page_num=1,
             text="A MODEL READING THE JUDGE ACCEPTED 3",

@@ -41,6 +41,7 @@ from ocr_output_contract import (  # noqa: E402
     resolve_output_root,
 )
 
+from c3_support import give_word_evidence  # noqa: E402
 from socr import cli as socr_cli  # noqa: E402
 from socr.core.config import EngineType, PipelineConfig  # noqa: E402
 from socr.core.result import (  # noqa: E402
@@ -96,6 +97,8 @@ def _backbone_writing_pages(text_by_page):
             text = f"{text} 4.2"
             state.pages[page_num].own_layer_text = text
             state.pages[page_num].is_born_digital = True
+            # #1251: a judge's acceptance is not a check; the layer's words are the evidence
+            give_word_evidence(state.pages[page_num], text)
             state.pages[page_num].best_output = PageOutput(
                 page_num=page_num,
                 text=text,
@@ -335,10 +338,12 @@ class TestFailureRecordConformance:
         def _selective_backbone(self, state, output_dir):
             # "bad.pdf" produces no text (failure); "ok.pdf" succeeds.
             if state.handle.path.stem == "ok":
-                for n, t in ({1: "ok one 4.2", 2: "ok two 4.2"}).items():
+                # #1251: the words need four letters to be compared, so the readings have some
+                for n, t in ({1: "okay page one 4.2", 2: "okay page two 4.2"}).items():
                     # #1244 C1: CHECKED needs a born-digital layer sharing a number.
                     state.pages[n].own_layer_text = t
                     state.pages[n].is_born_digital = True
+                    give_word_evidence(state.pages[n], t)
                     state.pages[n].best_output = PageOutput(
                         page_num=n,
                         text=t,

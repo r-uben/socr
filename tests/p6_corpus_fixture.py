@@ -428,6 +428,10 @@ def legacy_resume_capture(tmp_dir: Path) -> dict:
         page.native_text = LEGACY_RESUME_NATIVE_FLATTENED
         # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
         page.own_layer_text = LEGACY_RESUME_MODEL_GRID
+        # #1251: a judge's acceptance is not a check; the layer's words are the evidence
+        from c3_support import give_word_evidence
+
+        give_word_evidence(page, LEGACY_RESUME_MODEL_GRID)
         return state
 
     native_attempt = PageOutput(

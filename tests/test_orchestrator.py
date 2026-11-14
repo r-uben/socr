@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from ocr_output_contract import run_fingerprint
 
+from c3_support import give_word_evidence
 from socr.audit.heuristics import HeuristicsChecker
 from socr.audit.scorer import FailureModeScorer, ScoringResult
 from socr.core.born_digital import BornDigitalDetector, DocumentAssessment, PageAssessment
@@ -362,6 +363,8 @@ class TestPhaseAssemble:
         # #1244 C1: CHECKED needs a born-digital layer sharing a number with the reading.
         state.pages[1].own_layer_text = "Hello canonical world 4.2"
         state.pages[1].is_born_digital = True
+        # #1251: a judge's acceptance is not a check; the layer's words are the evidence
+        give_word_evidence(state.pages[1], "Hello canonical world 4.2")
         state.pages[1].best_output = PageOutput(
             page_num=1,
             text="## Page 1\n\nHello canonical world 4.2",

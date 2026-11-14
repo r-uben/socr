@@ -316,8 +316,70 @@ pass again, so ruling 2 is the only cause (resume helper and offline helper incl
   * `tests/test_s1_structure_class_winner_gh_reachability.py`: 2
   * `tests/test_structural_gate_b1_gh151.py`: 1
 
-The coordinator rules: either each fixture gets the layer's words (as the five of round 1), or
-the rule is narrowed.
+**Coordinator ruling (a): each fixture gets independent evidence; assertions unchanged.** One shared
+helper, `tests/c3_support.py`, gives a stub model reading evidence the REAL checks accept. No check
+is stubbed to pass (`missing_words` / `page_missing_words` are not patched for these tests; the
+autouse `page_missing_words -> None` of four files is older and untouched). Shapes:
+
+  * state level: `give_word_evidence(page_state, text)` sets `own_layer_word_reference` to the
+    reading's words (what `BornDigitalDetector` fills from a real layer);
+  * synthetic PDF: `add_page_lines` / `print_reading_layer` print a per-page line in the layer, and
+    the stub reading carries it (the line differs per page, so it is not repeated furniture);
+  * committed real PDF: `reading_with_layer_words` appends the page assessment's own
+    `own_layer_word_reference` (what the real run compares: hyphen joins, furniture and figures
+    excluded) to a table-only stub reading.
+
+A word needs four letters to be compared, and the numbers check needs a number the reading shares
+with the layer, so a few stub readings gained a word (`okay page one 4.2`, `Table figures`).
+
+The 50, one line each. "fixture evidence added" unless noted:
+
+  * `test_a1c_header_binding_unverified_surfacing`: `test_clean_success_sidecar_is_still_resume_skippable_pin_the_difference`
+  * `test_canon_remediation`: `test_replay_is_bit_identical_to_saved_body`, `TestConformance::test_two_page_output_conforms`
+  * `test_canon_round2`: `test_two_file_batch_conforms`, `test_batch_root_index_is_contract_schema_not_legacy`, `test_resume_skips_only_when_fingerprint_matches` (shared `_backbone_writing_pages`)
+  * `test_canon_round3`: `test_failed_doc_uses_contract_failure_checksum` (readings given a four-letter word), `test_save_figures_toggle_reprocesses_not_skipped`, `test_limit_batch_without_o_persists_output` (shared `_backbone_writing_pages`)
+  * `test_chart_lane`: `test_gh318_chart_detection_failure_is_visible_at_page_and_document_status` (reading gained a title word), `test_gh682_clean_page_resumes_clean_no_chart_region_flags`
+  * `test_gh1005_native_status_follows_shipped`: `test_unmapped_math_document_level_follows_the_shipped_output`
+  * `test_gh1145_page_verdict_marks`: `test_the_fail_closed_fallback_marks_a_page_whose_reason_socr_cannot_name[error]`, `[warning]`
+  * `test_gh1156_part_a_interim`: `test_the_document_is_not_clean_when_a_model_wins_on_a_suspect_scan`
+  * `test_gh1181_exact_pass_unjudged_clause`: `test_a_page_the_gate_delegated_to_the_judge_is_untouched`, `test_a_page_without_the_event_is_untouched`, `test_the_mark_turns_on_the_exact_pass_accept_and_nothing_else`
+  * `test_gh1185_refinalize_tool_unit`: `test_a_page_only_the_current_analysis_calls_earlier_ocr_is_marked_not_left_checked`, `test_the_table_counts_follow_the_demoted_page`: **old-run emulation**, see below
+  * `test_gh1218_drops_clause`: `test_the_same_page_with_and_without_the_row_differs_only_in_the_clause` (the one word both arms carry)
+  * `test_gh1267_row_binding_pipeline`: `test_unverifiable_table_is_marked_without_claiming_a_contradiction[0]`, `[90]` (the reading names the slipped label's word below the table in both arms)
+  * `test_gh161_resume_ledger_audit_gate`: `test_audit_passed_success_page_is_still_resume_skippable`, `test_legacy_success_audit_false_sidecar_is_not_resume_skippable`
+  * `test_gh190_empty_table_surfacing`: `test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces` (both arms carry the layer's prose; the prose's own "1." is left to the cell so the layer's number is not claimed twice)
+  * `test_gh225_fabricated_image_urls`: `test_clean_phase_major_document_still_succeeds`
+  * `test_gh226_table_emission_guard`: `test_missing_page_text_cannot_crash_the_final_guard`: **expectation changed (genuinely layer-less)**: an empty reading has no words to compare, so it carries the page_judge mark; the test now asserts the body without its marks is empty (`strip_verdict_marks`), which is what it pins (no crash)
+  * `test_gh851_escalation_latch_evidence`: `test_withheld_page_is_demoted_at_page_and_document_status` (per-page line in the PDF layer and in both stub paths)
+  * `test_gh974_review_pins`: `test_budget_exhaustion_demotes_page_and_document_through_process` (via `test_ladder_e2e._route_page_per_page`, which now prepends the PDF page's title line)
+  * `test_gh993_readable_tables`: `test_cli_line_is_printed_once_per_document`, `test_verified_withheld_and_unverified_tables_are_counted`, `test_withholding_one_more_table_moves_the_counts_by_exactly_one` (the stub reading carries the caption; `test_gh359_ladder_terminals._process` gained a defaulted `reading=` argument)
+  * `test_ladder_e2e`: `TestClampedUnverifiedTerminal`, `TestPlainUnverifiedTerminal`, `TestRejectedTerminal` `::test_flag_off_vs_on`
+  * `test_ladder_resume`: `TestBaselineUntouched::test_no_ladder_disposition_behaves_as_before` (`_seed_and_flush` gives the layer's words when it gives a layer)
+  * `test_native_cell_advisory_quiet_side_effects`: `test_plfss_p38_verified_table_count_with_advisory_ambiguous`, `test_review_html_success_page_not_suspicious_from_advisory_native_cell` (via `test_resf_native_cell_pipeline._run_page`)
+  * `test_orchestrator`: `TestPhaseAssemble::test_assemble_writes_canonical_metadata`
+  * `test_p6_stage_ab_difference`, `test_p6_stage_c_difference` (3 tests): the shared `p6_corpus_fixture.legacy_resume_capture` gives its page the layer's words; the archived oracle is unchanged and still equal
+  * `test_resf_native_cell_pipeline`: `test_correct_table_verified_end_to_end_p59`, `test_mutated_table_contradicted_advisory_no_demotion`, `test_no_geometry_skips_advisory_no_demotion`, `test_p67_strict_labels_ambiguous_advisory_no_demotion` (`_run_page`'s stub reading carries the layer's owed words)
+  * `test_s1_structure_class_winner_gh_reachability`: `test_a_legacy_sidecar_without_a_disposition_resumes_as_an_ordinary_passing_page` (p6 fixture), `test_ordinary_already_passing_non_native_winner_is_not_an_s1_event`
+  * `test_structural_gate_b1_gh151`: `TestWiringUnits::test_manifest_passing_non_native_winner_is_unaffected_by_the_flag` (the one word the layer and the reading share)
+
+Counts: 49 fixture evidence added (2 of them as old-run emulation), 1 expectation changed
+(`test_gh226...`). No assertion of the other 49 was edited.
+
+**Old-run emulation (2 tests, 1 file).** `test_gh1185_refinalize_tool_unit._old_run` builds "what a
+run made before #1185 published" by patching `text_layer_numbers_clause` out. Such a run is also a
+run before #1251, so the same helper now patches `_judge_only_clauses` out (the page_judge clause
+is a later check). The words and numbers checks are the real ones. In the first test the arm the
+run flagged now takes the verdict a run of this code writes for such a page (its prior-OCR layer
+is not evidence, so it carries the numbers clause); an old verdict with no clause was not that
+page, and under C3 it correctly gets the page_judge mark. Same precedent as
+`test_gh1185_text_layer_numbers_e2e` in round 1.
+
+**Mutant (this change).** Copy of `src` and `tests` outside the repo, `socr.__file__` asserted
+inside the copy, uncapped anchor counts == 1 asserted: `give_word_evidence` made a no-op,
+`reading_with_layer_words` returning the bare text, `add_page_lines` printing nothing. Of the 50,
+34 fail (all that get their evidence through these three functions). The other 16 carry their
+evidence inline in the test (a caption, a title, a prose line); they are red on the previous head
+(the 50 in the full run before this change).
 
 ## Not done
 

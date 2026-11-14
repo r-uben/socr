@@ -11,6 +11,7 @@ import pytest
 
 pytest.importorskip("fitz")
 
+from c3_support import reading_with_layer_words  # noqa: E402
 from socr.core.config import EngineType, PipelineConfig  # noqa: E402
 from socr.core.manifest import UNVERIFIED_TABLE_MARK  # noqa: E402
 from socr.core.providers import PROFILE_QWEN_LOCAL  # noqa: E402
@@ -81,7 +82,8 @@ def _run_page(
     def _fake_route(page_num, ladder, run_provider, judge, **kwargs):
         out = PageOutput(
             page_num=page_num,
-            text=md,
+            # #1251: a judge's acceptance is not a check; the reading carries the layer's words
+            text=reading_with_layer_words(pdf, md, page_num=page_num),
             status=PageStatus.SUCCESS,
             engine="qwen",
             audit_passed=True,

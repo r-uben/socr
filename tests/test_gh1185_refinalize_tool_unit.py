@@ -59,7 +59,13 @@ def _sidecar(output: PageOutput, verdict, **extra) -> dict:
 
 def _old_run(output: PageOutput, p) -> tuple[PageOutput, object]:
     """What a run made before #1185 published for this page."""
-    with mock.patch.object(verdict_module, "text_layer_numbers_clause", lambda o, p: None):
+    # #1251: a run before #1185 is a run before #1251 too, whose page_judge clause (a later
+    # check) would read the absent numbers evidence as "no evidence". Only the later clause is
+    # removed; the words and numbers checks themselves are the real ones.
+    with (
+        mock.patch.object(verdict_module, "text_layer_numbers_clause", lambda o, p: None),
+        mock.patch.object(verdict_module, "_judge_only_clauses", lambda o, p, kinds: ()),
+    ):
         return apply_verdict_marks(output, p, output.page_num)
 
 
@@ -75,9 +81,15 @@ def test_a_page_only_the_current_analysis_calls_earlier_ocr_is_marked_not_left_c
     old_out, old_v = _old_run(_success(), SimpleNamespace(prior_ocr_layer_suspect=False))
     assert old_out.status is PageStatus.SUCCESS and not old_v.clauses, "fixture premise"
 
+    # #1251: a page the RUN flagged carries the run's own mark (its prior-OCR layer is not
+    # evidence, so a run of this code states it); an old verdict with no clause is not that page.
+    run_out, run_v = apply_verdict_marks(
+        _success(), SimpleNamespace(prior_ocr_layer_suspect=True), 1
+    )
+    assert run_v.clauses, "fixture premise: the run that flagged the page marked it"
     unflagged = tool.refinalize_page(_sidecar(old_out, old_v), _analysis(prior_ocr=True))
     flagged = tool.refinalize_page(
-        _sidecar(old_out, old_v, prior_ocr_layer_suspect=True), _analysis(prior_ocr=True)
+        _sidecar(run_out, run_v, prior_ocr_layer_suspect=True), _analysis(prior_ocr=True)
     )
     assert flagged is None
     out, verdict = unflagged

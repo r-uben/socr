@@ -213,11 +213,21 @@ def _make_config(
     )
 
 
+def _page_title(page_num: int) -> str:
+    """The first line of the committed PDF's page: its title, which the page's own text layer
+    prints and a table-only reading would omit."""
+    with fitz.open(FIXTURE_PDF) as doc:
+        return doc[page_num - 1].get_text().splitlines()[0]
+
+
 def _route_page_per_page(text_by_page: dict[int, str]):
     def _fake_route(page_num, ladder, run_provider, judge, **kwargs):
         from socr.pipeline.agentic import PageDecision, ProviderAttempt
 
-        text = text_by_page[page_num]
+        # #1251: a judge's acceptance is not a check, so the stub reading carries the page's
+        # title (the layer's words) above the table: it is CHECKED by the layer, and a table
+        # defect is what moves a page, not the absence of evidence. The tables are unchanged.
+        text = f"{_page_title(page_num)}\n\n{text_by_page[page_num]}"
         out = PageOutput(
             page_num=page_num,
             text=text,
