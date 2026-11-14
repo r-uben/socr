@@ -101,10 +101,17 @@ PROFILE_QWEN_CLOUD = ProviderProfile(
     model="qwen3.5:cloud",
 )
 
+
+def _gemini_ladder_cost_per_page() -> float:
+    from socr.core.gemini_pricing import reference_page_cost_usd
+
+    return reference_page_cost_usd(DEFAULT_GEMINI_MODEL)
+
+
 PROFILE_GEMINI = ProviderProfile(
     engine=EngineType.GEMINI,
     tier=TIER_CLOUD,
-    cost_per_page_usd=0.0002,
+    cost_per_page_usd=_gemini_ladder_cost_per_page(),
     id="gemini",
     backend="gemini-api",
     model=DEFAULT_GEMINI_MODEL,

@@ -157,6 +157,7 @@ _UNEXERCISED = {
     "gemma_max_output_tokens",
     # Only enforced when > 0; this fixture leaves the default (unlimited).
     "max_paid_pages",
+    "max_paid_usd",
     "deepseek_vllm_url",
     "qwen_vllm_model",
     "qwen_model_pinned",
@@ -170,6 +171,7 @@ _UNEXERCISED = {
     # Same shape as max_cost_per_page_pinned: only read when --max-paid-pages is
     # explicitly given; this fixture leaves max_paid_pages at None (unlimited).
     "max_paid_pages_pinned",
+    "max_paid_usd_pinned",
     "judge_backend",  # read by _build_page_judge, stubbed here
     # Read only inside the table-extractor block, which is gated on
     # _resolve_crop_vlm_model() finding a live vision model. Pinned to None in

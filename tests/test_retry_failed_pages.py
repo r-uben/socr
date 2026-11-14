@@ -162,11 +162,12 @@ def test_failed_page_is_retried_once_with_the_ladder_reversed(tmp_path, monkeypa
     assert off[FLAKY_PAGE]["status"] == "error"
     assert off[FLAKY_PAGE]["page_retry"] is None
 
-    # On: one more pass over that page only, gemini first, and it no longer fails.
+    # On: one more pass over that page only; paid Gemini is at-most-once, so retry
+    # succeeds via the free rung only.
     assert [(e, p) for e, p, _ in on_log if p == FLAKY_PAGE] == [
         ("qwen", FLAKY_PAGE),
         ("gemini", FLAKY_PAGE),
-        ("gemini", FLAKY_PAGE),
+        ("qwen", FLAKY_PAGE),
     ]
     assert on[FLAKY_PAGE]["status"] != "error"
     # Pages that succeeded are not run again.
@@ -217,7 +218,8 @@ def test_each_retried_page_keeps_exactly_its_own_first_attempt_events(tmp_path, 
 
     for page in (2, 4):
         kept = on[page]["page_retry"]["first_attempt"]["audit_events"]
-        assert [e["kind"] for e in kept].count("provider_empty_response") == 4, (page, kept)
+        # Qwen still retries empty answers; paid Gemini is at-most-once (one event).
+        assert [e["kind"] for e in kept].count("provider_empty_response") == 2, (page, kept)
         assert all(e["page_num"] == page for e in kept)
         # Kept whole, not as a count: the detail of the first attempt survives.
         assert all(e["detail"] for e in kept)

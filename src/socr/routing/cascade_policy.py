@@ -303,18 +303,92 @@ _OUTPUT_TOKEN_RE = re.compile(
 )
 
 
+def _int_field(blob: str, pattern: re.Pattern[str]) -> int | None:
+    m = pattern.search(blob)
+    return int(m.group(1)) if m else None
+
+
+_PROMPT_TOKEN_FIELD = re.compile(
+    r"(?:promptTokenCount|(?:prompt|input)[_\s-]*token(?:s)?)[\s:=]+(\d+)",
+    re.IGNORECASE,
+)
+_CANDIDATES_TOKEN_FIELD = re.compile(
+    r"(?:candidatesTokenCount|(?:completion|output|candidates)[_\s-]*token(?:s)?)[\s:=]+(\d+)",
+    re.IGNORECASE,
+)
+_THOUGHTS_TOKEN_FIELD = re.compile(
+    r"(?:thoughtsTokenCount|thought[_\s-]*token(?:s)?)[\s:=]+(\d+)",
+    re.IGNORECASE,
+)
+_CACHED_TOKEN_FIELD = re.compile(
+    r"(?:cachedContentTokenCount|cached[_\s-]*content[_\s-]*token(?:s)?)[\s:=]+(\d+)",
+    re.IGNORECASE,
+)
+_TOTAL_TOKEN_FIELD = re.compile(
+    r"(?:totalTokenCount|total[_\s-]*token(?:s)?)[\s:=]+(\d+)",
+    re.IGNORECASE,
+)
+
+
+def parse_gemini_usage(stderr: str, stdout: str = ""):
+    """Parse Gemini ``usageMetadata`` fields from CLI logs or embedded JSON."""
+    from socr.core.gemini_pricing import GeminiUsage
+
+    blob = f"{stderr or ''}\n{stdout or ''}"
+    prompt = _int_field(blob, _PROMPT_TOKEN_FIELD)
+    candidates = _int_field(blob, _CANDIDATES_TOKEN_FIELD)
+    thoughts = _int_field(blob, _THOUGHTS_TOKEN_FIELD)
+    cached = _int_field(blob, _CACHED_TOKEN_FIELD)
+    total = _int_field(blob, _TOTAL_TOKEN_FIELD)
+
+    # Embedded JSON snippet (gemini-ocr-cli may log usageMetadata as JSON).
+    if "usageMetadata" in blob or "usage_metadata" in blob:
+        import json
+
+        for line in blob.splitlines():
+            stripped = line.strip()
+            if "usageMetadata" not in stripped and "usage_metadata" not in stripped:
+                continue
+            start = stripped.find("{")
+            if start < 0:
+                continue
+            try:
+                data = json.loads(stripped[start:])
+            except json.JSONDecodeError:
+                continue
+            meta = data.get("usageMetadata") or data.get("usage_metadata") or data
+            if not isinstance(meta, dict):
+                continue
+            prompt = meta.get("promptTokenCount", prompt)
+            candidates = meta.get("candidatesTokenCount", candidates)
+            thoughts = meta.get("thoughtsTokenCount", thoughts)
+            cached = meta.get("cachedContentTokenCount", cached)
+            total = meta.get("totalTokenCount", total)
+            break
+
+    present = any(v is not None for v in (prompt, candidates, thoughts, cached, total))
+    return GeminiUsage(
+        prompt_token_count=prompt,
+        candidates_token_count=candidates,
+        thoughts_token_count=thoughts,
+        cached_content_token_count=cached,
+        total_token_count=total,
+        usage_metadata_present=present,
+    )
+
+
 def parse_token_usage(stderr: str, stdout: str = "") -> tuple[int | None, int | None]:
     """Best-effort input/output token counts from CLI logs (Gemini / generic).
 
     ``total_tokens`` is never treated as output — only explicit completion/output
-    token fields count toward ``llm_output_tokens``.
+    token fields count toward ``llm_output_tokens``. Thinking tokens are included
+    in the output side for billing alignment.
     """
-    blob = f"{stderr or ''}\n{stdout or ''}"
-    inp = out = None
-    m = _TOKEN_USAGE_RE.search(blob)
-    if m:
-        inp = int(m.group(1))
-    m = _OUTPUT_TOKEN_RE.search(blob)
-    if m:
-        out = int(m.group(1))
+    usage = parse_gemini_usage(stderr, stdout)
+    if not usage.usage_metadata_present:
+        return None, None
+    inp = usage.prompt_token_count
+    out = usage.billable_output_tokens if usage.billable_output_tokens else None
+    if out == 0 and usage.candidates_token_count is not None:
+        out = usage.candidates_token_count
     return inp, out
