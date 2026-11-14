@@ -90,6 +90,7 @@ from socr.core.state import (
 )
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures import crop_descriptions as _crop_descriptions
+from socr.figures import figure_crop as _figure_crop
 from socr.figures import figure_presence as _figure_presence
 from socr.figures import unshipped_figures as _unshipped_figures
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
@@ -13245,7 +13246,9 @@ class UnifiedPipeline:
                     self._agentic_unshipped_figure_page(state, page_num, ps, bo, _chart_figures_dir)
                     # #1276: a chart the page draws ships as a picture or is marked, and a model
                     # placeholder is matched one-to-one by a shipped image.
-                    self._agentic_figure_presence_page(state, page_num, ps, bo, _chart_figures_dir)
+                    self._agentic_figure_presence_page(
+                        state, page_num, ps, bo, _chart_figures_dir, doc_dir=_agentic_doc_dir
+                    )
 
                 # #1282: a dropped decimal point is restored from the page's own text layer here,
                 # on the winning output, so that the finalize below (verdict, marks) and the
@@ -14015,6 +14018,7 @@ class UnifiedPipeline:
         ps: PageState,
         page_out,
         figures_dir: Path | None,
+        doc_dir: Path | None = None,
     ) -> None:
         """#1276: the shipped body is final. Does every chart the page draws ship, or say why not?
 
@@ -14023,6 +14027,14 @@ class UnifiedPipeline:
         withholding gates, for the reason ``_agentic_unshipped_figure_page`` gives. Never edits
         the text (``manifest._apply_unshipped_figure_guard`` appends the crops at finalisation)
         and never touches ``audit_passed``: the winner-selection flag (#252).
+
+        The lane is chosen from ``page_out``'s engine: the best reading as the loop holds it
+        here, BEFORE ``finalized_page_record`` selects what ships. The selector can still
+        replace a refused model reading by the native text (``NATIVE_FALLBACK``) or a floor,
+        and then the lane that ran judged text that does not ship. Not decided from the
+        finalised record: selection has side effects (the chart floor renders crops) and runs
+        after this lane's events and crops must exist. The limit is stated in
+        ``docs/log/2026-11-13_1276-figure-presence.md``.
         """
         from socr.core.manifest import is_page_failed_marker, page_ships_its_own_page_image
 
@@ -14035,7 +14047,13 @@ class UnifiedPipeline:
         if not engine:
             return
         if _unshipped_figures.page_was_read_by_a_model(engine):
-            self._agentic_placeholder_presence(state, page_num, ps, body)
+            self._agentic_placeholder_presence(
+                state,
+                page_num,
+                ps,
+                body,
+                doc_dir if doc_dir is not None else (figures_dir.parent if figures_dir else None),
+            )
         elif engine != "chart_asset":
             self._agentic_native_chart_presence(state, page_num, ps, body, figures_dir)
 
@@ -14056,23 +14074,38 @@ class UnifiedPipeline:
         PDF cannot be opened for is recorded, not passed: "could not look" is not "nothing
         there".
         """
+        import fitz
+
         from socr.core.audit_log import AuditEvent
         from socr.core.pdf import open_pdf
         from socr.figures import figure_presence as fp
         from socr.figures.chart_regions import render_chart_region_crops
-        from socr.tables.reconstruct import chart_region_bboxes
+        from socr.tables.reconstruct import chart_region_clusters
 
         if getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, ""):
             return
         if self._page_has_tables(page_num, ps):
+            self._apply_presence_decision(
+                state, page_num, ps, fp.left_to_chart_region_pass_decision()
+            )
             return
         try:
             with open_pdf(str(state.handle.path)) as _doc:
                 _page = _doc[page_num - 1]
-                boxes = chart_region_bboxes(_page)
+                clusters = chart_region_clusters(_page)
+                boxes = [box for _core, box in clusters]
                 if not boxes:
+                    self._apply_presence_decision(state, page_num, ps, fp.no_box_decision())
                     return
                 words = list(_page.get_text("words") or [])
+                page_rect = _page.rect
+                groups = _figure_crop.crop_groups(
+                    words, [tuple(core) for core, _box in clusters], page_rect
+                )
+                crop_boxes = list(boxes)
+                for g in groups:
+                    crop_boxes[g.index - 1] = fitz.Rect(*g.rect)
+                group_of = {i: g.index for g in groups for i in g.indices}
         except Exception as exc:  # noqa: BLE001 -- recorded below, never a silent pass
             logger.warning("#1276: chart presence inventory failed for p%d: %s", page_num, exc)
             ps.chart_region_inventory_failed = True
@@ -14093,7 +14126,7 @@ class UnifiedPipeline:
         assessments = fp.assess_regions(
             words,
             boxes,
-            fp.own_region_refs(body, page_num),
+            _figure_crop.expand_covered(fp.own_region_refs(body, page_num), groups),
             list(getattr(ps, "detected_table_bboxes", []) or []),
             page_shipped=False,
         )
@@ -14101,18 +14134,20 @@ class UnifiedPipeline:
         def _render(indices: list[int]) -> dict[int, str]:
             if figures_dir is None:
                 return {}
-            return {
+            wanted = sorted({group_of[i] for i in indices})
+            saved = {
                 asset.region_index: asset.rel_path
                 for asset in render_chart_region_crops(
                     state.handle.path,
                     page_num,
-                    boxes,
+                    crop_boxes,
                     figures_dir,
-                    indices=indices,
+                    indices=wanted,
                     filename=fp.crop_filename,
                 )
                 if asset.rendered and asset.rel_path
             }
+            return {i: saved[group_of[i]] for i in indices if group_of[i] in saved}
 
         decision = fp.decide_presence(assessments, _render)
         if decision is None:
@@ -14150,13 +14185,20 @@ class UnifiedPipeline:
             )
 
     def _agentic_placeholder_presence(
-        self, state: DocumentState, page_num: int, ps: PageState, body: str
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        body: str,
+        doc_dir: Path | None = None,
     ) -> None:
         """A model reading's ``<!-- Image`` placeholders, matched one-to-one by shipped images.
 
-        Images counted: figure images already in the body, plus the crops ``_agentic_unshipped_
-        figure_page`` just recorded for this page (appended at finalisation), plus, on a page
-        GH-189 will reconcile at assembly, the chart boxes it will crop. A placeholder beyond
+        Images counted: figure images already in the body that resolve to a file on disk under
+        *doc_dir* (a link to a file nobody saved ships nothing), plus the crops ``_agentic_
+        unshipped_figure_page`` just recorded for this page (appended at finalisation), plus,
+        on a page GH-189 will reconcile at assembly, the chart boxes that pass the SAME regional
+        tick test the native lane applies (a bare box is one in eight real charts: #1268). A placeholder beyond
         that count is a figure nothing ships: the page gets a figure-specific mark. A page the
         #1187 lane already marked for a figure keeps that mark and is not decided twice.
         """
@@ -14169,7 +14211,7 @@ class UnifiedPipeline:
         recorded = getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, "")
         if recorded and recorded != _unshipped_figures.NOT_FOUND_KIND:
             return
-        shipped = fp.shipped_image_count(body) + len(
+        shipped = fp.shipped_image_count(body, doc_dir) + len(
             getattr(ps, "unshipped_figure_refs", None) or []
         )
         if shipped < placeholders and self._page_has_tables(page_num, ps):
@@ -14178,7 +14220,19 @@ class UnifiedPipeline:
 
             try:
                 with open_pdf(str(state.handle.path)) as _doc:
-                    shipped += len(chart_region_bboxes(_doc[page_num - 1]))
+                    _page = _doc[page_num - 1]
+                    _boxes = chart_region_bboxes(_page)
+                    shipped += sum(
+                        1
+                        for a in fp.assess_regions(
+                            list(_page.get_text("words") or []),
+                            _boxes,
+                            set(),
+                            list(getattr(ps, "detected_table_bboxes", []) or []),
+                            page_shipped=False,
+                        )
+                        if a.has_evidence
+                    )
             except Exception:  # noqa: BLE001 -- unreadable: count nothing extra, mark
                 pass
         unmatched = placeholders - shipped

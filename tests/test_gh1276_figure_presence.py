@@ -373,8 +373,29 @@ def test_a_page_with_a_table_signal_is_left_to_the_chart_region_pass(tmp_path: P
         ps.unshipped_figure_kind = ""
         state.events.clear()
         _pipe()._agentic_figure_presence_page(state, 1, ps, out, tmp_path / "figures")
-        arms[has_tables] = bool(state.events)
+        arms[has_tables] = bool(ps.unshipped_figure_refs)
+        ps.unshipped_figure_refs = []
     assert arms == {False: True, True: False}
+    # ... but the page is RECORDED, not silent (Fable 5): every checked page has a record.
+    ps.has_tables = True
+    ps.unshipped_figure_kind = ""
+    state.events.clear()
+    _pipe()._agentic_figure_presence_page(state, 1, ps, out, tmp_path / "figures")
+    (event,) = state.events
+    assert event.kind == fp.PRESENCE_PASS_KIND
+    assert event.detail == fp.PASS_LEFT_TO_CHART_REGION_PASS
+    assert not ps.unshipped_figure_refs
+
+
+def test_a_page_with_no_chart_box_is_recorded_not_silent(tmp_path: Path) -> None:
+    pdf = _chart_pdf(tmp_path / "plain.pdf", ticks=False, charts=0)
+    st, ps, out = _decide_native(
+        pdf, tmp_path, engine="native", status=PageStatus.SUCCESS, body=_PROSE
+    )
+    (event,) = st.events
+    assert event.kind == fp.PRESENCE_PASS_KIND and event.detail == fp.PASS_NO_BOX
+    rec = _finalize(st, ps, out)
+    assert rec.output.status is PageStatus.SUCCESS, "a record, never a mark"
 
 
 def test_the_lane_leaves_other_engines_and_floor_pages_alone(tmp_path: Path) -> None:
@@ -396,12 +417,24 @@ _TWO_FIGURES = (
 )
 
 
+def _write_assets(root: Path, body: str) -> None:
+    """Make every image link in *body* resolve to a real file, as a lane that saved it would."""
+    import re
+
+    for ref in re.findall(r"!\[[^\]]*\]\(([^)\s]+)\)", body):
+        target = root / ref
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"\x89PNG\r\n")
+
+
 def _decide_model(tmp_path: Path, body: str, **ps_attrs):
     from socr.core.document import DocumentHandle
     from socr.core.state import DocumentState
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     pdf = _chart_pdf(tmp_path / "plain.pdf", ticks=False, charts=0)
+    if not ps_attrs.pop("skip_assets", False):
+        _write_assets(tmp_path, body)
     state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
     ps = PageState(page_num=1)
     for k, v in ps_attrs.items():
@@ -437,6 +470,17 @@ def test_a_placeholder_beside_its_own_image_is_residue_not_a_lost_figure(tmp_pat
     body = "<!-- Image (1, 2, 3, 4) -->\n\n![chart region 1](figures/chart_region_p1_1.png)"
     st, ps, _ = _decide_model(tmp_path, body)
     assert not st.events and not ps.unshipped_figure_kind
+
+
+def test_an_image_link_to_a_file_nobody_saved_ships_nothing(tmp_path: Path) -> None:
+    """Fable 1. Same body in both arms; only whether the linked file exists differs."""
+    body = "<!-- Image (10, 20, 300, 200) -->\n\n![Figure 1](figures/figure_1.png)"
+    st_ok, ps_ok, _ = _decide_model(tmp_path / "saved", body)
+    st_gone, ps_gone, _ = _decide_model(tmp_path / "gone", body, skip_assets=True)
+    assert not ps_ok.unshipped_figure_kind and not st_ok.events
+    assert ps_gone.unshipped_figure_kind == fp.PLACEHOLDER_KIND
+    (event,) = st_gone.events
+    assert event.data == {"placeholders": 1, "images": 0, "unmatched": 1}
 
 
 def test_a_table_crop_is_not_a_figure_image(tmp_path: Path) -> None:
@@ -573,3 +617,246 @@ def test_the_pass_record_survives_resume(tmp_path: Path, monkeypatch) -> None:
 
 def test_every_presence_kind_is_replayed_on_resume() -> None:
     assert fp.PRESENCE_KINDS <= UnifiedPipeline.resume_restore_kinds()
+
+
+# ---------------------------------------------------------------------------
+# The crop extent (#1276 visual check: 121 of 128 crops partial, 37 with neighbour prose)
+# ---------------------------------------------------------------------------
+
+_BODY = (
+    "The committee judged that the outlook for activity and inflation remained uncertain and "
+    "that the risks to the outlook were roughly balanced over the period ahead of it."
+)
+
+
+def _frame_bars(page, rect: fitz.Rect) -> None:
+    """Axes frame and five filled bars scaled to fit *rect*, whatever its width."""
+    shape = page.new_shape()
+    shape.draw_rect(rect)
+    shape.finish(color=(0, 0, 0), width=1.5)
+    step = rect.width / 6
+    for i in range(5):
+        x = rect.x0 + step * (i + 0.25)
+        shape.draw_rect(fitz.Rect(x, rect.y1 - (i + 1) * 25, x + step * 0.5, rect.y1 - 2))
+        shape.finish(color=(0.8, 0.1, 0.1), fill=(0.8, 0.1, 0.1), width=1.5)
+    shape.commit()
+
+
+def _column_page(
+    path: Path,
+    *,
+    panels: int = 1,
+    right_ticks: bool = False,
+    gap_title: bool = False,
+):
+    """A two-column page. Left column: prose. Right column: title, chart, axis labels, NOTE and
+    SOURCE lines, then body prose that is NOT the figure's. ``panels=2`` puts two panels side by
+    side under ONE title. Returns the PDF path and the geometry the assertions read."""
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_textbox(fitz.Rect(72, 100, 250, 330), _BODY * 3, fontname="helv", fontsize=9)
+    left, right, top, bottom = 300.0, 575.0, 150.0, 300.0
+    title_y = top - (40 if gap_title else 12)
+    page.insert_text(
+        (left, title_y),
+        "Figure 3. Real GDP growth and inflation, annual rate",
+        fontname="helv",
+        fontsize=9,
+    )
+    if panels == 1:
+        frames = [fitz.Rect(left, top, right, bottom)]
+    else:
+        mid = (left + right) / 2
+        frames = [fitz.Rect(left, top, mid - 25, bottom), fitz.Rect(mid + 25, top, right, bottom)]
+    for frame in frames:
+        _frame_bars(page, frame)
+        for k, value in enumerate((0, 10, 20, 30, 40)):
+            y = frame.y1 - k * 30
+            page.insert_text((frame.x0 - 14, y), str(value), fontname="helv", fontsize=8)
+            if right_ticks:
+                page.insert_text((frame.x1 + 4, y), str(value), fontname="helv", fontsize=8)
+        page.insert_text(
+            (frame.x0 + 5, frame.y1 + 11), "2018 2019 2020", fontname="helv", fontsize=8
+        )
+    page.insert_text((left, bottom + 24), "NOTE: Seasonally adjusted.", fontname="helv", fontsize=8)
+    page.insert_text(
+        (left, bottom + 35), "SOURCE: Bureau of Statistics.", fontname="helv", fontsize=8
+    )
+    page.insert_textbox(
+        fitz.Rect(left, bottom + 80, right, bottom + 200), _BODY * 2, fontname="helv", fontsize=9
+    )
+    doc.save(path)
+    doc.close()
+    geometry = {"left": left, "right": right, "top": top, "bottom": bottom, "title_y": title_y}
+    return path, geometry
+
+
+def _groups(pdf: Path):
+    from socr.figures import figure_crop
+    from socr.tables.reconstruct import chart_region_clusters
+
+    with fitz.open(pdf) as doc:
+        page = doc[0]
+        clusters = chart_region_clusters(page)
+        words = list(page.get_text("words"))
+        rect = page.rect
+    return figure_crop.crop_groups(words, [tuple(c) for c, _ in clusters], rect), clusters, words
+
+
+def test_the_crop_stays_in_the_charts_own_column(tmp_path: Path) -> None:
+    """(a) The detector's box runs to the page's left edge and takes the neighbouring column's
+    prose with it. The crop does not: it starts at the chart's tick labels."""
+    pdf, g = _column_page(tmp_path / "c.pdf")
+    groups, clusters, words = _groups(pdf)
+    (group,) = groups
+    assert clusters[0][1].x0 == 0.0, "the box the crop replaces reaches the page edge"
+    prose_right = max(w[2] for w in words if w[0] < 260 and w[1] > 90)
+    assert group.rect[0] > prose_right, "no word of the left column's prose is inside the crop"
+    tick_left = min(w[0] for w in words if w[4] == "40" and w[0] < g["left"])
+    assert group.rect[0] <= tick_left, "the y-axis tick labels are inside the crop"
+
+
+def test_the_crop_takes_its_title_and_notes_and_no_body_prose(tmp_path: Path) -> None:
+    """(b) Title above, x-axis labels, NOTE and SOURCE below; the paragraph after them is not
+    the figure's and stays out. Same page, title moved beyond the page's line pitch: it goes."""
+    pdf, g = _column_page(tmp_path / "c.pdf")
+    (group,), _, words = _groups(pdf)
+    title_top = min(w[1] for w in words if w[4] == "Figure")
+    source_bottom = max(w[3] for w in words if w[4] == "SOURCE:")
+    body_top = min(w[1] for w in words if w[1] > g["bottom"] + 70)
+    assert group.rect[1] <= title_top and group.rect[3] >= source_bottom
+    assert group.rect[3] < body_top
+
+    far, _ = _column_page(tmp_path / "far.pdf", gap_title=True)
+    (far_group,), _, far_words = _groups(far)
+    far_title_top = min(w[1] for w in far_words if w[4] == "Figure")
+    assert far_group.rect[1] > far_title_top, "a title a paragraph away is not this figure's"
+
+
+def _word(x0, y0, x1, y1, text, block, line=0):
+    return (x0, y0, x1, y1, text, block, line, 0)
+
+
+def test_the_title_just_below_a_figures_notes_is_the_next_figures(tmp_path: Path) -> None:
+    """A one-line block under the SOURCE line that opens like a title is the NEXT figure's. The
+    same block opening like a note is this figure's. One word differs between the arms."""
+    from socr.figures import figure_crop
+
+    core = (100.0, 100.0, 300.0, 200.0)
+    reach = {}
+    for lead in ("4.", "SOURCE:"):
+        words = [
+            _word(100, 205, 140, 213, "SOURCE:", 1),
+            _word(145, 205, 200, 213, "Bureau", 1),
+            _word(100, 216, 120, 224, lead, 2),
+            _word(125, 216, 200, 224, "Series", 2),
+            # a paragraph long after both, to give the page its line pitch
+            _word(100, 300, 150, 308, "word", 3, 0),
+            _word(100, 312, 150, 320, "word", 3, 1),
+            _word(100, 324, 150, 332, "word", 3, 2),
+        ]
+        (group,) = figure_crop.crop_groups(words, [core], fitz.Rect(0, 0, 612, 792))
+        reach[lead] = group.rect[3]
+    assert reach["4."] < 216 < reach["SOURCE:"]
+
+
+def test_tick_labels_outside_the_drawing_on_both_sides_are_inside_the_crop(tmp_path: Path) -> None:
+    """(c) Right-hand y-axis labels, which the drawing box clips."""
+    pdf, g = _column_page(tmp_path / "c.pdf", right_ticks=True)
+    (group,), _, words = _groups(pdf)
+    right_label = max(w[2] for w in words if w[4] == "40" and w[0] > g["right"] - 20)
+    assert group.rect[2] >= right_label > g["right"]
+
+
+def test_panels_of_one_figure_under_one_title_are_one_crop(tmp_path: Path) -> None:
+    """(d) Two panels, one title: one crop covering both ordinals. The same two charts with the
+    title moved out of reach are two crops."""
+    pdf, _ = _column_page(tmp_path / "two.pdf", panels=2)
+    groups, clusters, _ = _groups(pdf)
+    assert len(clusters) == 2
+    assert [g.indices for g in groups] == [(1, 2)]
+    apart, _ = _column_page(tmp_path / "apart.pdf", panels=2, gap_title=True)
+    apart_groups, _, _ = _groups(apart)
+    assert [g.indices for g in apart_groups] == [(1,), (2,)], "no shared title, no merge"
+
+
+def test_the_shipped_crop_is_cut_by_the_group_not_the_box(tmp_path: Path) -> None:
+    """End to end through the lane: the PNG on disk is as wide as the group's rectangle and a
+    multi-panel figure is ONE file named by its first ordinal."""
+    pdf, _ = _column_page(tmp_path / "two.pdf", panels=2)
+    st, ps, _ = _decide_native(
+        pdf, tmp_path, engine="native", status=PageStatus.SUCCESS, body=_PROSE
+    )
+    groups, clusters, _ = _groups(pdf)
+    assert ps.unshipped_figure_kind == fp.PRESENCE_SHIPPED_KIND
+    assert ps.unshipped_figure_refs == [f"figures/{fp.crop_filename(1, 1)}"]
+    pix = fitz.Pixmap(str(tmp_path / "figures" / fp.crop_filename(1, 1)))
+    box_width = clusters[0][1].x1 - clusters[0][1].x0
+    group_width = groups[0].rect[2] - groups[0].rect[0]
+    assert group_width < box_width
+    assert (
+        abs(pix.width / group_width - pix.height / (groups[0].rect[3] - groups[0].rect[1])) < 0.05
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fable 3: one row of consecutive years is not a chart scale
+# ---------------------------------------------------------------------------
+
+
+def _box_of_words(lines: list[str]):
+    words = []
+    y = 10.0
+    for n, line in enumerate(lines):
+        x = 10.0
+        for token in line.split():
+            words.append((x, y, x + 20, y + 8, token, 0, n, 0))
+            x += 25
+        y += 12
+    return words, [fitz.Rect(0, 0, 400, y + 5)]
+
+
+@pytest.mark.parametrize(
+    ("lines", "fires"),
+    [
+        (["2019 2020 2021 2022", "The committee noted that prices rose over the period."], False),
+        (["0", "10", "20", "30"], True),
+        (["2019 2020 2021 2022", "0 5 10 15"], True),
+    ],
+)
+def test_one_row_of_years_beside_prose_is_not_chart_evidence(lines, fires) -> None:
+    words, boxes = _box_of_words(lines)
+    (a,) = fp.assess_regions(words, boxes, set(), [], False)
+    assert a.ticks >= MIN_TICK_RUN
+    assert a.fires is fires
+    assert (a.tick_lines >= fp.MIN_TICK_LINES) is fires
+
+
+# ---------------------------------------------------------------------------
+# Fable 2: on a table-signal model page only boxes with the regional evidence count
+# ---------------------------------------------------------------------------
+
+
+def test_a_bare_box_does_not_excuse_a_placeholder_on_a_table_page(tmp_path: Path) -> None:
+    """Same page, same placeholder, same table signal; only the box's tick numbers differ."""
+    outcome = {}
+    for ticks in (True, False):
+        root = tmp_path / str(ticks)
+        root.mkdir()
+        pdf = _chart_pdf(root / "c.pdf", ticks=ticks)
+        from socr.core.document import DocumentHandle
+        from socr.core.state import DocumentState
+
+        state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
+        ps = PageState(page_num=1)
+        ps.has_tables = True
+        state.pages[1] = ps
+        out = PageOutput(
+            page_num=1,
+            text="<!-- Image (1, 2, 3, 4) -->\n\nA table follows.",
+            status=PageStatus.SUCCESS,
+            engine="qwen",
+        )
+        _pipe()._agentic_figure_presence_page(state, 1, ps, out, root / "figures")
+        outcome[ticks] = ps.unshipped_figure_kind
+    assert outcome == {True: "", False: fp.PLACEHOLDER_KIND}

@@ -54,13 +54,14 @@ existing `unshipped_figure_*` sidecar fields.
 ## Measured (cached `fed_rerun_51270eb5_words`, 156 docs, no OCR)
 
 `scratch/army/phaseA/a3_measure.py`; firings in `a3-firings.jsonl`, crops in `a3-crops/`.
+The scratch files are local working files, not committed; the numbers are reproducible from the
+scripts and the cached run named above.
 
 | native pages | 10,216 (8,017 success, 902 warning, 1,297 error) |
 | --- | --- |
 | with a box | 421 |
-| skipped: floor / failed marker | 1,138 (counted before the box test) |
-| skipped: own page image | 52 |
-| skipped: table signal (GH-189's) | 93 |
+| (before the box test, not in the funnel below: floor / failed marker 1,138; own page image 52) | |
+| skipped: table signal (GH-189's) | 93 (421 - 93 = 328) |
 | **checked (box, no table signal)** | **328** |
 | **ship a crop** | **80 pages, 128 regions** (43 SUCCESS, 37 WARNING; 8 pages `native+math`) |
 | **pass record, no mark** | **248** (all "no chart evidence"; 0 had every box already shipped) |
@@ -110,7 +111,7 @@ uncapped anchor count asserted == 1 before editing)
 | any own-crop link excuses every region | `test_another_regions_image_never_excuses_a_region` |
 | guard abstains on any image again | `test_the_crop_is_appended_even_when_another_image_is_already_on_the_page` |
 | tick condition dropped | `test_the_fixture_differs_only_in_its_tick_numbers` |
-| pass record not written | `test_a_chart_with_ticks_ships_a_crop_whatever_...[native-success]` |
+| pass record not written | `test_a_chart_with_ticks_ships_a_crop_whatever_the_status_or_native_engine[native-success]` |
 | table-signal handoff to GH-189 removed | `test_a_page_with_a_table_signal_is_left_to_the_chart_region_pass` |
 | fenced code not ignored | `test_placeholders_inside_fenced_code_are_ignored` |
 | presence kinds dropped from the replay set | `test_resume_restore_kinds_is_exactly_the_pre_refactor_union` |
@@ -126,3 +127,113 @@ placeholder, table crop, fenced code, and through `process()` in both provider s
 restore of the crop, the record and the pass record. `tests/test_orchestrator.py` patches the new
 step off in the one test whose PDF path is a stand-in (same reason as its `_is_chart_asset_page`
 patch). Full suite: 10,082 passed.
+
+## Review round on PR #1309 (Fable, Carbon, Hydrogen's visual check of all 128 crops, cubic)
+
+### The visual check, and the crop extent (the main finding)
+
+Gemini Hydrogen looked at all 128 crops: 128 real charts (precision of the evidence rule is
+not in question), but **121 partial** (title above the top rule cut, `NOTE:`/`SOURCE:` cut,
+x-axis labels or right-hand ticks clipped, multi-panel figures split) and **37 with the
+neighbouring column's prose**. Cause: the crop was `chart_region_bboxes`' box, which exists to
+keep labels out of a table rowizer: it runs to the page's left edge, ends one row below the
+drawing and starts one row above it. 8 of 8 sampled pass pages had no chart.
+
+Fix: `src/socr/figures/figure_crop.py`, used only by this lane (GH-189's crops and
+`chart_region_bboxes` are unchanged; the latter now delegates to `chart_region_clusters`, which
+also returns the bare drawing cluster, same boxes in the same order).
+
+* Start from the drawing cluster, not the box (never the page edge).
+* Sideways: numeric-only blocks beside the drawing within one line pitch (tick labels on both
+  sides), reached without crossing a non-numeric word.
+* Upward: the title block directly above in the drawing's column; downward: x-axis labels, then
+  `NOTE:`/`SOURCE:` blocks. A walk stops at the first block farther than the page's body line
+  pitch (median step between consecutive lines of one block, from the page). A block is a label
+  if it is at most `MAX_LABEL_LINES` (2) lines long or opens with its side's lead word (title
+  lead above: `Figure`, `Chart`, `Exhibit`, `Panel`, `N.`; note lead below: `Note`, `Source`).
+  A title lead below the drawing is the NEXT figure's title and is not taken (found by looking
+  at the first re-render: mpr 2014-02 p20 carried "25. U.S. net financial inflows").
+* A block is claimed once: the region above owns the blocks it took below it.
+* Regions that took a common title block, or whose rectangles overlap, are one crop named by
+  the first region's ordinal; a page's covered set expands over the group.
+* Padding: half the leading (line pitch minus median word height), from the page.
+
+Re-measured on the same cached run (`a3_measure_v2.py`; crops in `a3-crops-v2/`, firings in
+`a3-firings-v2.jsonl`, same naming, plus the crop rectangle and the old box so the visual check
+can be repeated):
+
+| | v1 | v2 |
+| --- | --- | --- |
+| pages shipping a crop | 80 | 80 |
+| crops | 128 | 126 (2 panel merges) |
+| crops containing a multi-line, non-label text block by centre (my own crude proxy, not Hydrogen's count) | 48 | 19 |
+
+I opened 7 v2 crops: 2008-07 p16 (complete: title, axes, note, source), 2014-02 p20 (complete),
+2011-07 p35, 2022-06 p14, 2005-07 p13, 2008-07 p20, 2019-10 p76. **Not certified**: the same
+visual check on `a3-crops-v2/` is still owed.
+
+Remaining defects, seen in those crops:
+
+* The detector's own cluster sometimes spans two charts or two columns (a rule or the footer bar
+  bridges them): 2011-07 p35 (figures 43 and 44), 2005-07 p13, 2008-07 p20 give two complete
+  charts in one crop; 2011-07 p35 and 2022-06 p14 also take a few lines of body prose below
+  the longer note. The crop cannot be narrower than the cluster it is cut from.
+* Stacked panels with their own sub-titles (A., B.) are not merged (only a shared title or
+  overlap merges); each ships complete.
+* A tealbook chart whose left tick labels are farther than one line pitch from the axis keeps
+  them clipped (2019-10 p76).
+
+### Fable and cubic findings
+
+1. **Link text is not a picture.** A placeholder counts as matched only by a figure image that
+   resolves to an existing file under the document directory (`manifest.page_asset_refs`, the
+   manifest's own scanner: literal context, URLs, anchors, missing files and escaping paths are
+   skipped). Test: same body, link target saved or not.
+2. **Table-signal model pages** count only the chart boxes that pass the native lane's regional
+   tick test (`RegionAssessment.has_evidence`, one definition for both lanes). Test: same page,
+   same placeholder, same table signal; the box's tick numbers are the only difference.
+3. **One row of consecutive years is not a scale.** The tick run must be carried by two or more
+   text-layer lines (`tick_layer_lines`: a column's length, plus each row that is itself a
+   run). `2019 2020 2021 2022` beside prose gives 1; a y-axis column gives its length; a year row
+   plus a tick column gives both. Measured on the cached run: **0 of the 128 firing regions
+   change** (all carry a column), so on this corpus the rule costs nothing and removes the
+   false alarm the three advisors named.
+4. **Lane chosen from the best output, not the finalised record. Not changed; the limit:** the
+   lane runs on `bo` before `finalized_page_record` selects what ships. If the selector then
+   replaces a refused model reading by the native text (`NATIVE_FALLBACK`) or a floor, the
+   placeholder rule judged text that does not ship (its mark and `unshipped_figure_unlocated`
+   stay attached; the page is demoted for a figure the shipped text never named) and the
+   native chart rule never ran on the text that does ship (a lost chart, unmarked). Deciding
+   from the finalised record means calling the selector, which has side effects (the chart
+   floor renders crops) and whose result depends on events this lane writes. Not confirmed in
+   a live loop. Owed: a follow-up that moves the decision after selection and re-finalises.
+5. **Every checked page has a record.** A table-signal page records `figure_presence_pass`
+   ("left to the chart-region pass") and a page with no chart box records `figure_presence_pass`
+   ("no chart box ... not a statement that the page carries no figure"). Neither marks. Cost: one
+   small event per native page that reaches the lane (8,605 + 93 on the cached run).
+6. Fable nit, cubic and Carbon items not changed in this round: placeholders inside a table cell
+   or inline code are counted; the `chart_region_` boxes counted for a table-signal page are not
+   proven cropped before assembly (cubic P2); the early return on a #1187 outcome (cubic P2);
+   clause scope uses list position, not the region ordinal (cubic P2); resume does not retry a
+   failed native crop (cubic P1: the guard returns for the restored kind); the document note
+   and CLI sentence for the presence kinds still name "a figure socr could not locate" (Carbon 4,
+   cubic); only the first ref in the #1174 record. Each is real until shown otherwise.
+
+### Mutants for this round (src+tests copied outside the repo; `socr.__file__` asserted inside the
+copy; uncapped anchor count asserted == 1 before editing; the guard removed; the test must fail)
+
+| mutant | killed by |
+| --- | --- |
+| crop starts at the page edge | `test_the_crop_stays_in_the_charts_own_column` |
+| no upward title walk | `test_the_crop_takes_its_title_and_notes_and_no_body_prose` |
+| no downward note walk | same |
+| upward gap limit removed | same |
+| downward label test removed (paragraph taken) | same |
+| next figure's title taken below the notes | `test_the_title_just_below_a_figures_notes_is_the_next_figures` |
+| panel merge removed | `test_panels_of_one_figure_under_one_title_are_one_crop` |
+| bare box counts on a table-signal model page | `test_a_bare_box_does_not_excuse_a_placeholder_on_a_table_page` |
+| placeholder matched by link text only | `test_an_image_link_to_a_file_nobody_saved_ships_nothing` |
+| tick-line requirement dropped | `test_one_row_of_years_beside_prose_is_not_chart_evidence` |
+| no-box record not written | `test_a_page_with_no_chart_box_is_recorded_not_silent` |
+
+No mutant for item 4: nothing was changed there.

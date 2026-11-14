@@ -63,6 +63,17 @@ PASS_NO_EVIDENCE = (
     "this is not a statement that the page carries no figure"
 )
 PASS_ALL_SHIPPED = "every chart box on this page already ships its own picture"
+#: A page with no chart box is recorded too: every page this lane looked at carries a record, so
+#: a count of records against pages checked has no gap (Fable 5).
+PASS_NO_BOX = (
+    "no chart box was found on this page; this is not a statement that the page carries no figure"
+)
+#: A page with a table signal is GH-189's: ``_preserve_chart_regions`` crops every box of exactly
+#: that candidate set at assembly, so it is not decided here twice.
+PASS_LEFT_TO_CHART_REGION_PASS = (
+    "the page has a table signal; its chart boxes are left to the chart-region pass "
+    "(_preserve_chart_regions), which crops every one at assembly"
+)
 
 #: What the mark of a lost region says. Figure-specific, never the generic page sentence.
 RENDER_FAILED_REASON = (
@@ -106,6 +117,12 @@ def placeholder_count(body: str) -> int:
     return sum(len(_PLACEHOLDER_RE.findall(line)) for line in _outside_fences(body))
 
 
+#: A tick run must be carried by at least this many lines of the text layer, or by two axes: a
+#: y-axis is one number per line (a column), an x-axis is one line (a row), and a chart has at
+#: least one of each or one column. One row of consecutive years inside a box with prose is a
+#: table header or a sentence, not a scale (Fable 3).
+MIN_TICK_LINES = 2
+
 #: The filename stems of the pictures that can match a model's figure placeholder: the chart
 #: lanes' crops and page image, this lane's, #1187's, and the figure extractor's. Everything
 #: else socr writes beside a page is NOT a figure: ``failed_table`` (a table crop),
@@ -126,10 +143,24 @@ def _is_figure_image(ref: str) -> bool:
     return ref.rsplit("/", 1)[-1].startswith(FIGURE_IMAGE_STEMS)
 
 
-def shipped_image_count(body: str) -> int:
+def shipped_image_count(body: str, doc_dir=None) -> int:
     """Figure images in *body*, ignoring fenced code blocks. A placeholder is matched
     one-to-one by a shipped image: figure 1 shipping never excuses figure 2, and a table crop
-    is not a figure."""
+    is not a figure.
+
+    With *doc_dir* a link counts only if it resolves to an asset that exists on disk
+    (``manifest.page_asset_refs``: the manifest's own scanner, which skips literal context,
+    URLs, anchors, missing files and paths that escape *doc_dir*). A link a model wrote to a file
+    nobody saved is not a shipped picture (Fable 1). Without *doc_dir* the link text decides.
+    """
+    if doc_dir is not None:
+        from socr.core.manifest import page_asset_refs
+
+        return sum(
+            1
+            for ref in page_asset_refs("\n".join(_outside_fences(body)), doc_dir)
+            if _is_figure_image(ref.logical_path)
+        )
     return sum(
         1
         for line in _outside_fences(body)
@@ -180,23 +211,50 @@ def region_lines(words: list) -> list[str]:
     ]
 
 
+def tick_layer_lines(lines: list[str]) -> int:
+    """How many lines of the text layer carry axis-number evidence.
+
+    A y-axis is a column: consecutive lines of ONE number each, counted as the column's length
+    when it is a run. An x-axis is a row: one line of several numbers, counted once per such
+    line that is itself a run. A line with any non-number token is neither (it breaks a column),
+    so ``2019 2020 2021 2022`` beside a prose line is one line, and a box of prose with one
+    header row never reaches :data:`MIN_TICK_LINES`.
+    """
+    rows = sum(1 for line in lines if len(line.split()) >= 2 and tick_run(line) >= MIN_TICK_RUN)
+    column_text = "\n".join(line if len(line.split()) == 1 else "-" for line in lines)
+    column = tick_run(column_text)
+    return rows + (column if column >= MIN_TICK_RUN else 0)
+
+
 @dataclass(frozen=True)
 class RegionAssessment:
     index: int
     covered: bool
     ticks: int
     table_region: bool
+    tick_lines: int = MIN_TICK_LINES
+
+    @property
+    def has_evidence(self) -> bool:
+        """A chart's scale inside this region: a tick run over two or more lines, not a table.
+        The one test the native lane and the model lane's table-page count share."""
+        return (
+            not self.table_region
+            and self.ticks >= MIN_TICK_RUN
+            and self.tick_lines >= MIN_TICK_LINES
+        )
 
     @property
     def fires(self) -> bool:
-        """Evidence in this region: uncovered, tick run, not a table."""
-        return not self.covered and not self.table_region and self.ticks >= MIN_TICK_RUN
+        """Evidence in this region and nothing of its own ships it."""
+        return not self.covered and self.has_evidence
 
     def to_dict(self) -> dict:
         return {
             "region": self.index,
             "covered": self.covered,
             "ticks": self.ticks,
+            "tick_lines": self.tick_lines,
             "table_region": self.table_region,
             "fires": self.fires,
         }
@@ -217,13 +275,15 @@ def assess_regions(
     for index, box in enumerate(boxes, start=1):
         inside = [w for w in words_in_box(words, box) if not _in_table(w, tables)]
         is_table = bool(inside) and has_recurring_numeric_columns(inside)
-        ticks = 0 if is_table else tick_run("\n".join(region_lines(inside)))
+        layer = [] if is_table else region_lines(inside)
+        ticks = 0 if is_table else tick_run("\n".join(layer))
         out.append(
             RegionAssessment(
                 index=index,
                 covered=page_shipped or index in covered,
                 ticks=ticks,
                 table_region=is_table,
+                tick_lines=tick_layer_lines(layer),
             )
         )
     return out
@@ -250,7 +310,8 @@ class PresenceDecision:
 
 
 def decide_presence(assessments: list[RegionAssessment], render) -> PresenceDecision | None:
-    """The whole native rule. ``None`` when the page has no chart box.
+    """The whole native rule. ``None`` when the page has no chart box (the caller records
+    that with :func:`no_box_decision`).
 
     *render(indices)* returns ``{index: ref}`` for every crop it managed to save.
     """
@@ -265,7 +326,8 @@ def decide_presence(assessments: list[RegionAssessment], render) -> PresenceDeci
             assessments,
         )
     saved = render([a.index for a in firing])
-    refs = tuple(saved[a.index] for a in firing if saved.get(a.index))
+    # Panels of one figure share a crop: one ref, however many regions it covers.
+    refs = tuple(dict.fromkeys(saved[a.index] for a in firing if saved.get(a.index)))
     failed = tuple(a.index for a in firing if not saved.get(a.index))
     if failed:
         return PresenceDecision(
@@ -300,3 +362,13 @@ def clause_records(page_num: int, labels: tuple[str, ...], kind: str) -> tuple[d
         }
         for index, label in enumerate(labels, start=1)
     )
+
+
+def no_box_decision() -> PresenceDecision:
+    """The record of a page the lane looked at and found no chart box on. Never marks."""
+    return PresenceDecision(PRESENCE_PASS_KIND, PASS_NO_BOX)
+
+
+def left_to_chart_region_pass_decision() -> PresenceDecision:
+    """The record of a table-signal page: GH-189's, so not decided here. Never marks."""
+    return PresenceDecision(PRESENCE_PASS_KIND, PASS_LEFT_TO_CHART_REGION_PASS)
