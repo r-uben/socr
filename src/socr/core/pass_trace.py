@@ -16,6 +16,11 @@ Three rules, all about not inventing assurance:
 * **Scope is kept.** An entry names the region it is about exactly as a clause does
   (``page``, ``table:2``, ``figure:1``). A table-scope pass says nothing about the rest of the
   page (#1181), so a table pass never reads as a page pass.
+* **A PASS names the text it was computed on.** A page-scope PASS carries ``text_sha`` (the
+  digest of the shipped page text) and a ``row_binding`` ``table:N`` PASS carries ``table_sha``
+  (the digest of that shipped table block). Wherever the trace is written, a PASS whose digest
+  is not the digest of the text being shipped now, or that carries none, is NOT_RUN: a
+  recorded negative is never kept for bytes it did not see (``core.verdict.verify_pass_digests``).
 * **It is a record, not an input.** The trace never changes a status, a failure mode,
   ``audit_passed`` or one byte of the ``.md``, and it is not part of the run fingerprint.
 """
@@ -49,14 +54,24 @@ class TraceEntry:
     result: TraceResult
     scope: str = SCOPE_PAGE
     reason: str = ""
+    #: sha256 of the shipped page text a PASS was computed on (every PASS but a table's own).
+    text_sha: str = ""
+    #: sha256 of the shipped table block a ``row_binding`` ``table:N`` PASS was computed on.
+    table_sha: str = ""
 
     def to_dict(self) -> dict[str, str]:
-        return {
+        d = {
             "check": self.check,
             "result": self.result.value,
             "scope": self.scope,
             "reason": self.reason,
         }
+        # Written only when set, so an entry that is not a PASS keeps the four-key shape.
+        if self.text_sha:
+            d["text_sha"] = self.text_sha
+        if self.table_sha:
+            d["table_sha"] = self.table_sha
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TraceEntry:
@@ -66,7 +81,17 @@ class TraceEntry:
         check, scope, reason = d["check"], d["scope"], d["reason"]
         if not all(isinstance(v, str) for v in (check, scope, reason)) or not check or not scope:
             raise TypeError("a trace entry's check, scope and reason must be strings")
-        return cls(check=check, result=TraceResult(d["result"]), scope=scope, reason=reason)
+        digests = (d.get("text_sha", ""), d.get("table_sha", ""))
+        if not all(isinstance(v, str) for v in digests):
+            raise TypeError("a trace entry's digests must be strings")
+        return cls(
+            check=check,
+            result=TraceResult(d["result"]),
+            scope=scope,
+            reason=reason,
+            text_sha=digests[0],
+            table_sha=digests[1],
+        )
 
 
 def trace_to_dicts(entries: tuple[TraceEntry, ...] | list[TraceEntry]) -> list[dict[str, str]]:

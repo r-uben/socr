@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -353,6 +355,79 @@ def _not_applicable(check: Check | str, reason: str, scope: str = SCOPE_PAGE) ->
 
 def _not_run(check: Check | str, reason: str, scope: str = SCOPE_PAGE) -> CheckOutcome:
     return CheckOutcome(TraceEntry(_check_name(check), TraceResult.NOT_RUN, scope, reason))
+
+
+CHECKED_TEXT_CHANGED_REASON = "checked text changed after the check"
+PASS_WITHOUT_DIGEST_REASON = (
+    "this pass carries no digest of the text it was computed on, so it cannot be tied to the "
+    "text that ships"
+)
+
+
+def page_text_digest(text: str) -> str:
+    """The digest a page-scope PASS carries: the sidecar's own text digest (``sha256:`` over the
+    UTF-8 bytes), so the trace and the sidecar normalise the page identically."""
+    from socr.core.page_credential import sha256_text
+
+    return sha256_text(text or "")
+
+
+def table_block_digests(text: str) -> list[str]:
+    """The digest of each table block of *text*, in order (ordinal k is index k-1): over the
+    block's own lines, so a mark put above the body, or a table added elsewhere on the page, does
+    not change another table's digest."""
+    from socr.core.page_credential import sha256_text
+    from socr.tables.reconcile import find_table_blocks
+
+    lines = (text or "").splitlines()
+    return [
+        sha256_text("\n".join(lines[b.start : b.end + 1])) for b in find_table_blocks(text or "")
+    ]
+
+
+def table_block_digest(text: str, table_index: int) -> str:
+    """The digest of the 0-based *table_index*-th table block of *text*, ``""`` when it has none."""
+    digests = table_block_digests(text)
+    return digests[table_index] if 0 <= table_index < len(digests) else ""
+
+
+def stamp_text_digest(entry: TraceEntry, text: str) -> TraceEntry:
+    """*entry* with the digest of *text* when it is a PASS that carries none: a check that has just
+    run on *text* names it. A PASS that already carries a digest (a replayed or table entry) is
+    left alone, and so is every result that is not a PASS."""
+    if entry.result is not TraceResult.PASS or entry.text_sha or entry.table_sha:
+        return entry
+    return replace(entry, text_sha=page_text_digest(text))
+
+
+def verify_pass_digests(entries: Iterable[TraceEntry], text: str) -> list[TraceEntry]:
+    """*entries* with every PASS that was not computed on *text* made NOT_RUN.
+
+    A page-scope PASS must carry ``text_sha`` equal to the digest of *text*; a ``row_binding``
+    ``table:N`` PASS must carry ``table_sha`` equal to the digest of the N-th table block of
+    *text*. A PASS with no digest, or a different one, states nothing about the bytes that ship
+    (the text changed after the check: a figure caption, a table inserted above the bound one, a
+    failure marker an assembly guard wrote, a refinalize tool's rewrite). Every other result is
+    returned as it is."""
+    page_digest = page_text_digest(text)
+    tables = table_block_digests(text)
+    out: list[TraceEntry] = []
+    for e in entries:
+        if e.result is not TraceResult.PASS:
+            out.append(e)
+            continue
+        kind, _, ordinal = e.scope.partition(":")
+        if e.check == ROW_BINDING_CHECK and kind == "table" and ordinal.isdigit():
+            k = int(ordinal)
+            have, want = e.table_sha, tables[k - 1] if 1 <= k <= len(tables) else ""
+        else:
+            have, want = e.text_sha, page_digest
+        if have and have == want:
+            out.append(e)
+            continue
+        reason = CHECKED_TEXT_CHANGED_REASON if have else PASS_WITHOUT_DIGEST_REASON
+        out.append(TraceEntry(e.check, TraceResult.NOT_RUN, e.scope, reason))
+    return out
 
 
 @dataclass(frozen=True)
@@ -1711,6 +1786,9 @@ def _words_owed(output: PageOutput, p: Any) -> int:
     owed = word_tokens(getattr(p, "own_layer_word_reference", "") or "")
     if not _IMAGE_LINK_RE.search(output.text or ""):
         owed += word_tokens(figure)
+    # The hidden footnote wrapper the page ships once instead of twice is not owed, exactly as
+    # :func:`missing_words` subtracts it: a page whose only words are those has nothing compared.
+    owed -= word_tokens(_stripped_footnote_words(output, p))
     return sum(owed.values())
 
 
@@ -1805,6 +1883,11 @@ CONTROL_BYTES_REASON = (
     "may be wrong"
 )
 
+CONTROL_BYTES_RAW_REASON = (
+    "{count} raw control character(s) ({codes}) ship in this page's text; each can stand for a "
+    "glyph (often a minus), so numbers beside them may be wrong"
+)
+
 
 def control_bytes_clause(output: PageOutput, p: Any) -> VerdictClause | None:
     """#1306: FAIL when the damaged-layer guard replaced control bytes in this page's text.
@@ -1826,10 +1909,18 @@ def control_bytes_outcome(output: PageOutput, p: Any) -> CheckOutcome:
     """:func:`control_bytes_clause` with its outcome (#1183). ``_apply_damaged_layer_guard``
     scans every shipped text that is not a failure marker, whatever its engine, so on such a
     page a clean scan is a recorded negative (PASS)."""
-    from socr.core.damaged_layer import REPLACEMENT_CHAR
+    from socr.core.damaged_layer import CONTROL_BYTE_RE, REPLACEMENT_CHAR
     from socr.core.manifest import is_page_failed_marker
 
     text = output.text or ""
+    # The shipped bytes are the evidence, not the guard's bookkeeping: a tool that rewrote the
+    # page offline (a spliced layer cell, a masked body) never ran the guard, so a raw control
+    # byte in the text is a finding whatever the page state says, and PASS needs a clean scan.
+    raw = Counter(f"U+{ord(m.group()):04X}" for m in CONTROL_BYTE_RE.finditer(text))
+    if raw:
+        codes = ", ".join(f"{code} x{n}" for code, n in sorted(raw.items()))
+        reason = CONTROL_BYTES_RAW_REASON.format(count=sum(raw.values()), codes=codes)
+        return _found(VerdictClause(Check.CONTROL_BYTES, CheckResult.FAIL, SCOPE_PAGE, reason))
     found = getattr(p, "control_bytes_replaced", None)
     if isinstance(found, dict) and found and REPLACEMENT_CHAR in text:
         codes = ", ".join(f"{code} x{n}" for code, n in sorted(found.items()))
@@ -1966,7 +2057,16 @@ def row_binding_record_entries(records: dict) -> list[TraceEntry]:
         result, reason = _ROW_BINDING_RESULTS.get(
             str(record.get("outcome")), (TraceResult.UNKNOWN, ROW_BINDING_UNKNOWN_REASON)
         )
-        entries.append(TraceEntry(ROW_BINDING_CHECK, result, scope, reason))
+        sha = record.get("table_sha")
+        entries.append(
+            TraceEntry(
+                ROW_BINDING_CHECK,
+                result,
+                scope,
+                reason,
+                table_sha=sha if isinstance(sha, str) else "",
+            )
+        )
     return entries
 
 
@@ -2093,8 +2193,10 @@ def build_pass_trace(
     * Every clause of *verdict* is an entry (FAIL or UNKNOWN), including the status-dependent
       ones and the fail-closed fallback: the verdict is the authority for what was found.
     * Every other check contributes the outcome it reported itself. A check that found a
-      clause the verdict does not carry (a published verdict, a patched check) contributes
-      nothing: the verdict wins, and the trace never contradicts it.
+      clause the verdict does not carry (a published verdict, a patched check) is kept as the
+      finding it is (FAIL or UNKNOWN), as :func:`reconcile_pass_trace` keeps a recomputed one: the
+      check's slot never disappears, so a live run and an offline tool state the same trace.
+      The clauses of the verdict itself always win over any entry of their own check and scope.
     * *resumed_without_trace* (a restored page whose sidecar predates the trace): the clauses
       stand and every other slot is NOT_RUN with :data:`RESUMED_WITHOUT_TRACE_REASON`.
 
@@ -2125,10 +2227,13 @@ def build_pass_trace(
         for outcome in pass_trace_outcomes(
             output, p, event_kinds, providers_available, equation_lane_enabled
         ):
-            if outcome.clause is not None:
-                continue
-            entries.setdefault((outcome.entry.check, outcome.entry.scope), outcome.entry)
-    return tuple(sorted(entries.values(), key=lambda e: (e.check, e.scope)))
+            entries.setdefault(
+                (outcome.entry.check, outcome.entry.scope),
+                stamp_text_digest(outcome.entry, output.text or ""),
+            )
+    # Whatever the entry's source, a PASS stays only for the text that ships now.
+    checked = verify_pass_digests(entries.values(), output.text or "")
+    return tuple(sorted(checked, key=lambda e: (e.check, e.scope)))
 
 
 REFINALIZED_CLAUSE_REMOVED_REASON = (
@@ -2149,6 +2254,7 @@ def reconcile_pass_trace(
     row_binding_records: Any = None,
     recomputed: tuple[TraceEntry, ...] = (),
     text_changed: bool = False,
+    text: str | None = None,
 ) -> list[dict[str, str]] | None:
     """The trace of a sidecar an OFFLINE re-finalize tool rewrote, kept consistent with the
     verdict the tool wrote (#1183).
@@ -2168,7 +2274,15 @@ def reconcile_pass_trace(
     * *text_changed* (the tool changed ``winning_output.text``): a kept PASS the tool did not
       recompute no longer states anything about the shipped text, so it becomes NOT_RUN with
       :data:`REFINALIZED_TEXT_CHANGED_REASON`;
-    * every other entry (a PASS, a NOT_APPLICABLE, a NOT_RUN, a row-binding record) is kept.
+    * a clause of *verdict* removes every old entry of its check that is not itself a clause, at
+      ANY scope (a PASS at ``table_rows`` never stays beside a FAIL at ``page``);
+    * a recomputed FAIL or UNKNOWN is kept as the recomputed entry even when *verdict* carries no
+      clause for it: a finding is never dropped, and the check's slot never disappears;
+    * *text* (the text the tool ships): every PASS, kept or recomputed, whose digest is not the
+      digest of *text* becomes NOT_RUN (:func:`verify_pass_digests`); a recomputed PASS is first
+      stamped with *text*. This is the structural rule and replaces *text_changed* wherever the
+      tool passes the text it ships;
+    * every other entry (a NOT_APPLICABLE, a NOT_RUN, a row-binding record) is kept.
 
     ``None`` when the old sidecar carries no readable trace: a tool never invents one."""
     from socr.core.pass_trace import trace_from_dicts, trace_to_dicts
@@ -2183,19 +2297,25 @@ def reconcile_pass_trace(
     records = row_binding_record_entries(row_binding_records) if row_binding_records else []
     for entry in records:
         entries[(entry.check, entry.scope)] = entry
+    clause_checks = {_check_name(c.check) for c in verdict.clauses}
     for entry in recomputed:
-        if (
-            entry.result in (TraceResult.FAIL, TraceResult.UNKNOWN)
-            and entry.check in verdict_checks
-        ):
-            # A finding the verdict does not carry contributes nothing (the verdict is the
-            # authority, as in :func:`build_pass_trace`); the check still counts as rerun below.
-            continue
+        if text is not None:
+            entry = stamp_text_digest(entry, text)
+        # A recomputed FAIL or UNKNOWN the verdict lacks is KEPT: it is what the check found on
+        # the text the tool ships, and dropping it would delete the check's slot.
         entries.setdefault((entry.check, entry.scope), entry)
     rerun_checks = {e.check for e in recomputed}
     for entry in old:
         key = (entry.check, entry.scope)
         if key in entries or (records and entry.check == ROW_BINDING_CHECK):
+            continue
+        is_clause = (
+            entry.result in (TraceResult.FAIL, TraceResult.UNKNOWN)
+            and entry.check in verdict_checks
+        )
+        if entry.check in clause_checks and not is_clause:
+            # The verdict now states this check: an old pass or non-run of it, at any scope, no
+            # longer stands beside the clause.
             continue
         if entry.check in rerun_checks:
             # The tool ran this check again: its outcomes are the check's, at whatever scope it
@@ -2214,7 +2334,10 @@ def reconcile_pass_trace(
                 entry.check, TraceResult.NOT_RUN, entry.scope, REFINALIZED_TEXT_CHANGED_REASON
             )
         entries[key] = entry
-    return trace_to_dicts(sorted(entries.values(), key=lambda e: (e.check, e.scope)))
+    final: list[TraceEntry] = list(entries.values())
+    if text is not None:
+        final = verify_pass_digests(final, text)
+    return trace_to_dicts(sorted(final, key=lambda e: (e.check, e.scope)))
 
 
 #: The checks whose outcome is a function of the shipped text and the page's own layer, which an

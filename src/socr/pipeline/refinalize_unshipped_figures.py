@@ -350,7 +350,7 @@ def _updated_sidecar(sidecar: dict, output, verdict, decision) -> dict:
         out,
         sidecar.get("checks"),
         verdict,
-        text_changed=(sidecar.get("winning_output") or {}).get("text") != winning.get("text"),
+        text=winning.get("text") or "",
     )
     out["winning_output"] = winning
     out["page_fingerprint"] = (

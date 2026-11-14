@@ -482,7 +482,7 @@ def _updated_sidecar(
         sidecar.get("checks"),
         verdict,
         recomputed=_words,
-        text_changed=(sidecar.get("winning_output") or {}).get("text") != winning.get("text"),
+        text=winning.get("text") or "",
     )
     out["winning_output"] = winning
     out["page_fingerprint"] = (
@@ -901,6 +901,7 @@ def refinalize_document(
                     whole.get("checks"),
                     PageVerdict.from_dict(whole.get("verdict") or {}),
                     recomputed=(text_layer_words_outcome(shipped, state).entry,),
+                    text=shipped.text or "",
                 )
             # #1244 C1: re-derive the PUBLISHED audit_passed here too. A page an earlier pass
             # (or a run from before the derivation) demoted keeps a stale ``true`` otherwise,

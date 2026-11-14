@@ -51,6 +51,7 @@ from pathlib import Path
 from socr.core.verdict import (
     published_audit_passed,
     rerun_text_dependent_checks,
+    table_block_digest,
     write_reconciled_trace,
 )
 
@@ -231,6 +232,7 @@ def repair_page(
                 idx,
                 effective_outcome(result.outcome.value, bool(rows_data)),
                 row_evidence_dicts(result),
+                table_sha=table_block_digest(new_text, idx),
             )
             if "withheld_markdown" in records[table_id]:
                 payload["withheld_markdown"] = records[table_id]["withheld_markdown"]
@@ -249,7 +251,7 @@ def repair_page(
         verdict,
         row_binding_records=new_sidecar.get("row_binding") if payloads else None,
         recomputed=rerun_text_dependent_checks(final, p, sidecar.get("checks")),
-        text_changed=(sidecar.get("winning_output") or {}).get("text") != final.text,
+        text=final.text or "",
     )
 
     # The page's events: text-layer events kept, shrunk or removed; row-binding events rewritten;

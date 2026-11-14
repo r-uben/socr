@@ -680,10 +680,7 @@ def test_refinalize_prior_ocr_takes_the_records_own_trace() -> None:
             )
         ),
     }
-    try:
-        got = tool._updated_sidecar(sidecar, record)
-    except Exception as exc:  # pragma: no cover - the fake record is too thin for a field
-        pytest.skip(f"fake record too thin: {exc!r}")
+    got = tool._updated_sidecar(sidecar, record)
     assert got["checks"] == trace_to_dicts(new_checks)
 
 

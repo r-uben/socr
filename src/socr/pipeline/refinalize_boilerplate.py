@@ -167,7 +167,7 @@ def refinalize_document(doc_dir: Path, *, apply: bool = False) -> list[PageChang
                 new_sidecar,
                 sidecar.get("checks"),
                 PageVerdict.from_dict(sidecar.get("verdict") or {}),
-                text_changed=True,
+                text=new_text,
             )
             strip_writes.append((fragment_path, path, new_sidecar, new_text))
         else:
