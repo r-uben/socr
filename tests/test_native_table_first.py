@@ -312,9 +312,13 @@ class TestAgenticNativeTableFirst:
         def _none(_crop: Path) -> None:
             return None
 
-        result, route_calls, transcribe_calls = _run(
-            pdf_path, tmp_path, transcribe=_none, native_text=bad
-        )
+        # #1253 B3 sends an unconfirmed CELLS page to the model; this test pins the refusal it
+        # falls back to when no retry runs (the retry is pinned in
+        # tests/test_native_table_model_retry_1253.py).
+        with patch("socr.pipeline.orchestrator.MODEL_RETRY_REFUSAL_REASONS", frozenset()):
+            result, route_calls, transcribe_calls = _run(
+                pdf_path, tmp_path, transcribe=_none, native_text=bad
+            )
         assert route_calls == []
         assert len(transcribe_calls) == 1
         # A document whose only page is a failure marker has an empty canonical

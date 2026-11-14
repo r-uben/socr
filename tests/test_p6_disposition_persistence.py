@@ -303,6 +303,9 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
         "native_table_content_defect",
         "native_table_header_unattributed",
         "native_table_unverifiable",
+        # #1253 B3: the refusal reason a model retry ran on; read by the #262 exemption, so a
+        # resumed page must carry it.
+        "native_table_model_retry",
         "native_table_unverifiable_ordinals",
         "native_table_region_count",
         "native_table_region_identities",

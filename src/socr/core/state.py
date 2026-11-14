@@ -334,6 +334,10 @@ class PageState:
     #: property's docstring -- forcing repair under --native-only is barred).
     native_table_header_unattributed: bool = False
     native_table_unverifiable: bool = False  # TR-3: per-region verifier flagged hard-fail
+    #: #1253 B3: the refusal reason on which this page's refused native grid was handed to the
+    #: model ladder (empty = no retry ran). Read by ``d3_floor_kept_model_output``: on such a
+    #: page a model reading that is not ACCEPTED never ships over the fail-closed floor.
+    native_table_model_retry: str = ""
     #: GH-371: zero-based ordinals of native table regions whose per-region
     #: verifier hard-failed.  Empty when no failed region identity is available.
     native_table_unverifiable_ordinals: list[int] = field(default_factory=list)

@@ -48,6 +48,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
+from socr.core.verdict import published_audit_passed
 
 #: The per-document record of what this tool changed.
 LOG_NAME = "refinalized_point_drops.json"
@@ -184,7 +185,9 @@ def repair_page(
     new_sidecar = dict(sidecar)
     new_sidecar["status"] = winning.get("status", "missing")
     new_sidecar["failure_mode"] = winning.get("failure_mode", "none")
-    new_sidecar["audit_passed"] = winning.get("audit_passed", False)
+    new_sidecar["audit_passed"] = published_audit_passed(
+        new_sidecar["status"], winning.get("audit_passed", False), verdict
+    )
     new_sidecar["verdict"] = verdict.to_dict()
     new_sidecar["winning_output"] = winning
     new_sidecar["page_fingerprint"] = _page_blob_key(winning)

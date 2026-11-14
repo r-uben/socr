@@ -296,7 +296,9 @@ def test_every_lane_event_is_replayed_on_resume() -> None:
 # ---------------------------------------------------------------------------
 
 _CAPTION = "Figure 7: Bias and MSE under a CEE-type VAR"
-_PROSE = "The estimated effect of the policy change on output is reported above."
+# #1244 C1: carries a number, so a model reading of it is CHECKED against the PDF's own layer
+# (a reading that ships no number is UNKNOWN, hence WARNING, hence a non-completed document).
+_PROSE = "The estimated effect of the policy change on output is reported above, 4.2."
 
 
 def _pdf_with_a_figure(path: Path, *, draw_figure: bool) -> Path:

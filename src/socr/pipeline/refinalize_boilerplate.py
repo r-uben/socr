@@ -164,6 +164,7 @@ def refinalize_document(doc_dir: Path, *, apply: bool = False) -> list[PageChang
             winning = dict(new_sidecar.get("winning_output") or {})
             winning["audit_passed"] = False
             new_sidecar["winning_output"] = winning
+            new_sidecar["audit_passed"] = False
             new_sidecar["judge_rejected"] = True
             reocr_writes.append((path, new_sidecar))
     if not apply:
