@@ -118,11 +118,6 @@ class PageState:
     #: #1267: see ``PageAssessment.refused_for_spacing_alone``. Runtime only: the check that reads
     #: it does not run again on a restored page.
     refused_for_spacing_alone: bool = False
-    #: #1270 class 3: see ``PageAssessment.layer_refused_for_shape_alone``. Runtime only: the
-    #: verdict that reads it is DERIVED on a fresh run and PUBLISHED (and kept) on a resume.
-    layer_refused_for_shape_alone: bool = False
-    #: #1270 (review): see ``PageAssessment.layer_glyphs_undamaged``. Runtime only; False when not shown.
-    layer_glyphs_undamaged: bool = False
     has_tables: bool = False  # page contains table-like structures
     has_figures: bool = False  # page contains embedded raster images
     has_equations: bool = False  # page contains math/equations
@@ -987,10 +982,6 @@ class DocumentState:
                 ps.load_error = getattr(pa, "load_error", "") or ""
                 ps.is_born_digital = pa.is_born_digital
                 ps.refused_for_spacing_alone = getattr(pa, "refused_for_spacing_alone", False)
-                ps.layer_refused_for_shape_alone = getattr(
-                    pa, "layer_refused_for_shape_alone", False
-                )
-                ps.layer_glyphs_undamaged = getattr(pa, "layer_glyphs_undamaged", False)
                 ps.has_tables = pa.has_tables
                 ps.has_figures = pa.has_figures
                 ps.has_equations = pa.has_equations
