@@ -1426,38 +1426,77 @@ def _carries_minus(text: str) -> bool:
     return "-" in text.translate(_UNICODE_MINUS)
 
 
+# A detached glyph counts as sitting in a number's line band when its vertical extent, widened by this
+# fraction of the NUMBER's height, meets the number's extent.  Same constant and same reading as the line
+# builder's rule (a word joins a line when its centre is within LINE_CENTRE_TOL of a height of the line
+# centre): the builder asks about centres, this asks the same slack of the glyph's whole extent, because
+# a minus glyph is a thin box that the builder may place anywhere in the number's band or just outside it.
+# A glyph the builder put on a line of its own is exactly the case this check exists for.
+SIGN_BAND_TOL = LINE_CENTRE_TOL
+
+_RANGE_DASHES = "\u2013\u2014\u2012"  # en dash, em dash, figure dash: a minus or a range separator
+
+
+def _is_word_box(w, t) -> bool:
+    return w[0] == t.x0 and w[2] == t.x1 and str(w[4]) == t.text
+
+
 def _band_neighbours(words: list, t) -> list:
-    """The raw page *words* whose vertical centre lies inside the vertical extent of word *t* (the
-    same printed line band), other than *t*, sorted by x.  Geometry only: word order is never used."""
+    """The raw page *words* whose vertical extent, widened by ``SIGN_BAND_TOL`` of the height of *t*,
+    meets the vertical extent of word *t* (the same printed line band, or just outside it), other than
+    *t*, sorted by x.  Geometry only: word order is never used."""
+    slack = SIGN_BAND_TOL * (t.y1 - t.y0)
     out = [
         w
         for w in words
         if str(w[4]).strip()
-        and t.y0 <= (w[1] + w[3]) / 2 <= t.y1
-        and not (w[0] == t.x0 and w[2] == t.x1 and str(w[4]) == t.text)
+        and w[3] + slack >= t.y0
+        and w[1] - slack <= t.y1
+        and not _is_word_box(w, t)
     ]
     return sorted(out, key=lambda w: w[0])
 
 
+def _in_own_line(w, t) -> bool:
+    """The centre of raw word *w* lies inside the vertical extent of *t* (the strict reading)."""
+    return t.y0 <= (w[1] + w[3]) / 2 <= t.y1
+
+
 def _detached_minus_attached(words: list, t) -> bool:
-    """Is a detached minus glyph (a word that is only ``-``) attached to the number word *t* by x
-    position?  The glyph is the nearest word to the left of *t* in its line band, and it lies closer
-    to *t* than to the word on its own left (a glyph exactly midway cannot be shown NOT to be
-    attached, so it counts as attached and the caller refuses).  With no word on its left it is
-    attached."""
+    """Is a detached minus glyph (a word that is only ``-``) attached to the number word *t*, or
+    impossible to show NOT attached?  Every minus-only word in the (widened) band of *t* is tested; the
+    answer is True if ANY is attached.  A glyph is attached when it overlaps the number's box, when it
+    has no word on its left in the number's own line, or when it lies closer to *t* than to the word on
+    its own left (a glyph exactly midway cannot be shown NOT to be attached, so it counts as attached
+    and the caller refuses).  The distance rule reads x positions only, never word order."""
     band = _band_neighbours(words, t)
-    left = [w for w in band if w[0] < t.x0]
+    for m in band:
+        if not _is_detached_sign(str(m[4])) or "-" not in str(m[4]).translate(_UNICODE_MINUS):
+            continue
+        if m[2] > t.x0 and m[0] < t.x1:  # the boxes overlap: ambiguous, so attached
+            return True
+        if m[0] >= t.x0:  # to the right of the number
+            continue
+        before = [w for w in band if w is not m and w[2] <= m[0] and _in_own_line(w, t)]
+        if not before:
+            return True
+        gap_to_number = t.x0 - m[2]
+        gap_to_previous = m[0] - max(w[2] for w in before)
+        if gap_to_number <= gap_to_previous:
+            return True
+    return False
+
+
+def _range_dash_before_a_number(words: list, t) -> bool:
+    """Is the printed word *t* an en/em dash glued to a number (``-2.6``) AND is the nearest word on its
+    left in the band itself a number?  Then ``2.3 \u20132.6`` may be a range, and the dash is not a minus."""
+    if t.text.lstrip()[:1] not in _RANGE_DASHES:
+        return False
+    left = [w for w in _band_neighbours(words, t) if w[2] <= t.x0 and _in_own_line(w, t)]
     if not left:
         return False
     m = max(left, key=lambda w: w[2])
-    if not _is_detached_sign(str(m[4])) or "-" not in str(m[4]).translate(_UNICODE_MINUS):
-        return False
-    before = [w for w in left if w is not m and w[2] <= m[0]]
-    if not before:
-        return True
-    gap_to_number = t.x0 - m[2]
-    gap_to_previous = m[0] - max(w[2] for w in before)
-    return gap_to_number <= gap_to_previous
+    return _canon_number(str(m[4]).translate(_UNICODE_MINUS)) is not None
 
 
 def _sign_attached_by_geometry(
@@ -1465,13 +1504,29 @@ def _sign_attached_by_geometry(
 ) -> bool:
     """Plan A2 step 2: is the minus (or its absence) of text-layer value *cell* settled by the
     geometry of the layer?  The layer's value is negative: its own word must carry the minus
-    glyph (a ``(0.3)`` is notation, not evidence).  The layer's value is positive: no detached
-    minus glyph may be attached to it by x position (the layer would then print ``- 3.0`` and the
-    model's ``-3.0`` would be right).  Never by word order."""
+    glyph (a ``(0.3)`` is notation, not evidence), and it must not be an en/em dash after another
+    number with no agreeing negative in the row itself (a range ``2.3 \u20132.6``).  The layer's value
+    is positive: no detached minus glyph may be attached to it (the layer would then print ``- 3.0``
+    and the model's ``-3.0`` would be right).  Never by word order."""
     w = c.line.words[aidx[cell]]
     if native.startswith("-"):
-        return _carries_minus(w.text)
+        if not _carries_minus(w.text):
+            return False
+        if _range_dash_before_a_number(words, w) and not _row_has_agreeing_negative(c, aidx, cell):
+            return False
+        return True
     return not _detached_minus_attached(words, w)
+
+
+def _row_has_agreeing_negative(c: _Cand, aidx: list[int], cell: int) -> bool:
+    """Another value of this same row prints a minus glyph on its own word (the row's own evidence)."""
+    return any(
+        k != cell
+        and c.line.words[i].num is not None
+        and c.line.words[i].num.startswith("-")
+        and _carries_minus(c.line.words[i].text)
+        for k, i in enumerate(aidx)
+    )
 
 
 def _layer_encodes_minus(

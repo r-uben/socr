@@ -175,7 +175,7 @@ def test_the_repaired_cell_is_the_pdfs_own_string():
 
 
 # The sign repairs (#1282 step 2) the 308 pages yield, each checked by hand against the rendered
-# page image (2026-11-13): `(page stem, label, column, old, new)`.  Every one is the printed value.
+# page image (2026-11-13): `(page stem, label, column, old, new, kind)`.  Every one is the printed value.
 # p085's `Previous Tealbook` row also gets its two dropped points (cols 6 and 9): that row used to be
 # refused whole because of its flipped minus, and its three cells are all printed as written.
 SIGN_REPAIRS = {
@@ -185,6 +185,7 @@ SIGN_REPAIRS = {
         6,
         ".2",
         "-.2",
+        "sign",
     ),
     (
         "fed-meetings-2010-2010-06-2010-06-23-tealbook-parta__p085",
@@ -192,6 +193,7 @@ SIGN_REPAIRS = {
         6,
         "-2.",
         "-.2",
+        "point",
     ),
     (
         "fed-meetings-2010-2010-06-2010-06-23-tealbook-parta__p085",
@@ -199,6 +201,7 @@ SIGN_REPAIRS = {
         7,
         "-.8",
         ".8",
+        "sign",
     ),
     (
         "fed-meetings-2010-2010-06-2010-06-23-tealbook-parta__p085",
@@ -206,11 +209,12 @@ SIGN_REPAIRS = {
         9,
         "-5.",
         "-.5",
+        "point",
     ),
-    ("fed-meetings-2017-2017-06-2017-06-14-tealbook-parta__p130", "Japan", 3, ".3", "-.3"),
-    ("fed-meetings-2017-2017-12-2017-12-13-tealbook-parta__p125", "Japan", 0, ".1", "-.1"),
-    ("fed-meetings-2017-2017-12-2017-12-13-tealbook-parta__p125", "Japan", 1, ".3", "-.3"),
-    ("fed-meetings-2017-2017-12-2017-12-13-tealbook-parta__p125", "China", 0, ".6", "-.6"),
+    ("fed-meetings-2017-2017-06-2017-06-14-tealbook-parta__p130", "Japan", 3, ".3", "-.3", "sign"),
+    ("fed-meetings-2017-2017-12-2017-12-13-tealbook-parta__p125", "Japan", 0, ".1", "-.1", "sign"),
+    ("fed-meetings-2017-2017-12-2017-12-13-tealbook-parta__p125", "Japan", 1, ".3", "-.3", "sign"),
+    ("fed-meetings-2017-2017-12-2017-12-13-tealbook-parta__p125", "China", 0, ".6", "-.6", "sign"),
 }
 
 
@@ -219,7 +223,7 @@ def test_the_sign_repairs_on_the_real_pages_are_the_hand_checked_ones():
     for stem in sorted(_cases()):
         doc, _page, _text, _new, repaired, _refused, _regions = _page_repairs(stem)
         got |= {
-            (stem, r.label, r.col, r.old, r.new)
+            (stem, r.label, r.col, r.old, r.new, r.kind)
             for _i, reps in repaired
             for r in reps
             if _row_has_a_sign_repair(reps, r)

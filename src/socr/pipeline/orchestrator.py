@@ -9553,7 +9553,9 @@ class UnifiedPipeline:
     def _repair_dropped_points(
         self, state: DocumentState, page_num: int, ps: PageState, bo: PageOutput | None
     ) -> int:
-        """#1282: restore decimal points the model dropped, from the page's own text layer.
+        """#1282: restore decimal points the model dropped AND minus signs it flipped (added or
+        removed), from the page's own text layer; each repaired cell records its ``kind``
+        (``"point"`` or ``"sign"``).
 
         Runs once per page, BEFORE ``finalized_page_record``, on the winning output's text, under
         ``_row_binding_applies`` (the check's own guards).  Transform once, from source, before

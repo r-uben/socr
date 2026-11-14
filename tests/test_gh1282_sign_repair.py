@@ -39,6 +39,18 @@ NEG = ("Real GDP", ["1.0", "-2.0", "3.0"])  # a bound row that prints a minus: t
 POS = ("Real GDP", ["1.0", "2.0", "3.0"])
 
 
+# vertical extents of a detached glyph, relative to a number box [y, y + H]
+EXTENTS = {
+    "tall": lambda y: (y, y + H),  # as tall as the digits: the line grouping keeps it in the line
+    "thin": lambda y: (y + 1.0, y + 3.0),  # inside the band, on a line of its own
+    "above": lambda y: (
+        y - 6.0,
+        y - 2.0,
+    ),  # ends 2 pt above the number's top: outside the strict band
+    "far": lambda y: (y - 14.0, y - 10.0),  # 10 pt above: further than the band's slack
+}
+
+
 def lay(y, label, values):
     """One printed line.  A value "~1.5" is a detached minus glyph just left of 1.5 (a word of its
     own, 2 pt from the number); "1.5~" is a detached minus just right of 1.5 (2 pt from 1.5 and
@@ -53,7 +65,16 @@ def lay(y, label, values):
         x += 8.0 * len(w) + 6.0
     x = 200.0
     for v in values:
-        if v[0] in "~^":
+        if isinstance(
+            v, tuple
+        ):  # (glyph, value, extent, side): a glyph word of the caller's choosing
+            glyph, v, extent, side = v
+            top, bottom = EXTENTS[extent](y)
+            gx = (
+                x - 8.0 if side == "number" else x - 60.0 + 6.0 * 3 + 2.0
+            )  # 2 pt after the previous value
+            out.append((gx, top, gx + 6.0, bottom, glyph))
+        elif v[0] in "~^":
             top, bottom = (y + 1.0, y + 3.0) if v[0] == "~" else (y, y + H)
             out.append((x - 8.0, top, x - 2.0, bottom, "-"))
             v = v[1:]
@@ -257,10 +278,11 @@ def test_a_cell_holding_a_detached_minus_token_is_not_edited_by_token():
     assert reps == [] and REFUSE_TOKEN_MAP in why(refs), (reps, refs)
 
 
-def test_a_row_with_one_agreeing_value_is_refused_by_the_existing_floor():
+def test_a_row_whose_values_all_differ_in_sign_is_refused_by_the_agreeing_floor():
+    # both values differ, so none agrees: the existing MIN_AGREEING_VALUES floor refuses it
     words = layer(NEG, ("Net exports", ["-1.5", "-2.5"]))
-    _, reps, _ = go(words, table(NEG, ("Net exports", ["1.5", "2.5"])))
-    assert reps == []
+    _, reps, refs = go(words, table(NEG, ("Net exports", ["1.5", "2.5"])))
+    assert reps == [] and why(refs) == {rbc.REFUSE_NO_AGREEING}, (reps, refs)
 
 
 @pytest.mark.parametrize(
@@ -281,6 +303,110 @@ def test_s6_a_footnote_digit_glued_to_the_printed_value_is_not_a_contradiction()
     shipped = table(NEG, ("Net exports", ["-1.5", "2.5", "3.5"]))
     new, reps, refs = go(words, shipped)
     assert (new, reps) == (shipped, [])
+
+
+# ---------------------------------------------------------------------------
+# Review round (PR #1304): range dash, glyph outside the band, glyph overlapping the number
+# ---------------------------------------------------------------------------
+
+RANGE = ("Central tendency", ["2.3", "\u20132.6", "4.4"])
+RANGE_SHIPPED = ("Central tendency", ["2.3", "2.6", "4.4"])
+
+
+@pytest.mark.parametrize("dash", ["\u2013", "\u2014", "\u2012"], ids=["en", "em", "figure"])
+def test_a_range_dash_after_a_number_is_not_added_as_a_minus(dash):
+    # `2.3 \u20132.6`: the layer's dash glued to the second number is a range separator.  Another
+    # row of the table carries a real negative (NEG), which says nothing about this row.
+    words = layer(NEG, ("Central tendency", ["2.3", dash + "2.6", "4.4"]))
+    shipped = table(NEG, RANGE_SHIPPED)
+    new, reps, refs = go(words, shipped)
+    assert reps == [] and why(refs) == {REFUSE_SIGN_GEOMETRY}, (reps, refs)
+    assert new == shipped
+
+
+@pytest.mark.parametrize(
+    "values,shipped_values",
+    [
+        (["\u20132.6", "2.3", "4.4"], ["2.6", "2.3", "4.4"]),  # no number on its left
+        (["2.3", "-2.6", "4.4"], ["2.3", "2.6", "4.4"]),  # a hyphen-minus is a minus
+        (["-2.3", "\u20132.6", "4.4"], ["-2.3", "2.6", "4.4"]),  # an agreeing negative in the row
+    ],
+    ids=["first_value", "hyphen_minus", "agreeing_negative_in_the_row"],
+)
+def test_the_range_refusal_has_controls_that_still_repair(values, shipped_values):
+    words = layer(NEG, ("Central tendency", values))
+    _, reps, refs = go(words, table(NEG, ("Central tendency", shipped_values)))
+    assert [r.kind for r in reps] == ["sign"], (reps, refs)
+
+
+@pytest.mark.parametrize("extent", ["above", "thin"])
+def test_a_detached_minus_outside_the_numbers_strict_band_is_still_seen(extent):
+    # layer `-3.0` as a glyph word whose box ends 2 pt above the number ("above") or sits inside
+    # its band ("thin"): the model's -3.0 is right, removing the minus would be a wrong number.
+    words = layer(NEG, ("Net exports", ["4.5", (("-", "3.0", extent, "number")), "3.5"]))
+    shipped = table(NEG, ("Net exports", ["4.5", "-3.0", "3.5"]))
+    new, reps, refs = go(words, shipped)
+    assert reps == [] and why(refs) == {REFUSE_SIGN_GEOMETRY}, (reps, refs)
+    assert new == shipped
+
+
+def test_a_detached_minus_further_than_the_band_slack_is_not_attached():
+    # control: the glyph is 10 pt above the number (slack is SIGN_BAND_TOL of its height, 5 pt)
+    words = layer(NEG, ("Net exports", ["4.5", ("-", "3.0", "far", "number"), "3.5"]))
+    _, reps, refs = go(words, table(NEG, ("Net exports", ["4.5", "-3.0", "3.5"])))
+    assert [(r.old, r.new) for r in reps] == [("-3.0", "3.0")], (reps, refs)
+
+
+def test_a_minus_box_that_overlaps_the_number_box_counts_as_attached():
+    # the glyph box starts at the number's own left edge: the strict left-edge test used to drop it
+    class T:  # the number word, at x 260-278, y 20-30
+        x0, x1, y0, y1, text = 260.0, 278.0, 20.0, 30.0, "3.0"
+
+    overlapping = [(260.0, 21.0, 264.0, 23.0, "-")]
+    assert rbc._detached_minus_attached(overlapping, T) is True
+    assert rbc._detached_minus_attached([(270.0, 21.0, 276.0, 23.0, "-")], T) is True  # inside it
+    assert (
+        rbc._detached_minus_attached([(100.0, 21.0, 104.0, 23.0, "-")], T) is True
+    )  # no word on its left
+    far = [(220.0, 21.0, 224.0, 23.0, "-"), (200.0, 20.0, 218.0, 30.0, "9.5")]
+    assert rbc._detached_minus_attached(far, T) is False  # nearer the previous value, control
+
+
+# The glyph is kept in the number's line by the grouping (tall), so the label and binding gates see
+# an extra word.  Which refusal wins is pinned: it is not the geometry rule that stops these, and
+# a later change to the binding condition would open them.
+ODD_GLYPHS = [
+    "\u2010",  # hyphen
+    "\uf02d",  # private-use minus of a symbol font
+    "\ufffd",  # replacement character
+    "\u00ad",  # soft hyphen
+    "\uff0d",  # fullwidth hyphen-minus
+    "~",
+]
+
+
+def test_a_tall_glyph_nearer_the_previous_value_is_refused_by_the_binding_gate_not_by_geometry():
+    words = layer(NEG, ("Net exports", ["4.5", ("-", "1.5", "tall", "previous"), "3.5"]))
+    shipped = table(NEG, ("Net exports", ["4.5", "-1.5", "3.5"]))
+    new, reps, refs = go(words, shipped)
+    assert reps == [] and why(refs) == {rbc.REFUSE_NOT_BOUND}, (reps, refs)
+    assert new == shipped
+
+
+def test_the_same_tall_glyph_as_a_hyphen_minus_is_refused_by_geometry_instead():
+    words = layer(NEG, ("Net exports", ["4.5", ("-", "1.5", "tall", "number"), "3.5"]))
+    _, reps, refs = go(words, table(NEG, ("Net exports", ["4.5", "-1.5", "3.5"])))
+    assert reps == [] and why(refs) == {REFUSE_SIGN_GEOMETRY}, (reps, refs)
+
+
+@pytest.mark.parametrize("glyph", ODD_GLYPHS)
+def test_an_odd_glyph_beside_the_number_is_refused_by_the_binding_gate_not_by_geometry(glyph):
+    words = layer(NEG, ("Net exports", ["4.5", (glyph, "1.5", "tall", "number"), "3.5"]))
+    shipped = table(NEG, ("Net exports", ["4.5", "-1.5", "3.5"]))
+    new, reps, refs = go(words, shipped)
+    assert reps == [], (reps, refs)
+    assert why(refs) == {rbc.REFUSE_NOT_BOUND}, refs
+    assert new == shipped
 
 
 # ---------------------------------------------------------------------------
