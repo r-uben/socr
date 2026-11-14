@@ -1228,6 +1228,36 @@ def reading_numbers_text(text: str, page_num: int) -> str:
 _COVERAGE_PASSED = "passed"
 
 
+def _whole_layer_is_shipped(output: PageOutput, p: Any) -> bool:
+    """#1270: the words check's fallback for a page it recorded NOTHING on.
+
+    #1294 excuses repeated text at the page edge, so the one line of a blank page
+    ("(This page intentionally blank.)", 33 characters, sitting at the edge) leaves its
+    reference EMPTY and the check "did not apply". That is the state of 16 of the 24 blank and
+    divider pages of run 51270eb5. Here the WHOLE layer is held to the page with no excusal:
+    it must hold at least one compared word and every one of them must be in the shipped
+    reading. Stricter than the words check on what it demands, never looser: a page whose
+    reading drops a layer word (Greenbook II-22's bare ``<!-- Image -->``) fails it.
+    """
+    from socr.core.manifest import is_page_failed_marker
+    from socr.tables.layer_words import WordReference, missing_words, word_tokens
+
+    layer = getattr(p, "own_layer_text", "")
+    text = output.text or ""
+    if not isinstance(layer, str) or not text.strip() or is_page_failed_marker(text):
+        return False
+    if _flag(p, "prior_ocr_layer_suspect") or _table_withheld_by_socr(output, p):
+        return False
+    if not sum(word_tokens(layer).values()):
+        return False
+    shipped = _HTML_COMMENT_RE.sub(" ", _IMAGE_LINK_RE.sub(" ", text))
+    return not missing_words(
+        WordReference(layer, ""),
+        reading_numbers_text(shipped, output.page_num),
+        figure_shipped=False,
+    )
+
+
 def _no_numbers_anywhere_is_covered(output: PageOutput, p: Any) -> bool:
     """#1270: a page with no number on EITHER side is not "unchecked" -- when something else
     shows the layer is the whole page.
@@ -1238,7 +1268,9 @@ def _no_numbers_anywhere_is_covered(output: PageOutput, p: Any) -> bool:
     ruling stands; what is added is the evidence that there is nothing to check. ALL of:
 
     * the #1294 words check ran and compared the layer's words (``compared > 0``) with none
-      missing from the shipped page, so the page ships what its layer prints;
+      missing from the shipped page, so the page ships what its layer prints -- or, where it
+      recorded nothing (its page-edge excusal emptied the reference), the WHOLE layer is held to
+      the page the same way (:func:`_whole_layer_is_shipped`);
     * the #1050 ink-vs-layer check PASSED: no text-like ink on the page lacks a layer word.
       The words check alone passes a page whose only layer text is a running header while a
       raster chart carries the real content (Greenbook II-22 ships ``<!-- Image -->`` and
@@ -1251,7 +1283,10 @@ def _no_numbers_anywhere_is_covered(output: PageOutput, p: Any) -> bool:
     without a coverage verdict (empty string) fails closed.
     """
     record = page_word_check_record(output, p)
-    if not isinstance(record, dict) or not record.get("compared") or record.get("missing"):
+    if isinstance(record, dict):
+        if not record.get("compared") or record.get("missing"):
+            return False
+    elif not _whole_layer_is_shipped(output, p):
         return False
     coverage = getattr(p, "text_coverage_verdict", "")
     if not isinstance(coverage, str) or coverage != _COVERAGE_PASSED:

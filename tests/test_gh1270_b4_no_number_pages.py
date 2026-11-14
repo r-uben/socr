@@ -80,7 +80,6 @@ def test_a_blank_or_divider_page_with_independent_evidence_carries_no_clause(tex
         pytest.param({"text_coverage_verdict": "unknown"}, id="coverage-unknown"),
         pytest.param({"text_coverage_verdict": ""}, id="coverage-not-run"),
         pytest.param({"has_figures": True}, id="raster-image"),
-        pytest.param({"own_layer_word_reference": ""}, id="words-check-did-not-apply"),
     ],
 )
 def test_each_missing_piece_of_evidence_keeps_the_unknown(guard):
@@ -223,3 +222,54 @@ def test_the_cleared_blank_page_stays_cleared_on_resume(tmp_path, providers):
     again = _run(tmp_path, check_coverage=True, providers=providers, resumed=True)
     assert first[0] is PageStatus.SUCCESS and first[2] == []
     assert again == first
+
+
+def test_a_blank_page_the_words_check_recorded_nothing_on_is_cleared_by_the_whole_layer():
+    """#1294's page-edge excusal empties the reference of a blank page (16 of the 24 blank and
+    divider pages of run 51270eb5). The whole layer is then held to the page, with no excusal."""
+    page = _p(own_layer_word_reference="")
+    assert text_layer_numbers_clause(_out(), page) is None
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        pytest.param(
+            {"own_layer_text": "Greenbook Part II Domestic"}, id="reading-drops-layer-words"
+        ),
+        pytest.param({"text_coverage_verdict": "flagged"}, id="ink-unread"),
+        pytest.param({"has_figures": True}, id="raster-image"),
+        pytest.param({"prior_ocr_layer_suspect": True}, id="prior-ocr"),
+    ],
+)
+def test_the_whole_layer_route_keeps_every_guard(over):
+    page = _p(own_layer_word_reference="", **over)
+    clause = text_layer_numbers_clause(
+        _out("<!-- Image -->" if "own_layer_text" in over else BLANK), page
+    )
+    if over.get("prior_ocr_layer_suspect"):
+        assert clause is None  # the numbers clause defers to #1156's own mark, as it always did
+    else:
+        assert clause is not None and clause.result is CheckResult.UNKNOWN
+
+
+def test_a_layer_with_no_compared_word_clears_nothing():
+    """Agreement over nothing is vacuous: a layer of one-letter tokens compares zero words."""
+    page = _p(own_layer_text="a b", own_layer_word_reference="")
+    clause = text_layer_numbers_clause(_out("a b"), page)
+    assert clause is not None and clause.result is CheckResult.UNKNOWN
+
+
+def test_a_page_where_socr_withheld_a_table_is_not_cleared_by_the_whole_layer():
+    """The layer's table words are missing BY DESIGN there; a words match proves nothing."""
+    from socr.core.result import FailureMode
+
+    out = PageOutput(
+        page_num=1,
+        text=BLANK,
+        status=PageStatus.SUCCESS,
+        engine="qwen",
+        failure_mode=FailureMode.TABLE_WITHHELD,
+    )
+    clause = text_layer_numbers_clause(out, _p(own_layer_word_reference=""))
+    assert clause is not None and clause.result is CheckResult.UNKNOWN
