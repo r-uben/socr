@@ -77,10 +77,12 @@ from socr.core.result import (
 )
 from socr.core.native_paragraphs import NativeVocabulary, reflow_native_prose
 from socr.core.verdict import PRIOR_OCR_MODEL_REASON, PRIOR_OCR_NATIVE_REASON
+from socr.core.pass_trace import TraceEntry
 from socr.core.verdict import (
     ENGINE_NATIVE_MATH,
     PageVerdict,
     build_page_verdict,
+    build_pass_trace,
     marks_to_write,
 )
 from socr.core.state import DocumentState, PageState, layer_is_admissible_evidence
@@ -4872,6 +4874,10 @@ class _FinalizedPageRecord:
     #: #1145: why this page is not CHECKED, and the marks that say so. ``None`` only on
     #: records built outside the seam; the seam always sets it.
     verdict: PageVerdict | None = None
+    #: #1183: the page's pass trace (``core.pass_trace``): every check's own outcome, PASS
+    #: included. A record, never an input: nothing reads it to decide a status, a mode or a byte
+    #: of the ``.md``. ``None`` only on records built outside the seam.
+    checks: tuple[TraceEntry, ...] | None = None
 
 
 FinalizedPageRecord = _FinalizedPageRecord
@@ -7749,6 +7755,9 @@ def _select_and_finalize_page(
     # clause inputs (``table_label_unverified``; slice 3's escalation predicate, which
     # reads ``p.attempts``) do not survive a resume, and recomputing would drop them, so
     # the page would come back from a resume looking cleaner than it left.
+    _page_event_kinds = frozenset(
+        getattr(ev, "kind", "") for ev in state.events if getattr(ev, "page_num", None) == page_num
+    )
     output, verdict = _apply_verdict_marks(
         output,
         p,
@@ -7760,11 +7769,7 @@ def _select_and_finalize_page(
         # Kinds only, not the events: a clause needs to know THAT the lane attached a
         # reading, not what it said, and passing the objects would put mutable run state
         # inside the verdict layer.
-        event_kinds=frozenset(
-            getattr(ev, "kind", "")
-            for ev in state.events
-            if getattr(ev, "page_num", None) == page_num
-        ),
+        event_kinds=_page_event_kinds,
         # #1145 round 2: the ENDING, not only the output. Two clauses are about who authored
         # the shipped bytes -- a judge refusal recorded on a body the judge never saw, and
         # native glyph damage on a page a model reading replaced -- and neither can be
@@ -7873,11 +7878,26 @@ def _select_and_finalize_page(
         except Exception:  # pragma: no cover - a read-only stand-in in tests
             pass
 
+    # #1183: the pass trace, from the FINAL bytes and verdict. A terminal page restored from a
+    # sidecar that carries a trace replays it unchanged; one whose sidecar predates the trace
+    # states every check NOT_RUN. Only a page this run read computes its checks.
+    _replay = getattr(p, "published_checks", None)
+    _replay = _replay if isinstance(_replay, tuple) else None
+    checks = build_pass_trace(
+        output,
+        p,
+        verdict,
+        event_kinds=_page_event_kinds,
+        providers_available=bool(getattr(state, "agentic_ladder", None)),
+        replay=_replay,
+        resumed_without_trace=_replay is None and getattr(p, "published_verdict", None) is not None,
+    )
     return _FinalizedPageRecord(
         output=output,
         disposition=disposition,
         selection_provenance=provenance,
         verdict=verdict,
+        checks=checks,
     )
 
 

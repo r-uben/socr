@@ -161,6 +161,7 @@ from socr.pipeline.agentic import (
     route_page,
 )
 from socr.core.ollama_utils import probe_model_generation
+from socr.core.pass_trace import trace_to_dicts
 from socr.core.verdict import (
     NATIVE_TABLE_EXACT_PASS_KIND,
     published_audit_passed,
@@ -17869,6 +17870,12 @@ class UnifiedPipeline:
                 if record is not None and record.verdict is not None
                 else {}
             ),
+            # #1183: every check's own outcome on this page, PASS included, so an empty
+            # ``verdict`` can no longer be read as "every check passed". A record, not an
+            # input: no reader decides a status or a byte from it. The final records flush
+            # writes the authoritative list (late assembly clauses included); a resumed
+            # terminal page replays the list its original run wrote.
+            "checks": trace_to_dicts(record.checks or ()) if record is not None else [],
             # Full serialised winning PageOutput.  PP-5 reconstructs a skipped
             # page's in-memory PageState.best_output from this dict (paired with
             # the fragment text) so the resumed run carries the SAME status /
@@ -19352,6 +19359,11 @@ class UnifiedPipeline:
             from socr.core.verdict import PageVerdict
 
             ps.published_verdict = PageVerdict.from_dict(raw_verdict)
+            # #1183: the trace the original run recorded, replayed unchanged. ``None`` when the
+            # sidecar predates it, which the seam states as NOT_RUN for every check.
+            from socr.core.pass_trace import trace_from_dicts
+
+            ps.published_checks = trace_from_dicts(meta.get("checks"))
         else:
             logger.warning(
                 "#1145: p%d restored without its published verdict; the seam will "

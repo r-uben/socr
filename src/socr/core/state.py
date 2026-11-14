@@ -262,6 +262,10 @@ class PageState:
     #: as the single frozen winner), so a recomputed verdict would silently drop them.
     #: Typed ``Any`` to keep this module free of a ``core.verdict`` import.
     published_verdict: Any = None
+    #: #1183: the pass trace (a tuple of ``core.pass_trace.TraceEntry``) this page's ORIGINAL
+    #: run wrote to its sidecar, set only by the resume reader, ``None`` when the sidecar
+    #: carries none. A terminal resumed page REPLAYS it unchanged: its checks do not run again.
+    published_checks: Any = None
     #: GH-271: the corrupt-equation lane (default on) produced a region hybrid
     #: that must ship even though it remains WARNING/audit_passed=False (syntax
     #: is not a mathematical-fidelity oracle). Read only by final winner selection.

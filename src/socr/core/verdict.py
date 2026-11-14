@@ -40,6 +40,7 @@ from typing import Any
 
 from socr.core.marks import (
     SCOPE_PAGE,
+    region_scope,
     parse_canonical_mark,
     Check,
     CheckResult,
@@ -49,6 +50,7 @@ from socr.core.marks import (
     page_failed_coverage,
     page_unchecked_clause_mark,
 )
+from socr.core.pass_trace import TraceEntry, TraceResult
 from socr.core.result import FailureMode, PageOutput, PageStatus
 
 logger = logging.getLogger(__name__)
@@ -299,6 +301,58 @@ class VerdictClause:
             scope=str(d.get("scope") or SCOPE_PAGE),
             reason=str(d.get("reason") or ""),
         )
+
+
+@dataclass(frozen=True)
+class CheckOutcome:
+    """What one check did on one scope of one page (#1183 pass trace).
+
+    ``clause`` is the verdict clause the check found, or ``None``; ``entry`` is the trace entry
+    and is ALWAYS present, so a check cannot answer "nothing to report" without also saying
+    whether that is a pass (it ran and found nothing), not applicable, or not run. A check
+    function that returns ``None`` for "no clause" and leaves the reader to infer which of the
+    three it meant is the defect this type exists to prevent.
+    """
+
+    entry: TraceEntry
+    clause: VerdictClause | None = None
+
+
+_CLAUSE_TRACE_RESULT = {
+    CheckResult.PASS: TraceResult.PASS,
+    CheckResult.FAIL: TraceResult.FAIL,
+    CheckResult.UNKNOWN: TraceResult.UNKNOWN,
+}
+
+
+def _check_name(check: Check | str) -> str:
+    return check.value if isinstance(check, Check) else str(check)
+
+
+def entry_from_clause(clause: VerdictClause) -> TraceEntry:
+    """The trace entry that states *clause*: same check, scope and reason, same result."""
+    return TraceEntry(
+        _check_name(clause.check),
+        _CLAUSE_TRACE_RESULT[clause.result],
+        clause.scope,
+        clause.reason,
+    )
+
+
+def _found(clause: VerdictClause) -> CheckOutcome:
+    return CheckOutcome(entry_from_clause(clause), clause)
+
+
+def _passed(check: Check | str, scope: str = SCOPE_PAGE, reason: str = "") -> CheckOutcome:
+    return CheckOutcome(TraceEntry(_check_name(check), TraceResult.PASS, scope, reason))
+
+
+def _not_applicable(check: Check | str, reason: str, scope: str = SCOPE_PAGE) -> CheckOutcome:
+    return CheckOutcome(TraceEntry(_check_name(check), TraceResult.NOT_APPLICABLE, scope, reason))
+
+
+def _not_run(check: Check | str, reason: str, scope: str = SCOPE_PAGE) -> CheckOutcome:
+    return CheckOutcome(TraceEntry(_check_name(check), TraceResult.NOT_RUN, scope, reason))
 
 
 @dataclass(frozen=True)
@@ -855,14 +909,34 @@ def _chart_values_clause(event_kinds: frozenset[str]) -> VerdictClause | None:
 
     UNKNOWN, not FAIL: nothing read the chart and found it wrong; nothing read it at all.
     """
+    return _chart_values_outcome(event_kinds).clause
+
+
+#: #1183 pass trace reasons. Named, not inlined: tests and the scoreboard read them by value.
+NO_PROVIDER_LADDER_REASON = "no provider ladder in this run"
+CHART_VALUES_NOT_APPLICABLE_REASON = (
+    "no chart of this page shipped as an image with its values untranscribed"
+)
+EQUATION_NOT_APPLICABLE_REASON = "no equation reading was attached to this page"
+EXACT_PASS_NOT_APPLICABLE_REASON = (
+    "this page was not accepted by the deterministic table verifier without a judge "
+    "(this entry does not say whether a judge ran)"
+)
+
+
+def _chart_values_outcome(event_kinds: frozenset[str]) -> CheckOutcome:
+    """:func:`_chart_values_clause` with its outcome. The check is keyed on the chart lane's
+    event alone, so it can find a problem and can never PASS: nothing reads the values."""
     if VISUAL_VALUES_UNTRANSCRIBED_KIND not in event_kinds:
-        return None
-    return VerdictClause(
-        Check.FIGURE_TEXT,
-        CheckResult.UNKNOWN,
-        SCOPE_PAGE,
-        "this page's chart ships as an image and the labels and values drawn in it were "
-        "never transcribed -- read them off the image before citing",
+        return _not_applicable(Check.FIGURE_TEXT, CHART_VALUES_NOT_APPLICABLE_REASON)
+    return _found(
+        VerdictClause(
+            Check.FIGURE_TEXT,
+            CheckResult.UNKNOWN,
+            SCOPE_PAGE,
+            "this page's chart ships as an image and the labels and values drawn in it were "
+            "never transcribed -- read them off the image before citing",
+        )
     )
 
 
@@ -883,14 +957,29 @@ def _equation_fidelity_clause(event_kinds: frozenset[str]) -> VerdictClause | No
     for unrelated reasons. Measured: 403 pages carry the event -- 399 shipping SUCCESS, which
     this clause demotes, and 4 already WARNING, which slice 1 marks.
     """
+    return _equation_fidelity_outcome(event_kinds).clause
+
+
+def _equation_fidelity_outcome(
+    event_kinds: frozenset[str], providers_available: bool = True
+) -> CheckOutcome:
+    """:func:`_equation_fidelity_clause` with its outcome. Model-dependent (a reading of a crop
+    is what the lane attaches), and it can never PASS: the lane checks LaTeX syntax only."""
     if not (event_kinds & EQUATION_READING_ATTACHED_KINDS):
-        return None
-    return VerdictClause(
-        Check.EQUATION_FIDELITY,
-        CheckResult.UNKNOWN,
-        SCOPE_PAGE,
-        "an equation reading was attached from a crop and its mathematics was never "
-        "verified against the page -- only its LaTeX syntax was checked",
+        if not providers_available:
+            return _not_run(
+                Check.EQUATION_FIDELITY,
+                f"{NO_PROVIDER_LADDER_REASON}: no equation reading could be attached",
+            )
+        return _not_applicable(Check.EQUATION_FIDELITY, EQUATION_NOT_APPLICABLE_REASON)
+    return _found(
+        VerdictClause(
+            Check.EQUATION_FIDELITY,
+            CheckResult.UNKNOWN,
+            SCOPE_PAGE,
+            "an equation reading was attached from a crop and its mathematics was never "
+            "verified against the page -- only its LaTeX syntax was checked",
+        )
     )
 
 
@@ -922,15 +1011,23 @@ def _exact_pass_unjudged_clause(
     instance: code no page exercises is code to delete. The mark's wording is true of a
     table-only page unchanged.
     """
+    return _exact_pass_unjudged_outcome(output, event_kinds).clause
+
+
+def _exact_pass_unjudged_outcome(output: PageOutput, event_kinds: frozenset[str]) -> CheckOutcome:
+    """:func:`_exact_pass_unjudged_clause` with its outcome. Keyed on the lane's event and the
+    accepting reason, so it can find the unjudged accept and can never PASS."""
     if NATIVE_TABLE_EXACT_PASS_KIND not in event_kinds:
-        return None
+        return _not_applicable(Check.PAGE_JUDGE, EXACT_PASS_NOT_APPLICABLE_REASON)
     if (getattr(output, "judge_reason", "") or "").strip() != EXACT_PASS_ACCEPT_REASON:
-        return None
-    return VerdictClause(
-        Check.PAGE_JUDGE,
-        CheckResult.UNKNOWN,
-        SCOPE_PAGE,
-        EXACT_PASS_UNJUDGED_REASON,
+        return _not_applicable(Check.PAGE_JUDGE, EXACT_PASS_NOT_APPLICABLE_REASON)
+    return _found(
+        VerdictClause(
+            Check.PAGE_JUDGE,
+            CheckResult.UNKNOWN,
+            SCOPE_PAGE,
+            EXACT_PASS_UNJUDGED_REASON,
+        )
     )
 
 
@@ -952,14 +1049,34 @@ def _prior_ocr_layer_clause(output: PageOutput, p: Any) -> VerdictClause | None:
     meter disagreeing about whether anything checked it. One reading of a scan, whoever
     produced it, is one reading.
     """
-    if not _flag(p, "prior_ocr_layer_suspect"):
-        return None
-    return VerdictClause(
-        check=Check.PRIOR_OCR_LAYER,
-        result=CheckResult.UNKNOWN,
-        scope=SCOPE_PAGE,
-        reason=PRIOR_OCR_MODEL_REASON if _is_model_reading(output) else PRIOR_OCR_NATIVE_REASON,
-    )
+    return _prior_ocr_layer_outcome(output, p).clause
+
+
+PRIOR_OCR_NO_LAYER_REASON = (
+    "this page has no text layer of its own, so none can be an earlier OCR run"
+)
+PRIOR_OCR_PASS_REASON = "page analysis found no earlier-OCR layer on this page's own text layer"
+
+
+def _prior_ocr_layer_outcome(output: PageOutput, p: Any) -> CheckOutcome:
+    """:func:`_prior_ocr_layer_clause` with its outcome. The page analysis scans every page
+    (``BornDigitalDetector.assess``), and a failed scan counts as suspect, so a page that has
+    its own layer and is not suspect is a recorded negative, not an absence."""
+    if _flag(p, "prior_ocr_layer_suspect"):
+        return _found(
+            VerdictClause(
+                check=Check.PRIOR_OCR_LAYER,
+                result=CheckResult.UNKNOWN,
+                scope=SCOPE_PAGE,
+                reason=PRIOR_OCR_MODEL_REASON
+                if _is_model_reading(output)
+                else PRIOR_OCR_NATIVE_REASON,
+            )
+        )
+    own = getattr(p, "own_layer_text", "")
+    if not (_flag(p, "is_born_digital") or (isinstance(own, str) and own.strip())):
+        return _not_applicable(Check.PRIOR_OCR_LAYER, PRIOR_OCR_NO_LAYER_REASON)
+    return _passed(Check.PRIOR_OCR_LAYER, reason=PRIOR_OCR_PASS_REASON)
 
 
 #: #1185: the engines whose output is a MODEL READING of the page, by positive evidence:
@@ -1269,6 +1386,35 @@ def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | Non
     * Every number agrees, on a layer the detector refused or found damaged: UNKNOWN. Only
       agreement with a born-digital, undamaged layer is a CHECK.
     """
+    return text_layer_numbers_outcome(output, p).clause
+
+
+#: #1183 pass trace reasons of the two model-reading checks (numbers and drops).
+NOT_A_MODEL_READING_REASON = "this page ships native text, not a model's reading of the page"
+NO_TEXT_REASON = "this page ships no text"
+FAILED_MARKER_REASON = "this page ships socr's failure marker, so no reading ships to compare"
+PRIOR_OCR_LAYER_NOT_EVIDENCE_REASON = (
+    "this page's text layer is an earlier OCR run, which is not evidence (#1156)"
+)
+NUMBERS_PASS_REASON = "every number the reading ships occurs in the page's own text layer"
+
+
+def _not_a_reading(check: Check, output: PageOutput, providers_available: bool) -> CheckOutcome:
+    """The outcome of a model-reading check on a page that ships no model reading. With a
+    provider the page simply is not one (NOT_APPLICABLE); with none, no reading could have
+    existed, so the check COULD have applied and had nothing to run on (NOT_RUN)."""
+    if not providers_available:
+        return _not_run(check, f"{NO_PROVIDER_LADDER_REASON}: no model reading exists to compare")
+    return _not_applicable(check, NOT_A_MODEL_READING_REASON)
+
+
+def text_layer_numbers_outcome(
+    output: PageOutput, p: Any, providers_available: bool = True
+) -> CheckOutcome:
+    """:func:`text_layer_numbers_clause` with its outcome (#1183).
+
+    PASS only when the comparison ran with ``compared > 0`` on an undamaged layer and every
+    shipped number is in it. Every other no-clause exit names why it did not run."""
     from socr.tables.reading_agreement import (
         PROVENANCE_OWN_CHARACTERS,
         compare_numbers,
@@ -1277,22 +1423,23 @@ def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | Non
 
     from socr.core.manifest import is_page_failed_marker
 
-    if (output.engine or "") not in model_reading_engines() or not (output.text or "").strip():
-        return None
+    check = Check.TEXT_LAYER_NUMBERS
+    if (output.engine or "") not in model_reading_engines():
+        return _not_a_reading(check, output, providers_available)
+    if not (output.text or "").strip():
+        return _not_applicable(check, NO_TEXT_REASON)
     # A page that ships socr's ``[page N failed: ...]`` marker ships none of the reading,
     # so there is nothing to compare; its marker already marks it. Without this the
     # sidecar carried an UNKNOWN clause that no line on the page states, because
     # ``_apply_verdict_marks`` never writes above a whole-page failure marker -- one
     # surface saying what another does not (found by the p6 stage C oracle, page 9).
     if is_page_failed_marker(output.text):
-        return None
+        return _not_run(check, FAILED_MARKER_REASON)
     if _flag(p, "prior_ocr_layer_suspect"):
-        return None
+        return _not_run(check, PRIOR_OCR_LAYER_NOT_EVIDENCE_REASON)
     reference = getattr(p, "own_layer_text", "")
     if not isinstance(reference, str) or not reference.strip():
-        return VerdictClause(
-            Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, SCOPE_PAGE, NO_OWN_TEXT_REASON
-        )
+        return _found(VerdictClause(check, CheckResult.UNKNOWN, SCOPE_PAGE, NO_OWN_TEXT_REASON))
     record = compare_numbers(
         reference,
         reading_numbers_text(output.text, output.page_num),
@@ -1305,26 +1452,26 @@ def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | Non
             if layer_count
             else NO_NUMBER_REASON
         )
-        return VerdictClause(Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, SCOPE_PAGE, reason)
+        return _found(VerdictClause(check, CheckResult.UNKNOWN, SCOPE_PAGE, reason))
     if _layer_is_damaged(p):
         reason = (
             DAMAGED_LAYER_PREFIX + describe_disputes(record)
             if record.disputed
             else DAMAGED_LAYER_AGREES_REASON
         )
-        return VerdictClause(Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, SCOPE_PAGE, reason)
+        return _found(VerdictClause(check, CheckResult.UNKNOWN, SCOPE_PAGE, reason))
     if record.disputed and any(_flag(p, f) for f in _COSMETIC_LAYER_FLAGS):
-        return VerdictClause(
-            Check.TEXT_LAYER_NUMBERS,
-            CheckResult.UNKNOWN,
-            SCOPE_PAGE,
-            DAMAGED_LAYER_PREFIX + describe_disputes(record),
+        return _found(
+            VerdictClause(
+                check,
+                CheckResult.UNKNOWN,
+                SCOPE_PAGE,
+                DAMAGED_LAYER_PREFIX + describe_disputes(record),
+            )
         )
     if record.disputed:
-        return VerdictClause(
-            Check.TEXT_LAYER_NUMBERS, CheckResult.FAIL, SCOPE_PAGE, describe_disputes(record)
-        )
-    return None
+        return _found(VerdictClause(check, CheckResult.FAIL, SCOPE_PAGE, describe_disputes(record)))
+    return _passed(check, reason=NUMBERS_PASS_REASON)
 
 
 #: #1218: the reason of a ``text_layer_drops`` FAIL. COUNT ONLY, never the numbers: a mark
@@ -1389,28 +1536,70 @@ def page_dropped_numbers(output: PageOutput, p: Any) -> tuple[str, ...]:
     ``dropped_numbers``): the count is a lower bound, and a transcribed head MAY absorb a
     dropped body number of the same value.
     """
+    return _dropped_numbers_outcome(output, p)[0]
+
+
+DROPS_LAYER_NOT_USABLE_REASON = (
+    "this page's own text layer is missing, damaged or an earlier OCR run, so it cannot "
+    "count what a reading omitted"
+)
+DROPS_TABLE_WITHHELD_REASON = (
+    "socr withheld a table on this page, so the numbers missing from it are missing by design"
+)
+DROPS_NO_REFERENCE_REASON = (
+    "the page's drop reference is empty (not computed, or no table row qualified): not checked"
+)
+DROPS_PASS_REASON = "no number printed in this page's table rows is missing from the reading"
+
+
+def _dropped_numbers_outcome(
+    output: PageOutput, p: Any, providers_available: bool = True
+) -> tuple[tuple[str, ...], CheckOutcome]:
+    """The dropped numbers (``()`` when the check does not apply) and the check's outcome.
+    The ONE body of :func:`page_dropped_numbers` and :func:`text_layer_drops_outcome`, so the
+    list the clause counts and the outcome the trace records cannot come from two copies."""
     from socr.core.manifest import is_page_failed_marker
     from socr.tables.reading_agreement import dropped_numbers
 
-    if not _is_model_reading(output) or not (output.text or "").strip():
-        return ()
+    check = Check.TEXT_LAYER_DROPS
+    if not _is_model_reading(output):
+        return (), _not_a_reading(check, output, providers_available)
+    if not (output.text or "").strip():
+        return (), _not_applicable(check, NO_TEXT_REASON)
     if is_page_failed_marker(output.text):
-        return ()
+        return (), _not_run(check, FAILED_MARKER_REASON)
     if _flag(p, "prior_ocr_layer_suspect") or _layer_is_damaged(p):
-        return ()
+        return (), _not_run(check, DROPS_LAYER_NOT_USABLE_REASON)
     if _table_withheld_by_socr(output, p):
-        return ()
+        return (), _not_run(check, DROPS_TABLE_WITHHELD_REASON)
     own = getattr(p, "own_layer_text", "")
     reference = getattr(p, "own_layer_drop_reference", "")
     if not isinstance(own, str) or not own.strip():
-        return ()
+        return (), _not_run(check, DROPS_LAYER_NOT_USABLE_REASON)
     if not isinstance(reference, str) or not reference.strip():
-        return ()
+        return (), _not_run(check, DROPS_NO_REFERENCE_REASON)
     record = dropped_numbers(
         reference,
         reading_numbers_text(output.text, output.page_num),
     )
-    return tuple(record.dropped)
+    dropped = tuple(record.dropped)
+    if dropped:
+        return dropped, _found(
+            VerdictClause(
+                check,
+                CheckResult.FAIL,
+                SCOPE_PAGE,
+                TEXT_LAYER_DROPS_REASON.format(count=len(dropped)),
+            )
+        )
+    return (), _passed(check, reason=DROPS_PASS_REASON)
+
+
+def text_layer_drops_outcome(
+    output: PageOutput, p: Any, providers_available: bool = True
+) -> CheckOutcome:
+    """:func:`text_layer_drops_clause` with its outcome (#1183)."""
+    return _dropped_numbers_outcome(output, p, providers_available)[1]
 
 
 def text_layer_drops_clause(output: PageOutput, p: Any) -> VerdictClause | None:
@@ -1472,23 +1661,61 @@ def page_missing_words(output: PageOutput, p: Any) -> tuple[str, ...] | None:
     run (#1156 marks it); socr withheld a table on it (those words are missing by design);
     or the reference is EMPTY (not computed, or no word), which means NOT CHECKED.
     """
+    return _missing_words_outcome(output, p)[0]
+
+
+WORDS_NO_REFERENCE_REASON = (
+    "this page's own text layer gave no word reference (not computed on this run, or the "
+    "layer holds no word): not checked"
+)
+WORDS_NO_LAYER_REASON = "this page has no text layer of its own to take words from"
+WORDS_TABLE_WITHHELD_REASON = (
+    "socr withheld a table on this page, so the words missing from it are missing by design"
+)
+WORDS_PASS_REASON = "every word this page's own text layer prints is on the page"
+
+
+def _words_clause(missing: tuple[str, ...], p: Any) -> VerdictClause:
+    """The ``text_layer_words`` clause for a non-empty *missing* (UNKNOWN on a damaged layer)."""
+    if _word_layer_is_damaged(p):
+        result, template = CheckResult.UNKNOWN, TEXT_LAYER_WORDS_DAMAGED_REASON
+    else:
+        result, template = CheckResult.FAIL, TEXT_LAYER_WORDS_REASON
+    reason = template.format(count=len(missing), words=_name_words(missing))
+    return VerdictClause(Check.TEXT_LAYER_WORDS, result, SCOPE_PAGE, reason)
+
+
+def _missing_words_outcome(
+    output: PageOutput, p: Any
+) -> tuple[tuple[str, ...] | None, CheckOutcome]:
+    """The missing words (``None`` when the check does not apply) and the check's outcome: the
+    ONE body of :func:`page_missing_words` and :func:`text_layer_words_outcome`."""
     from socr.core.manifest import is_page_failed_marker
     from socr.tables.layer_words import WordReference, missing_words
 
+    check = Check.TEXT_LAYER_WORDS
     text = output.text or ""
-    if not text.strip() or is_page_failed_marker(text):
-        return None
-    if _flag(p, "prior_ocr_layer_suspect") or _table_withheld_by_socr(output, p):
-        return None
+    if not text.strip():
+        return None, _not_applicable(check, NO_TEXT_REASON)
+    if is_page_failed_marker(text):
+        return None, _not_run(check, FAILED_MARKER_REASON)
+    if _flag(p, "prior_ocr_layer_suspect"):
+        return None, _not_run(check, PRIOR_OCR_LAYER_NOT_EVIDENCE_REASON)
+    if _table_withheld_by_socr(output, p):
+        return None, _not_run(check, WORDS_TABLE_WITHHELD_REASON)
     reference = getattr(p, "own_layer_word_reference", "")
     figure = getattr(p, "own_layer_figure_words", "")
     reference = reference if isinstance(reference, str) else ""
     figure = figure if isinstance(figure, str) else ""
     # Either field counts: a page whose only words sit in a chart is still checked.
     if not reference.strip() and not figure.strip():
-        return None
+        own = getattr(p, "own_layer_text", "")
+        has_layer = _flag(p, "is_born_digital") or (isinstance(own, str) and bool(own.strip()))
+        if not has_layer:
+            return None, _not_applicable(check, WORDS_NO_LAYER_REASON)
+        return None, _not_run(check, WORDS_NO_REFERENCE_REASON)
     shipped = _HTML_COMMENT_RE.sub(" ", _IMAGE_LINK_RE.sub(" ", text))
-    return tuple(
+    missing = tuple(
         missing_words(
             WordReference(reference, figure),
             reading_numbers_text(shipped, output.page_num),
@@ -1496,6 +1723,14 @@ def page_missing_words(output: PageOutput, p: Any) -> tuple[str, ...] | None:
             excused=_stripped_footnote_words(output, p),
         )
     )
+    if missing:
+        return missing, _found(_words_clause(missing, p))
+    return missing, _passed(check, reason=WORDS_PASS_REASON)
+
+
+def text_layer_words_outcome(output: PageOutput, p: Any) -> CheckOutcome:
+    """:func:`text_layer_words_clause` with its outcome (#1183)."""
+    return _missing_words_outcome(output, p)[1]
 
 
 def page_word_check_record(output: PageOutput, p: Any) -> dict | None:
@@ -1539,14 +1774,32 @@ def control_bytes_clause(output: PageOutput, p: Any) -> VerdictClause | None:
     one replaced; the character alone could be any reading's. Status-independent, so a page
     already WARNING for another reason gains the true second reason (see ``derive_clauses``).
     """
-    from socr.core.damaged_layer import REPLACEMENT_CHAR
+    return control_bytes_outcome(output, p).clause
 
+
+CONTROL_BYTES_PASS_REASON = (
+    "the damaged-layer guard scanned this page's text and found no control byte"
+)
+
+
+def control_bytes_outcome(output: PageOutput, p: Any) -> CheckOutcome:
+    """:func:`control_bytes_clause` with its outcome (#1183). ``_apply_damaged_layer_guard``
+    scans every shipped text that is not a failure marker, whatever its engine, so on such a
+    page a clean scan is a recorded negative (PASS)."""
+    from socr.core.damaged_layer import REPLACEMENT_CHAR
+    from socr.core.manifest import is_page_failed_marker
+
+    text = output.text or ""
     found = getattr(p, "control_bytes_replaced", None)
-    if not isinstance(found, dict) or not found or REPLACEMENT_CHAR not in (output.text or ""):
-        return None
-    codes = ", ".join(f"{code} x{n}" for code, n in sorted(found.items()))
-    reason = CONTROL_BYTES_REASON.format(count=sum(found.values()), codes=codes)
-    return VerdictClause(Check.CONTROL_BYTES, CheckResult.FAIL, SCOPE_PAGE, reason)
+    if isinstance(found, dict) and found and REPLACEMENT_CHAR in text:
+        codes = ", ".join(f"{code} x{n}" for code, n in sorted(found.items()))
+        reason = CONTROL_BYTES_REASON.format(count=sum(found.values()), codes=codes)
+        return _found(VerdictClause(Check.CONTROL_BYTES, CheckResult.FAIL, SCOPE_PAGE, reason))
+    if not text.strip():
+        return _not_applicable(Check.CONTROL_BYTES, NO_TEXT_REASON)
+    if is_page_failed_marker(text):
+        return _not_run(Check.CONTROL_BYTES, FAILED_MARKER_REASON)
+    return _passed(Check.CONTROL_BYTES, reason=CONTROL_BYTES_PASS_REASON)
 
 
 def text_layer_words_clause(output: PageOutput, p: Any) -> VerdictClause | None:
@@ -1555,12 +1808,7 @@ def text_layer_words_clause(output: PageOutput, p: Any) -> VerdictClause | None:
     missing = page_missing_words(output, p)
     if not missing:
         return None
-    if _word_layer_is_damaged(p):
-        result, template = CheckResult.UNKNOWN, TEXT_LAYER_WORDS_DAMAGED_REASON
-    else:
-        result, template = CheckResult.FAIL, TEXT_LAYER_WORDS_REASON
-    reason = template.format(count=len(missing), words=_name_words(missing))
-    return VerdictClause(Check.TEXT_LAYER_WORDS, result, SCOPE_PAGE, reason)
+    return _words_clause(missing, p)
 
 
 #: The order ``silent_success_clauses`` emits its clauses in, as ``(check, scope kind)``.
@@ -1633,6 +1881,223 @@ def silent_success_clauses(
         *((words,) if words is not None else ()),
         *((control,) if control is not None else ()),
     )
+
+
+# --- the pass trace (#1183) ---------------------------------------------------------------
+
+#: The trace name of the focused row-binding check (#1267). It is a TABLE check whose failures
+#: surface as table marks and withheld tables, not as ``Check`` clauses, so it is traced by
+#: name. Its entries carry ``table:N`` scopes (N is the mark's own 1-based ordinal).
+ROW_BINDING_CHECK = "row_binding"
+
+ROW_BINDING_NO_TABLE_REASON = "this page ships no markdown table to bind"
+ROW_BINDING_NATIVE_REASON = (
+    "this table is the layer's own text; the check binds model-read tables to the layer"
+)
+ROW_BINDING_NOT_RUN_REASON = (
+    "the check recorded no result for this model-read table (a layer it may not judge, a "
+    "native-only run, or a page that did not load)"
+)
+ROW_BINDING_PASS_REASON = (
+    "every row label of this table sits on the text-layer line that prints its values"
+)
+ROW_BINDING_FAIL_REASON = "row labels of this table do not bind to the page's text-layer values"
+ROW_BINDING_UNKNOWN_REASON = "row binding of this table could not be settled on the text layer"
+_ROW_BINDING_RESULTS = {
+    "bound": (TraceResult.PASS, ROW_BINDING_PASS_REASON),
+    "contradicted": (TraceResult.FAIL, ROW_BINDING_FAIL_REASON),
+    "unverifiable": (TraceResult.UNKNOWN, ROW_BINDING_UNKNOWN_REASON),
+}
+
+
+def row_binding_record_entries(records: dict) -> list[TraceEntry]:
+    """One trace entry per table record of the row-binding check (``PageState.row_binding``, or
+    the sidecar's ``row_binding``): PASS for bound, FAIL for contradicted, UNKNOWN for
+    unverifiable, at the table's own ``table:N`` scope (N is the mark's 1-based ordinal)."""
+    entries: list[TraceEntry] = []
+    for table_id, record in sorted(records.items(), key=lambda kv: str(kv[0])):
+        if not isinstance(record, dict):
+            continue
+        try:
+            scope = region_scope("table", int(record.get("table_index")) + 1)
+        except (TypeError, ValueError):
+            logger.warning("#1183: unreadable row-binding record for %r", table_id)
+            continue
+        result, reason = _ROW_BINDING_RESULTS.get(
+            str(record.get("outcome")), (TraceResult.UNKNOWN, ROW_BINDING_UNKNOWN_REASON)
+        )
+        entries.append(TraceEntry(ROW_BINDING_CHECK, result, scope, reason))
+    return entries
+
+
+def row_binding_outcomes(output: PageOutput, p: Any) -> list[CheckOutcome]:
+    """One outcome per table for the row-binding check, from the record the check wrote.
+
+    A table with a record states exactly that record (PASS for bound, FAIL for contradicted,
+    UNKNOWN for unverifiable), at its own ``table:N`` scope. A page with no record says why:
+    no table to bind (NOT_APPLICABLE), a native text (NOT_APPLICABLE), or model-read tables the
+    check recorded nothing for (NOT_RUN). A table that was bound never reads as a page pass."""
+    records = getattr(p, "row_binding", None)
+    if isinstance(records, dict) and records:
+        return [CheckOutcome(entry) for entry in row_binding_record_entries(records)]
+    from socr.tables.reconcile import find_table_blocks
+
+    blocks = find_table_blocks(output.text or "")
+    if not blocks:
+        return [_not_applicable(ROW_BINDING_CHECK, ROW_BINDING_NO_TABLE_REASON)]
+    native = not _is_model_reading(output)
+    return [
+        (
+            _not_applicable(ROW_BINDING_CHECK, ROW_BINDING_NATIVE_REASON, region_scope("table", k))
+            if native
+            else _not_run(ROW_BINDING_CHECK, ROW_BINDING_NOT_RUN_REASON, region_scope("table", k))
+        )
+        for k in range(1, len(blocks) + 1)
+    ]
+
+
+def pass_trace_outcomes(
+    output: PageOutput,
+    p: Any,
+    event_kinds: frozenset[str] = frozenset(),
+    providers_available: bool = True,
+) -> list[CheckOutcome]:
+    """Every check this module can state an outcome for, on this page, in a fixed order."""
+    return [
+        text_layer_numbers_outcome(output, p, providers_available),
+        text_layer_drops_outcome(output, p, providers_available),
+        text_layer_words_outcome(output, p),
+        control_bytes_outcome(output, p),
+        _prior_ocr_layer_outcome(output, p),
+        _equation_fidelity_outcome(event_kinds, providers_available),
+        _chart_values_outcome(event_kinds),
+        _exact_pass_unjudged_outcome(output, event_kinds),
+        *row_binding_outcomes(output, p),
+    ]
+
+
+#: The page-scope slots of every traced check. A page restored from a sidecar that recorded no
+#: trace states each of them NOT_RUN: its checks did not run on this run, and the run that did
+#: them left no record of the outcome.
+PASS_TRACE_SLOTS: tuple[tuple[str, str], ...] = (
+    (Check.TEXT_LAYER_NUMBERS.value, SCOPE_PAGE),
+    (Check.TEXT_LAYER_DROPS.value, SCOPE_PAGE),
+    (Check.TEXT_LAYER_WORDS.value, SCOPE_PAGE),
+    (Check.CONTROL_BYTES.value, SCOPE_PAGE),
+    (Check.PRIOR_OCR_LAYER.value, SCOPE_PAGE),
+    (Check.EQUATION_FIDELITY.value, SCOPE_PAGE),
+    (Check.FIGURE_TEXT.value, SCOPE_PAGE),
+    (Check.PAGE_JUDGE.value, SCOPE_PAGE),
+    (ROW_BINDING_CHECK, SCOPE_PAGE),
+)
+RESUMED_WITHOUT_TRACE_REASON = (
+    "this page was restored from a sidecar that recorded no pass trace; its checks were "
+    "not run again and their outcomes were not recorded"
+)
+
+
+def build_pass_trace(
+    output: PageOutput,
+    p: Any,
+    verdict: PageVerdict,
+    event_kinds: frozenset[str] = frozenset(),
+    providers_available: bool = True,
+    replay: tuple[TraceEntry, ...] | None = None,
+    resumed_without_trace: bool = False,
+) -> tuple[TraceEntry, ...]:
+    """The page's pass trace: every verdict clause, plus each other check's own outcome.
+
+    * *replay* (a terminal page restored from a sidecar that carries a trace) is returned
+      UNCHANGED: a resumed page does not run its checks again, so recomputing would invent
+      outcomes for a run that did not happen.
+    * Every clause of *verdict* is an entry (FAIL or UNKNOWN), including the status-dependent
+      ones and the fail-closed fallback: the verdict is the authority for what was found.
+    * Every other check contributes the outcome it reported itself. A check that found a
+      clause the verdict does not carry (a published verdict, a patched check) contributes
+      nothing: the verdict wins, and the trace never contradicts it.
+    * *resumed_without_trace* (a restored page whose sidecar predates the trace): the clauses
+      stand and every other slot is NOT_RUN with :data:`RESUMED_WITHOUT_TRACE_REASON`.
+
+    No entry is ever derived from the absence of a clause. Guard-derived clauses (chart
+    region, native glyphs, table label, the judge refusal) keep no record of having run, so
+    they appear only when they fire.
+    """
+    if replay is not None:
+        return replay
+    entries: dict[tuple[str, str], TraceEntry] = {}
+    for clause in verdict.clauses:
+        entries[(_check_name(clause.check), clause.scope)] = entry_from_clause(clause)
+    if resumed_without_trace:
+        for check, scope in PASS_TRACE_SLOTS:
+            entries.setdefault(
+                (check, scope),
+                TraceEntry(check, TraceResult.NOT_RUN, scope, RESUMED_WITHOUT_TRACE_REASON),
+            )
+    else:
+        for outcome in pass_trace_outcomes(output, p, event_kinds, providers_available):
+            if outcome.clause is not None:
+                continue
+            entries.setdefault((outcome.entry.check, outcome.entry.scope), outcome.entry)
+    return tuple(sorted(entries.values(), key=lambda e: (e.check, e.scope)))
+
+
+REFINALIZED_CLAUSE_REMOVED_REASON = (
+    "re-finalized offline: the clause this entry recorded is no longer on the page, and the "
+    "check was not run again"
+)
+
+
+def reconcile_pass_trace(
+    old_raw: Any,
+    verdict: PageVerdict,
+    row_binding_records: Any = None,
+    recomputed: tuple[TraceEntry, ...] = (),
+) -> list[dict[str, str]] | None:
+    """The trace of a sidecar an OFFLINE re-finalize tool rewrote, kept consistent with the
+    verdict the tool wrote (#1183).
+
+    The tools change a page's clauses without running the page's checks again, so the trace the
+    original run recorded can no longer be replayed as it stands: a clause the tool added must
+    be an entry, and an entry that recorded a clause the tool removed no longer states anything
+    the page holds. Rules:
+
+    * every clause of *verdict* is an entry, replacing any entry of the same check and scope;
+    * an entry that recorded a clause (FAIL or UNKNOWN of a verdict ``Check``) which *verdict*
+      no longer carries becomes NOT_RUN, with the reason above: it is not turned into a PASS;
+    * *row_binding_records* (the sidecar's ``row_binding`` after the tool wrote it, when the tool
+      runs that check): the row-binding entries are the records' own, replacing the old ones;
+    * *recomputed* (outcomes of checks the tool itself ran again on the page it rewrote): each
+      replaces the old entry of the same check and scope, unless a clause of *verdict* has it;
+    * every other entry (a PASS, a NOT_APPLICABLE, a NOT_RUN, a row-binding record) is kept.
+
+    ``None`` when the old sidecar carries no trace: a tool never invents one."""
+    from socr.core.pass_trace import trace_from_dicts, trace_to_dicts
+
+    old = trace_from_dicts(old_raw)
+    if old is None:
+        return None
+    entries: dict[tuple[str, str], TraceEntry] = {
+        (_check_name(c.check), c.scope): entry_from_clause(c) for c in verdict.clauses
+    }
+    verdict_checks = {c.value for c in Check}
+    records = row_binding_record_entries(row_binding_records) if row_binding_records else []
+    for entry in records:
+        entries[(entry.check, entry.scope)] = entry
+    for entry in recomputed:
+        entries.setdefault((entry.check, entry.scope), entry)
+    for entry in old:
+        key = (entry.check, entry.scope)
+        if key in entries or (records and entry.check == ROW_BINDING_CHECK):
+            continue
+        if (
+            entry.result in (TraceResult.FAIL, TraceResult.UNKNOWN)
+            and entry.check in verdict_checks
+        ):
+            entry = TraceEntry(
+                entry.check, TraceResult.NOT_RUN, entry.scope, REFINALIZED_CLAUSE_REMOVED_REASON
+            )
+        entries[key] = entry
+    return trace_to_dicts(sorted(entries.values(), key=lambda e: (e.check, e.scope)))
 
 
 def _clauses_ahead_of_text_layer_numbers(

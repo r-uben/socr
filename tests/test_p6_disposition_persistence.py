@@ -263,7 +263,9 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
     # both. The pair is pinned by the final assertion below, which still fails if any
     # THIRD key appears.
     assert "verdict" in meta
-    without_disp = {k: v for k, v in meta.items() if k not in ("disposition", "verdict")}
+    # #1183 adds ``checks`` (the pass trace) beside it: a record, written on every sidecar.
+    assert isinstance(meta["checks"], list)
+    without_disp = {k: v for k, v in meta.items() if k not in ("disposition", "verdict", "checks")}
 
     # Canonical pre-disposition sidecar key set
     expected_pre_keys = {
@@ -349,7 +351,7 @@ def test_sidecar_only_additive_key_is_disposition(tmp_path: Path) -> None:
     # marks that say so). Like ``judge_accepted`` it is omitted when absent, so an
     # already-terminal page's content-addressed fingerprint does not move. The assertion
     # keeps its force: any THIRD key appearing here still fails it.
-    assert set(meta.keys()) - expected_pre_keys == {"disposition", "verdict"}
+    assert set(meta.keys()) - expected_pre_keys == {"disposition", "verdict", "checks"}
 
 
 def test_sidecar_chart_floor_abstention_is_the_one_sparse_addition(

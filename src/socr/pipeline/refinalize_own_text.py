@@ -50,7 +50,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
-from socr.core.verdict import published_audit_passed
+from socr.core.verdict import published_audit_passed, reconcile_pass_trace
 
 #: The per-document record of what this tool changed and what the run had shipped.
 LOG_NAME = "refinalized_own_text.json"
@@ -462,6 +462,10 @@ def _updated_sidecar(
         out["status"], winning.get("audit_passed", False), verdict
     )
     out["verdict"] = verdict.to_dict()
+    # #1183: keep the pass trace consistent with the verdict this tool wrote (no invention).
+    _checks = reconcile_pass_trace(sidecar.get("checks"), verdict)
+    if _checks is not None:
+        out["checks"] = _checks
     out["winning_output"] = winning
     out["page_fingerprint"] = (
         _page_blob_key(winning) if not is_page_failed_marker(winning.get("text", "")) else ""

@@ -259,6 +259,9 @@ def _events(out_dir: Path, kind: str) -> list[dict]:
 # Run-to-run noise that is not part of the table verdict.
 _NOISE = {
     "timings_s",
+    # #1183: the pass trace states the row-binding check's own outcome, so it differs between the
+    # arm where the check ran and the arm where it did not; asserted explicitly where it matters.
+    "checks",
     "row_binding",
     "row_binding_contradicted_tables",
     "row_binding_unverifiable_tables",
@@ -286,6 +289,14 @@ def test_clean_table_the_check_changes_nothing_but_its_record(tmp_path, rotation
     # and the check did run: its record is the only new field
     assert _sidecar(on).get("row_binding")
     assert "row_binding" not in _sidecar(off)
+    trace = lambda out: {  # noqa: E731
+        (e["check"], e["scope"]): e["result"] for e in _sidecar(out)["checks"]
+    }
+    assert trace(on)[("row_binding", "table:1")] == "PASS"
+    assert trace(off)[("row_binding", "table:1")] == "NOT_RUN"
+    assert {k: v for k, v in trace(on).items() if k[0] != "row_binding"} == {
+        k: v for k, v in trace(off).items() if k[0] != "row_binding"
+    }
 
 
 def _withheld_trust(out_dir: Path) -> int:
