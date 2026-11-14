@@ -90,6 +90,7 @@ from socr.core.state import (
 )
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures import crop_descriptions as _crop_descriptions
+from socr.figures import figure_presence as _figure_presence
 from socr.figures import unshipped_figures as _unshipped_figures
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
 from socr.math.accounting import (
@@ -410,9 +411,14 @@ def _sidecar_layer_caused_records(meta: dict) -> list[str]:
 
 #: #1187: re-exported from the lane's own module so the orchestrator, the replay allowlist,
 #: the document note and the CLI line all read one definition.
-UNSHIPPED_FIGURE_EVENT_KINDS: frozenset[str] = _unshipped_figures.EVENT_KINDS
-#: The subset that means a figure this page names is preserved NOWHERE.
-UNSHIPPED_FIGURE_MARKED_KINDS: frozenset[str] = _unshipped_figures.MARKED_KINDS
+UNSHIPPED_FIGURE_EVENT_KINDS: frozenset[str] = (
+    _unshipped_figures.EVENT_KINDS | _figure_presence.PRESENCE_KINDS
+)
+#: The subset that means a figure this page names is preserved NOWHERE. #1276 adds the lost
+#: native chart region and the unmatched model placeholder.
+UNSHIPPED_FIGURE_MARKED_KINDS: frozenset[str] = (
+    _unshipped_figures.MARKED_KINDS | _figure_presence.PRESENCE_MARKED_KINDS
+)
 UNSHIPPED_FIGURE_RENDERED_KIND = _unshipped_figures.RENDERED_KIND
 UNSHIPPED_FIGURE_RENDER_FAILED_KIND = _unshipped_figures.RENDER_FAILED_KIND
 #: #1225: marked like the others, but it names no figure, so the note and the CLI word it apart.
@@ -13237,6 +13243,9 @@ class UnifiedPipeline:
                 # lesson, same loop).
                 with clock.span("figures"):
                     self._agentic_unshipped_figure_page(state, page_num, ps, bo, _chart_figures_dir)
+                    # #1276: a chart the page draws ships as a picture or is marked, and a model
+                    # placeholder is matched one-to-one by a shipped image.
+                    self._agentic_figure_presence_page(state, page_num, ps, bo, _chart_figures_dir)
 
                 # #1282: a dropped decimal point is restored from the page's own text layer here,
                 # on the winning output, so that the finalize below (verdict, marks) and the
@@ -13996,6 +14005,205 @@ class UnifiedPipeline:
                 engine="",
                 detail=decision.detail,
                 data=decision.event_data(),
+            )
+        )
+
+    def _agentic_figure_presence_page(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        page_out,
+        figures_dir: Path | None,
+    ) -> None:
+        """#1276: the shipped body is final. Does every chart the page draws ship, or say why not?
+
+        Native winners: ``_agentic_native_chart_presence``. Model readings:
+        ``_agentic_placeholder_presence``. Decided on the bytes about to ship, after both table
+        withholding gates, for the reason ``_agentic_unshipped_figure_page`` gives. Never edits
+        the text (``manifest._apply_unshipped_figure_guard`` appends the crops at finalisation)
+        and never touches ``audit_passed``: the winner-selection flag (#252).
+        """
+        from socr.core.manifest import is_page_failed_marker, page_ships_its_own_page_image
+
+        body = (getattr(page_out, "text", "") or "") if page_out is not None else ""
+        if not body.strip() or is_page_failed_marker(body):
+            return
+        if getattr(ps, "chart_floor_body", False) or page_ships_its_own_page_image(ps, body):
+            return
+        engine = str(getattr(page_out, "engine", "") or "").strip().lower()
+        if not engine:
+            return
+        if _unshipped_figures.page_was_read_by_a_model(engine):
+            self._agentic_placeholder_presence(state, page_num, ps, body)
+        elif engine != "chart_asset":
+            self._agentic_native_chart_presence(state, page_num, ps, body, figures_dir)
+
+    def _agentic_native_chart_presence(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        body: str,
+        figures_dir: Path | None,
+    ) -> None:
+        """A native page with a chart box: ship the crop of each region that has tick evidence.
+
+        The rule is ``figure_presence.decide_presence``; the evidence is tied to the region
+        (box AND tick run among the words inside it, table words and table regions excluded).
+        Pages with a table signal are GH-189's (``_preserve_chart_regions`` crops every box of
+        exactly that candidate set at assembly), so they are not decided here twice. A page the
+        PDF cannot be opened for is recorded, not passed: "could not look" is not "nothing
+        there".
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.core.pdf import open_pdf
+        from socr.figures import figure_presence as fp
+        from socr.figures.chart_regions import render_chart_region_crops
+        from socr.tables.reconstruct import chart_region_bboxes
+
+        if getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, ""):
+            return
+        if self._page_has_tables(page_num, ps):
+            return
+        try:
+            with open_pdf(str(state.handle.path)) as _doc:
+                _page = _doc[page_num - 1]
+                boxes = chart_region_bboxes(_page)
+                if not boxes:
+                    return
+                words = list(_page.get_text("words") or [])
+        except Exception as exc:  # noqa: BLE001 -- recorded below, never a silent pass
+            logger.warning("#1276: chart presence inventory failed for p%d: %s", page_num, exc)
+            ps.chart_region_inventory_failed = True
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="chart_region_inventory_failed",
+                    engine="figure_presence",
+                    detail=(
+                        "chart presence could not be checked: the page could not be read; no "
+                        "crop was shipped and none is claimed"
+                    ),
+                    data={"error_type": type(exc).__name__, "error": str(exc)},
+                )
+            )
+            return
+
+        assessments = fp.assess_regions(
+            words,
+            boxes,
+            fp.own_region_refs(body, page_num),
+            list(getattr(ps, "detected_table_bboxes", []) or []),
+            page_shipped=False,
+        )
+
+        def _render(indices: list[int]) -> dict[int, str]:
+            if figures_dir is None:
+                return {}
+            return {
+                asset.region_index: asset.rel_path
+                for asset in render_chart_region_crops(
+                    state.handle.path,
+                    page_num,
+                    boxes,
+                    figures_dir,
+                    indices=indices,
+                    filename=fp.crop_filename,
+                )
+                if asset.rendered and asset.rel_path
+            }
+
+        decision = fp.decide_presence(assessments, _render)
+        if decision is None:
+            return
+        self._apply_presence_decision(state, page_num, ps, decision)
+
+    def _apply_presence_decision(self, state: DocumentState, page_num: int, ps, decision) -> None:
+        from socr.core.audit_log import AuditEvent
+
+        setattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, decision.kind)
+        if decision.refs:
+            ps.unshipped_figure_refs = list(decision.refs)
+        if decision.failed:
+            ps.unshipped_figure_unlocated = [f"chart region {i}" for i in decision.failed]
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=decision.kind,
+                engine="figure_presence",
+                detail=decision.detail,
+                data=decision.event_data(),
+            )
+        )
+        if decision.refs:
+            # The #1174 statement, through its own event so the clause, the visible line, the
+            # document note and the resume replay are the ones the chart lane already has.
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=VISUAL_VALUES_NOT_TRANSCRIBED_KIND,
+                    engine="figure_presence",
+                    detail="figure shipped as image, values not transcribed",
+                    data={"png_saved": True, "png_path": decision.refs[0]},
+                )
+            )
+
+    def _agentic_placeholder_presence(
+        self, state: DocumentState, page_num: int, ps: PageState, body: str
+    ) -> None:
+        """A model reading's ``<!-- Image`` placeholders, matched one-to-one by shipped images.
+
+        Images counted: figure images already in the body, plus the crops ``_agentic_unshipped_
+        figure_page`` just recorded for this page (appended at finalisation), plus, on a page
+        GH-189 will reconcile at assembly, the chart boxes it will crop. A placeholder beyond
+        that count is a figure nothing ships: the page gets a figure-specific mark. A page the
+        #1187 lane already marked for a figure keeps that mark and is not decided twice.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.figures import figure_presence as fp
+
+        placeholders = fp.placeholder_count(body)
+        if not placeholders:
+            return
+        recorded = getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, "")
+        if recorded and recorded != _unshipped_figures.NOT_FOUND_KIND:
+            return
+        shipped = fp.shipped_image_count(body) + len(
+            getattr(ps, "unshipped_figure_refs", None) or []
+        )
+        if shipped < placeholders and self._page_has_tables(page_num, ps):
+            from socr.core.pdf import open_pdf
+            from socr.tables.reconstruct import chart_region_bboxes
+
+            try:
+                with open_pdf(str(state.handle.path)) as _doc:
+                    shipped += len(chart_region_bboxes(_doc[page_num - 1]))
+            except Exception:  # noqa: BLE001 -- unreadable: count nothing extra, mark
+                pass
+        unmatched = placeholders - shipped
+        if unmatched <= 0:
+            return
+        if recorded:
+            state.events[:] = [
+                e
+                for e in state.events
+                if not (getattr(e, "page_num", None) == page_num and e.kind == recorded)
+            ]
+        ps.unshipped_figure_kind = fp.PLACEHOLDER_KIND
+        ps.unshipped_figure_unlocated = [
+            f"image placeholder {i}" for i in range(shipped + 1, placeholders + 1)
+        ]
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=fp.PLACEHOLDER_KIND,
+                engine="",
+                detail=(
+                    f"the reading carries {placeholders} image placeholder(s) and only "
+                    f"{shipped} figure image(s) ship; {unmatched} figure(s) ship nowhere"
+                ),
+                data={"placeholders": placeholders, "images": shipped, "unmatched": unmatched},
             )
         )
 
@@ -18148,10 +18356,9 @@ class UnifiedPipeline:
             # permanent), and the transient failure then never came back. The lane's own
             # record of what happened is the authority, so it is read directly: whatever the
             # mode says, a page whose kind is the render failure is reprocessed.
-            if (
-                is_permanently_unverifiable
-                and str(meta.get("unshipped_figure_kind") or "")
-                == UNSHIPPED_FIGURE_RENDER_FAILED_KIND
+            if is_permanently_unverifiable and str(meta.get("unshipped_figure_kind") or "") in (
+                UNSHIPPED_FIGURE_RENDER_FAILED_KIND,
+                _figure_presence.PRESENCE_RENDER_FAILED_KIND,
             ):
                 is_permanently_unverifiable = False
 

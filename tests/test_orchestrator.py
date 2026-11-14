@@ -511,7 +511,12 @@ class TestFullPipeline:
         # detector off so the test exercises born-digital skipping, not file IO.
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             with patch.object(DocumentHandle, "from_path") as mock_from_path:
-                with patch.object(pipeline, "_is_chart_asset_page", return_value=False):
+                with (
+                    patch.object(pipeline, "_is_chart_asset_page", return_value=False),
+                    # #1276: the chart-presence check opens the same unreadable stand-in path
+                    # and flags the document, for the same reason as above.
+                    patch.object(pipeline, "_agentic_figure_presence_page"),
+                ):
                     mock_from_path.return_value = _make_handle(2)
                     result = pipeline.process(Path("/tmp/fake.pdf"), tmp_path)
 

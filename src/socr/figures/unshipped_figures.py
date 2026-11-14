@@ -597,6 +597,11 @@ def clause_records(page_num: int, captions: tuple[str, ...], kind: str) -> tuple
     page has no figure -- it failed to show one the page names, or shipped a crop it cannot
     prove complete.
     """
+    from socr.figures import figure_presence
+
+    if kind in figure_presence.PRESENCE_MARKED_KINDS:
+        # #1276: figure-specific wording for a lost chart region / an unmatched placeholder.
+        return figure_presence.clause_records(page_num, captions, kind)
     from socr.core.marks import Check, CheckResult, region_scope
 
     reason = _CLAUSE_REASON.get(kind, _CLAUSE_REASON[UNLOCATED_KIND])

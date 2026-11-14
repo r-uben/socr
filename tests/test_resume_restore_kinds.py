@@ -30,6 +30,15 @@ EXPECTED_RESUME_KINDS = frozenset(
         # #1225: the uncaptioned chart-skeleton mark. Emitted at the same step, so it is
         # lost on resume for the same reason as the four above, and replayed for it.
         "unshipped_figure_chart_skeleton",
+        # #1276: the native chart-presence record (shipped crop / render failure / pass) and
+        # the model-placeholder mark. Emitted at the same step, which a terminal resumed page
+        # skips; the PASS record in particular has NO other carrier (it sets no mark), so
+        # without replay a resumed document would report fewer checked pages than the first
+        # run, and the marked kinds feed the document note and status.
+        "figure_presence_shipped",
+        "figure_presence_render_failed",
+        "figure_presence_pass",
+        "unshipped_figure_placeholder",
         "chart_counts_derived",
         "chart_counts_not_derived",
         "chart_grid_contradicted",
@@ -154,4 +163,5 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 67 with #1267's two row-binding kinds.
     # 68 with table_blank_lines_dropped (blank rows/columns dropped before the table gate).
     # 69 with #1282's table_point_repaired.
-    assert len(EXPECTED_RESUME_KINDS) == 69
+    # 73 with #1276's four figure-presence kinds.
+    assert len(EXPECTED_RESUME_KINDS) == 73
