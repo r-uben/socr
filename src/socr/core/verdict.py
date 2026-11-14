@@ -376,6 +376,10 @@ def _not_run(check: Check | str, reason: str, scope: str = SCOPE_PAGE) -> CheckO
 
 
 CHECKED_TEXT_CHANGED_REASON = "checked text changed after the check"
+ROW_BINDING_OFF_TABLE_REASON = (
+    "a row_binding pass is about one table block; this one names no table, so it is not a "
+    "pass of any block of the shipped text"
+)
 PASS_WITHOUT_DIGEST_REASON = (
     "this pass carries no digest of the text it was computed on, so it cannot be tied to the "
     "text that ships"
@@ -435,7 +439,14 @@ def verify_pass_digests(entries: Iterable[TraceEntry], text: str) -> list[TraceE
             out.append(e)
             continue
         kind, _, ordinal = e.scope.partition(":")
-        if e.check == ROW_BINDING_CHECK and kind == "table" and ordinal.isdigit():
+        if e.check == ROW_BINDING_CHECK:
+            if kind != "table" or not ordinal.isdigit():
+                # Row binding binds one table block. A PASS of it at page scope (or any scope
+                # that names no table) is about no block of this text: no writer produces it.
+                out.append(
+                    TraceEntry(e.check, TraceResult.NOT_RUN, e.scope, ROW_BINDING_OFF_TABLE_REASON)
+                )
+                continue
             k = int(ordinal)
             have, want = e.table_sha, tables[k - 1] if 1 <= k <= len(tables) else ""
         else:

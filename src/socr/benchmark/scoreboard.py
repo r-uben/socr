@@ -119,6 +119,25 @@ def _checks(sidecar: dict) -> list[dict]:
     return raw if trace_from_dicts(raw) is not None else []
 
 
+def _pass_digest_mismatch(sidecar: dict, checks: list[dict]) -> bool:
+    """True when some PASS of the page's trace is not tied to ``winning_output.text`` (the text
+    the sidecar itself holds): the digest differs, is absent, or names a table block that text
+    does not have. The same rule the writers apply (``verify_pass_digests``)."""
+    from socr.core.pass_trace import trace_from_dicts
+    from socr.core.verdict import verify_pass_digests
+
+    entries = trace_from_dicts(checks)
+    if not entries or not any(e.result.value == "PASS" for e in entries):
+        return False
+    winning = sidecar.get("winning_output")
+    text = winning.get("text") if isinstance(winning, dict) else None
+    if not isinstance(text, str):
+        return True
+    return any(
+        a.result is not b.result for a, b in zip(entries, verify_pass_digests(entries, text))
+    )
+
+
 def _missing_links(text: str, doc_dir: Path) -> int:
     missing = 0
     for target in _LINK_RE.findall(text):
@@ -235,6 +254,11 @@ def count_document(doc_dir: Path) -> collections.Counter:
         # A table-scope pass says nothing about the rest of the page (#1181): counted apart.
         if any(str(e.get("result")) == "PASS" and str(e.get("scope")) == "page" for e in checks):
             c["records.pages_checks_page_scope_pass"] += 1
+        # A PASS names the text it was computed on. One that is not the digest of the sidecar's
+        # OWN winning text (a sidecar edited by a tool that skipped the reconcile) is counted,
+        # not trusted: expected 0.
+        if _pass_digest_mismatch(sidecar, checks):
+            c["records.pages_pass_digest_mismatch"] += 1
         for entry in checks:
             result = str(entry.get("result"))
             name = str(entry.get("check"))

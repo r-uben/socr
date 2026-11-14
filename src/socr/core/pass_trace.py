@@ -66,11 +66,13 @@ class TraceEntry:
             "scope": self.scope,
             "reason": self.reason,
         }
-        # Written only when set, so an entry that is not a PASS keeps the four-key shape.
-        if self.text_sha:
-            d["text_sha"] = self.text_sha
-        if self.table_sha:
-            d["table_sha"] = self.table_sha
+        # A digest says "the check passed on these bytes": it is written for a PASS only, so an
+        # entry that is not a PASS always keeps the four-key shape, whatever it carries in memory.
+        if self.result is TraceResult.PASS:
+            if self.text_sha:
+                d["text_sha"] = self.text_sha
+            if self.table_sha:
+                d["table_sha"] = self.table_sha
         return d
 
     @classmethod
