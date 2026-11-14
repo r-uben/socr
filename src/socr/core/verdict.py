@@ -1194,6 +1194,43 @@ def reading_numbers_text(text: str, page_num: int) -> str:
     return "\n".join(kept)
 
 
+#: #1270 class 2: the ``#1050`` ink-vs-layer verdict that says "no text-like ink on this page is
+#: missing from its layer". The value ``core.text_coverage`` writes; compared as a string so a
+#: stand-in page state (a bare ``Mock``) cannot satisfy it.
+_COVERAGE_PASSED = "passed"
+
+
+def _no_numbers_anywhere_is_covered(output: PageOutput, p: Any) -> bool:
+    """#1270: a page with no number on EITHER side is not "unchecked" -- when something else
+    shows the layer is the whole page.
+
+    ``compare_numbers`` finds nothing to compare on a blank page, a divider page or a
+    contents page of words, and ``CHECKED requires compared > 0`` (the owner's ruling) made
+    that UNKNOWN: 24 pages in run 51270eb5 warned "no numbers" because they have none. The
+    ruling stands; what is added is the evidence that there is nothing to check. ALL of:
+
+    * the #1294 words check ran and compared the layer's words (``compared > 0``) with none
+      missing from the shipped page, so the page ships what its layer prints;
+    * the #1050 ink-vs-layer check PASSED: no text-like ink on the page lacks a layer word.
+      The words check alone passes a page whose only layer text is a running header while a
+      raster chart carries the real content (Greenbook II-22 ships ``<!-- Image -->`` and
+      nothing else), so it cannot clear a page by itself (Carbon, condition 1);
+    * the page holds no embedded raster image (``has_figures``): whatever it shows, the layer
+      did not necessarily say, and a page with a picture is never cleared on a words match.
+
+    A page missing any of the three keeps the UNKNOWN. A restored page keeps the verdict it
+    published, so this never re-derives a mark for a resumed page; a tool that re-derives
+    without a coverage verdict (empty string) fails closed.
+    """
+    record = page_word_check_record(output, p)
+    if not isinstance(record, dict) or not record.get("compared") or record.get("missing"):
+        return False
+    coverage = getattr(p, "text_coverage_verdict", "")
+    if not isinstance(coverage, str) or coverage != _COVERAGE_PASSED:
+        return False
+    return not _flag(p, "has_figures")
+
+
 def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | None:
     """#1185: a model reading is CHECKED only if its numbers occur in the page's own text.
 
@@ -1246,6 +1283,8 @@ def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | Non
     )
     if record.compared == 0:
         layer_count = record.reference_only
+        if not layer_count and _no_numbers_anywhere_is_covered(output, p):
+            return None
         reason = (
             NO_NUMBER_LAYER_HAS_SOME_REASON.format(count=layer_count)
             if layer_count
