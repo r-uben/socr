@@ -2852,6 +2852,13 @@ class PageAssessment:
     #: layer is then the page's own text and agreement with it is a check. False is "not shown",
     #: never "damaged": every default and every other refusal leaves it False.
     layer_refused_for_shape_alone: bool = False
+    #: #1270 (review): the page's layer shows NONE of the glyph-level damage signals -- garbage
+    #: ratio over bound, any font-map mojibake glyph (``corrupt_math_glyph_count``), the #960
+    #: garbled-math scan, a U+FFFD -- and the scans could run. Stamped for EVERY page at the one
+    #: stamping point in ``_assess_page`` (the signals body has early returns that never compute
+    #: them). False is "not shown", never "damaged": every default, a restored page, and a scan
+    #: that raised leave it False, and the no-number clearance (class 2) requires True.
+    layer_glyphs_undamaged: bool = False
     has_corrupt_math: bool = False  # font-map mojibake in math (needs region OCR -> LaTeX)
     has_unmapped_math_glyphs: bool = False  # PUA glyphs (weak ToUnicode) -> silent math-glyph loss
     #: #217: the page's symbol font had no ToUnicode map and at least one glyph
@@ -3886,6 +3893,7 @@ class BornDigitalDetector:
             assessment.own_layer_figure_words,
         ) = self._own_layer_word_reference(page)
         assessment.painted_layer_text = self._painted_layer_text(page)
+        assessment.layer_glyphs_undamaged = self._layer_glyphs_are_undamaged(page)
         # #1144 round 4: the page's /Rotate value, needed by the prose-recovery
         # floor. ``get_text("words")`` reports UNROTATED coordinates while
         # ``find_tables()`` reports rotated ones, so on a /Rotate 90 page the two
@@ -3899,6 +3907,31 @@ class BornDigitalDetector:
         if text_direction_is_rotated(direction):
             assessment.notes.append(f"rotated text direction {direction}")
         return assessment
+
+    def _layer_glyphs_are_undamaged(self, page: fitz.Page, raw_text: str | None = None) -> bool:
+        """#1270 (review): no glyph-level damage signal fires on this page's layer, and the
+        scans that look for it ran.
+
+        The early returns of ``_assess_page_signals`` skip the garbled-math scan and the
+        corrupt-math count, so a short or sparse layer that a model reads could carry a
+        SymbolMT private-use minus, a ``PðAÞ ¼ 2`` mojibake or a U+FFFD and still look "clean".
+        Any one of them, or a scan that raised, answers False (fail closed).
+        """
+        try:
+            if raw_text is None:
+                raw_text, _zw, _sp = clean_native_text(page.get_text("text"))
+            if self._garbage_ratio(raw_text) > self.MAX_GARBAGE_RATIO:
+                return False
+            if "\ufffd" in raw_text:
+                return False
+            # ANY mojibake glyph, not the page-level floor ``_detect_corrupt_math`` applies:
+            # one eaten sign is a wrong number on a page with two.
+            if corrupt_math_glyph_count(raw_text) > 0:
+                return False
+            return not detect_garbled_math(page, raw_text).fired
+        except Exception:
+            logger.warning("#1270: layer glyph-damage scan failed", exc_info=True)
+            return False
 
     def _shape_refusal_layer_is_clean(
         self,
@@ -3916,12 +3949,26 @@ class BornDigitalDetector:
         all, with the thresholds the born-digital path uses, and any doubt (a scan that raised
         included) answers False.
 
+        The checks the early return also skipped and that this adds on top (review of PR #1325):
+        raster dominance (GH-35-FU), a page with no font, and the glyph-level damage scan
+        (:meth:`_layer_glyphs_are_undamaged`: #960 garbled math incl. private-use glyphs, any
+        font-map mojibake glyph, U+FFFD).
+
         The ``native_glyph`` flags a document-level repair pass sets later
         (``has_unrecovered_symbol_glyphs``) are read by the verdict from the page state, as
         for every page, and need no repeat here.
         """
         try:
             if prior_ocr[0] or prior_ocr[1]:
+                return False
+            # A scan is a raster that fills the page and a layer baked over it (GH-35-FU): the
+            # layer is an earlier OCR's, whatever its shape.
+            if self._raster_coverage(page) >= self.RASTER_DOMINANCE_RATIO:
+                return False
+            # No font at all: no real text layer (the ``text_layer_is_clean`` condition).
+            if self._count_fonts(page) == 0:
+                return False
+            if not self._layer_glyphs_are_undamaged(page, raw_text):
                 return False
             if re.search(r"\(cid:\d+\)", raw_text):
                 return False

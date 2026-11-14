@@ -52,6 +52,9 @@ def _p(**over) -> SimpleNamespace:
         table_ladder_disposition=None,
         text_coverage_verdict="passed",
         has_figures=False,
+        # the detector's evidence that the layer is the page and is undamaged (#1270 review)
+        layer_refused_for_shape_alone=True,
+        layer_glyphs_undamaged=True,
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -166,6 +169,8 @@ def _run(tmp_path: Path, *, check_coverage: bool, providers: list, resumed: bool
     ps = state.pages[1]
     if not resumed:  # a resumed page's layer facts are NOT recomputed: only its sidecar speaks
         ps.is_born_digital = False
+        ps.layer_refused_for_shape_alone = True
+        ps.layer_glyphs_undamaged = True
         ps.own_layer_text = BLANK
         ps.own_layer_word_reference = BLANK
 
@@ -273,3 +278,84 @@ def test_a_page_where_socr_withheld_a_table_is_not_cleared_by_the_whole_layer():
     )
     clause = text_layer_numbers_clause(out, _p(own_layer_word_reference=""))
     assert clause is not None and clause.result is CheckResult.UNKNOWN
+
+
+# ---------------------------------------- review of PR #1325: the layer must be clean (class 2)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        pytest.param({"layer_glyphs_undamaged": False}, id="glyph-scans-not-shown-clean"),
+        pytest.param({"has_unmapped_math_glyphs": True}, id="unmapped-math-glyphs"),
+        pytest.param({"has_corrupt_math": True}, id="corrupt-math"),
+        pytest.param({"has_unrecovered_symbol_glyphs": True}, id="unrecovered-symbol-glyphs"),
+        pytest.param({"control_byte_digit_hits": 1}, id="control-byte-digit"),
+        pytest.param({"minus_as_digit_hits": 1}, id="minus-as-digit"),
+    ],
+)
+def test_a_damaged_layer_keeps_the_no_number_unknown(damage):
+    """Class 2 on its own: the page has no number on either side AND the evidence of class 2
+    holds, but the layer shows damage, so a digit may have been lost from it. The SAME page
+    without the damage is cleared (control arm)."""
+    assert text_layer_numbers_clause(_out(), _p()) is None
+    clause = text_layer_numbers_clause(_out(), _p(**damage))
+    assert clause is not None and clause.result is CheckResult.UNKNOWN
+    assert clause.reason == NO_NUMBER_REASON
+
+
+def test_a_page_refused_as_a_scan_for_more_than_its_shape_keeps_the_unknown():
+    """Refused (is_born_digital False) and NOT shown clean by class 3: damaged, unless proven."""
+    clause = text_layer_numbers_clause(_out(), _p(layer_refused_for_shape_alone=False))
+    assert clause is not None and clause.result is CheckResult.UNKNOWN
+
+
+def test_a_born_digital_page_clears_without_class_3():
+    """Independent of class 3: a born-digital layer needs no shape refusal, only a clean layer."""
+    page = _p(is_born_digital=True, layer_refused_for_shape_alone=False)
+    assert text_layer_numbers_clause(_out(), page) is None
+    page.layer_glyphs_undamaged = False
+    assert text_layer_numbers_clause(_out(), page) is not None
+
+
+# ---- detector, on real PDFs: the stamp says what the scans found
+
+
+def _pdf_with(tmp_path: Path, text: str, *, fontname: str = "helv") -> fitz.Page:
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), text, fontsize=11, fontname=fontname)
+    return page
+
+
+@pytest.mark.parametrize(
+    ("text", "undamaged"),
+    [
+        pytest.param("Federal Reserve forecast heading", True, id="clean"),
+        pytest.param("Euler \u00f0", False, id="kimi-euler-eth"),
+    ],
+)
+def test_the_detector_stamps_the_glyph_scans(tmp_path, text, undamaged):
+    from socr.core.born_digital import BornDigitalDetector
+
+    page = _pdf_with(tmp_path, text)
+    pa = BornDigitalDetector()._assess_page(page, 1)
+    assert pa.layer_glyphs_undamaged is undamaged
+
+
+def test_a_scan_that_raises_is_not_shown_clean(tmp_path):
+    from socr.core.born_digital import BornDigitalDetector
+
+    page = _pdf_with(tmp_path, "Federal Reserve forecast heading")
+    with patch("socr.core.born_digital.detect_garbled_math", side_effect=RuntimeError("x")):
+        assert BornDigitalDetector()._assess_page(page, 1).layer_glyphs_undamaged is False
+
+
+def test_a_replacement_character_in_the_layer_is_not_shown_clean(tmp_path):
+    """Helvetica cannot draw U+FFFD into a test PDF, so the helper is called with the text."""
+    from socr.core.born_digital import BornDigitalDetector
+
+    page = _pdf_with(tmp_path, "Federal Reserve forecast heading")
+    det = BornDigitalDetector()
+    assert det._layer_glyphs_are_undamaged(page, "Federal Reserve forecast heading") is True
+    assert det._layer_glyphs_are_undamaged(page, "Federal \ufffd.5 forecast") is False

@@ -37,6 +37,11 @@ for r in res["c2"]:
         minus_as_digit_hits=0,
         minus_as_digit_scan_failed=False,
         has_encoding_hygiene_suspect=False,
+        # review of PR #1325: the verdict now reads the detector's cleanliness evidence
+        layer_refused_for_shape_alone=pa.layer_refused_for_shape_alone,
+        layer_glyphs_undamaged=pa.layer_glyphs_undamaged,
+        has_unmapped_math_glyphs=pa.has_unmapped_math_glyphs,
+        has_corrupt_math=pa.has_corrupt_math,
     )
     o = PageOutput(
         page_num=r["page"],

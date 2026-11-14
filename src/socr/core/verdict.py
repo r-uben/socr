@@ -1363,7 +1363,29 @@ def _no_numbers_anywhere_is_covered(output: PageOutput, p: Any) -> bool:
     coverage = getattr(p, "text_coverage_verdict", "")
     if not isinstance(coverage, str) or coverage != _COVERAGE_PASSED:
         return False
-    return not _flag(p, "has_figures")
+    if _flag(p, "has_figures"):
+        return False
+    return _layer_is_clean_for_no_number_clearance(p)
+
+
+def _layer_is_clean_for_no_number_clearance(p: Any) -> bool:
+    """#1270 (review of PR #1325): the page's own layer shows no sign of damage.
+
+    A page with no number on either side keeps its UNKNOWN when the layer may have LOST one:
+    a private-use or U+FFFD digit, a mojibake sign (``Euler ð``), a broken symbol font. ALL of:
+
+    * not damaged by ``_layer_is_damaged`` -- unless refused for its shape alone and shown
+      clean (class 3; the blank-page case, under the 50-character floor);
+    * ``layer_glyphs_undamaged``: the detector's glyph-level scans (garbage ratio, U+FFFD,
+      any mojibake glyph, #960 garbled math) ran and found nothing. Not stamped (False, a
+      restored page, a scan that raised) is "could not run": UNKNOWN stays;
+    * no unmapped math glyph and no corrupt math on the page state.
+    """
+    if _layer_is_damaged(p) and not _layer_is_shape_refused(p):
+        return False
+    if _flag(p, "has_unmapped_math_glyphs") or _flag(p, "has_corrupt_math"):
+        return False
+    return _flag(p, "layer_glyphs_undamaged")
 
 
 def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | None:

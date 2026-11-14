@@ -352,3 +352,113 @@ def test_the_cleared_contents_page_stays_cleared_on_resume(tmp_path: Path) -> No
     again = _run(tmp_path, shape_alone=True, providers=[PROFILE_QWEN_LOCAL], resumed=True)
     assert first[0] is PageStatus.SUCCESS and first[1] == []
     assert again == first
+
+
+# ------------------------------------------- review of PR #1325: the vetoes the early return skipped
+
+
+def _verdict_for(pa, layer: str, reading: str):
+    """The detector's real flag fed into the real numbers clause: the end-to-end arm."""
+    page = _p(
+        own_layer_text=layer,
+        layer_refused_for_shape_alone=pa.layer_refused_for_shape_alone,
+        layer_glyphs_undamaged=pa.layer_glyphs_undamaged,
+    )
+    return text_layer_numbers_clause(_out(reading), page)
+
+
+def test_a_full_page_raster_with_a_visible_baked_in_layer_is_not_shown_clean(tmp_path: Path):
+    """Carbon: a raster that fills the page (GH-35-FU) with a SHORT visible OCR layer over it is
+    refused for shape, and the layer is an earlier OCR's. The shape flag must stay False, so a
+    reading that repeats the OCR's digits does not become a CHECK."""
+    pdf = tmp_path / "scan.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 200, 200), False)
+    pix.set_rect(pix.irect, (250, 250, 250))
+    page.insert_image(page.rect, pixmap=pix)
+    for i in range(6):
+        page.insert_text((72, 100 + 14 * i), f"A {i} B {i + 10} C", fontname="helv", fontsize=10)
+    doc.save(pdf)
+    doc.close()
+    pa = _assess(pdf)
+    assert pa.is_born_digital is False and any("avg word length" in n for n in pa.notes)
+    assert pa.layer_refused_for_shape_alone is False
+    clause = _verdict_for(pa, AGREES, AGREES)
+    assert clause is not None and clause.reason == DAMAGED_LAYER_AGREES_REASON
+
+
+def test_a_contents_page_with_mojibake_math_is_not_shown_clean(tmp_path: Path):
+    """Kimi: ``PðAÞ ¼ 2`` on a short-token contents page. The control arm is the same page
+    without the line (shown clean, premise)."""
+    clean = _assess(_pdf(tmp_path / "c.pdf", CONTENTS_LINES))
+    assert clean.layer_refused_for_shape_alone is True
+    pa = _assess(_pdf(tmp_path / "k.pdf", ["PðAÞ ¼ 2", *CONTENTS_LINES[:11]]))
+    assert pa.is_born_digital is False and any("avg word length" in n for n in pa.notes)
+    assert pa.layer_refused_for_shape_alone is False
+    assert pa.layer_glyphs_undamaged is False
+    clause = _verdict_for(pa, "PðAÞ ¼ 2", "PðAÞ ¼ 2")
+    assert clause is not None and clause.result is CheckResult.UNKNOWN
+
+
+def test_a_symbolmt_private_use_minus_is_not_shown_clean(tmp_path: Path):
+    """Carbon: ``\\uf02d3.5`` in SymbolMT (the minus is a private-use glyph), reading ``3.5``.
+    The comparator splits the PUA char off and sees agreement, so the layer must not be trusted.
+    Spans are patched in: a PDF written by PyMuPDF cannot carry a Word-style SymbolMT PUA."""
+    doc, page = _shape_page(tmp_path)
+    detector = BornDigitalDetector()
+    raw = page.get_text("text")  # the layer text is clean; the SPAN says SymbolMT PUA
+    span = {"font": "SymbolMT", "text": "\uf02d3.5"}
+    assert detector._shape_refusal_layer_is_clean(page, raw, (False, False)) is True, "control"
+    with patch.object(born_digital, "iter_page_spans", lambda p: [span]):
+        assert detector._shape_refusal_layer_is_clean(page, raw, (False, False)) is False
+        assert detector._layer_glyphs_are_undamaged(page, raw) is False
+    doc.close()
+
+
+@pytest.mark.parametrize(
+    ("guard", "patches"),
+    [
+        pytest.param("raster", {"_raster_coverage": lambda self, page: 1.0}, id="raster-dominance"),
+        pytest.param("no_font", {"_count_fonts": lambda self, page: 0}, id="no-font"),
+        pytest.param(
+            "garbled_math",
+            {"_layer_glyphs_are_undamaged": lambda self, page, raw=None: False},
+            id="glyph-scan",
+        ),
+    ],
+)
+def test_each_review_veto_stands_alone(tmp_path: Path, guard: str, patches: dict) -> None:
+    doc, page = _shape_page(tmp_path)
+    detector = BornDigitalDetector()
+    raw = page.get_text("text")
+    assert detector._shape_refusal_layer_is_clean(page, raw, (False, False)) is True, "premise"
+    with ExitStack() as stack:
+        for name, repl in patches.items():
+            stack.enter_context(patch.object(BornDigitalDetector, name, repl))
+        assert detector._shape_refusal_layer_is_clean(page, raw, (False, False)) is False
+    doc.close()
+
+
+@pytest.mark.parametrize(
+    ("name", "patch_target", "repl"),
+    [
+        pytest.param("garbage", "_garbage_ratio", lambda self, t: 1.0, id="garbage-ratio"),
+        pytest.param("mojibake", "corrupt_math_glyph_count", lambda t: 1, id="any-mojibake-glyph"),
+        pytest.param(
+            "garbled",
+            "detect_garbled_math",
+            lambda page, t: born_digital.GarbledMathSignals(private_use=1),
+            id="garbled-math-signal",
+        ),
+    ],
+)
+def test_the_glyph_scan_has_a_veto_per_signal(tmp_path: Path, name, patch_target, repl) -> None:
+    doc, page = _shape_page(tmp_path)
+    detector = BornDigitalDetector()
+    raw = page.get_text("text")
+    assert detector._layer_glyphs_are_undamaged(page, raw) is True, "premise"
+    target = BornDigitalDetector if patch_target == "_garbage_ratio" else born_digital
+    with patch.object(target, patch_target, repl):
+        assert detector._layer_glyphs_are_undamaged(page, raw) is False
+    doc.close()
