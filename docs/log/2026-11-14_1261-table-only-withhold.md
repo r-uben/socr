@@ -1,7 +1,7 @@
 # #1261 / #1208 (plan B2): withhold the table, not the page
 
-Status: partial. The prose of 79 pages comes back; the done bar (words missing on ERROR pages
-<= 94,011) is NOT met: 154,351 -> 146,965. Reaching it needs a protective gate relaxed, which this
+Status: partial. The prose of 22 pages comes back (round 5); the done bar (words missing on ERROR pages
+<= 94,011) is NOT met: 154,351 -> 153,544 (round 5; 146,965 on round 4). Reaching it needs a protective gate relaxed, which this
 ticket's binding conditions forbid. Evidence and the numbers that would decide it are below.
 
 ## What was measured first (before any gate moved)
@@ -225,3 +225,32 @@ the stop counts. Mutants (src and tests copied outside the repo, `socr.__file__`
 the copy, anchor count asserted 1): drop (a) (1 test fails), drop (b) (1 fails), drop (c)
 (8 fail). All three killed. The full replay was rerun with
 `docs/log/2026-11-14_1261-measure.py` (output directory redirected to a scratch copy).
+
+## Review round 5 (Astra recheck 3, cubic P2 on b0eeb077)
+
+Astra: a ruled row whose two cells are two-line blocks ending in a period passes the
+closed-paragraph rule; block shape does not establish prose. Reproduced as a real PDF (clipped
+box, cells at x=76 and x=230, borders at y=176/212 and x=72/220/320): both cells shipped.
+Coordinator rule, structural, replacing the exception: within the horizontal span of ANY detected
+box (any word whose x-range overlaps a box's x-range, top of page to bottom) NOTHING ships. Only
+lines entirely outside every box's x-span ship, under the earlier rules (numerals band,
+two-letter word, keep-sentences, block breaks). `_closed_paragraph`, `_SENTENCE_FINAL_RE` and the
+per-block index are removed. The band of a numerals-withheld line is withheld whole, as before.
+Cubic P2 (the quote-boundary test): the case lies inside a box span now, so the test and the rule
+it pinned are dropped.
+Cost, from the full replay (`2026-11-14_1261-measure.py`, output redirected to a scratch copy):
+pages changed 79 -> 22 (order-gate refusals 136 -> 114), words recovered 7,386 -> 807
+(`words_missing.error` 154,351 -> 153,544; no page gained missing words). A two-column page
+whose table box spans one column loses that whole column. The done bar (94,011) is further away;
+see #1323.
+Leak diff: 32 new lines carrying a digit on 6 pages, 5 of them neutral `[N lines withheld]`
+marks, 27 content lines (running heads and sentences). Lines at least half numerals: 0; without
+a two-letter word: 0; two or more numerals in six tokens or fewer: 0; inside a box: 0.
+Tests: the fixture's left column (inside GRID_BOX's span) now ships nothing and only the right
+column ships, in order. Added: Astra's multiline ruled-cell row through
+`table_floor_text_for_source` (both cells withheld; difference against the page without the row),
+a closed two-line paragraph in a span withheld (and shipping outside every span), the other
+column's prose in order. All earlier long-label and categorical-row reproductions still withhold.
+Mutant (src and tests copied outside the repo, `socr.__file__` asserted inside the copy, anchor
+count asserted 1): `continuation = band_span` (allow any line in a box span): 17 tests fail.
+Killed.

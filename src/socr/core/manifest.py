@@ -3386,14 +3386,6 @@ _LINE_WITHHELD_MARK = "[line withheld]"
 _LINES_WITHHELD_MARK = "[{n} lines withheld]"
 
 
-#: #1261 round 4: a layer line ends a paragraph when its text ends in sentence-final
-#: punctuation (``.``, ``?``, ``!``), optionally followed by closing quotes or brackets. A word
-#: count does not establish a table boundary (a long stub label has any number of words); a
-#: closed paragraph of two or more lines is the evidence the layer gives that running prose,
-#: not table text, is on this line.
-_SENTENCE_FINAL_RE = re.compile(r"[.?!][\"'\u2019\u201d)\]]*$")
-
-
 def _native_order_boxes(p) -> list[tuple[float, float, float, float]] | None:
     """The page's detected boxes as float rectangles, or ``None`` when one cannot be read.
 
@@ -3431,12 +3423,13 @@ def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str
       it in its band (x order, both directions) until a line that is a sentence. A table row
       split into fragments by wide cell gaps cannot ship a fragment, and neither do the stub
       labels and legend entries of a table whose values were withheld.
-    * TABLE SPAN. Within the horizontal span of any detected box, and in the band of any
-      numerals-withheld line, a layer line ships ONLY if its layer block (a) holds no word inside
-      a box and no withheld line, (b) has at least two layer lines, and (c) ends its last line in
-      sentence-final punctuation. Every other line there is withheld: a stub label, a subheading
-      or a categorical row has no such block, however many words it has. A box whose geometry
-      cannot be read makes the body abstain (``None``).
+    * TABLE SPAN. Within the horizontal span of ANY detected box (any word whose x-range
+      overlaps a box's x-range, top of page to bottom), and in the band of any numerals-withheld
+      line, NOTHING ships: every such line is withheld. Block shape and punctuation do not
+      establish prose (a multi-line ruled cell is a block ending in a period). Only lines
+      entirely outside every box's x-span ship, under the numerals, two-letter-word,
+      keep-sentences and block-break rules. A box whose geometry cannot be read makes the body
+      abstain (``None``).
     * A line with no word of two or more letters (shredded inline math: ``t``, ``y``, ``+``) is
       withheld.
     * A layer line that holds both shipped and withheld words is withheld whole, and a line that
@@ -3490,23 +3483,6 @@ def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str
         and any(sum(c.isalpha() for c in str(w[4])) >= 2 for w in line)
         for i, line in enumerate(lines)
     ]
-    block_lines: dict = {}
-    for i, line in enumerate(lines):
-        block_lines.setdefault(line[0][5], []).append(i)
-
-    def _closed_paragraph(i: int) -> bool:
-        """Line *i*'s layer block is a closed paragraph: the only thing that ships in a span.
-
-        ``base_ok`` already excludes every word inside a box (the partition withholds boxes) and
-        every numerals, table-syntax and shredded line, so "no box word, no withheld line" is
-        ``all(base_ok)`` over the block.
-        """
-        members = block_lines[lines[i][0][5]]
-        return (
-            len(members) >= 2
-            and all(base_ok[j] for j in members)
-            and _SENTENCE_FINAL_RE.search(texts[members[-1]]) is not None
-        )
 
     box_span: set[int] = set()
     for box in boxes:
@@ -3517,7 +3493,7 @@ def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str
     for members in band_lines:
         if any(numerals[i] for i in members):
             band_span.update(members)
-    continuation = {i for i in box_span | band_span if not _closed_paragraph(i)}
+    continuation = box_span | band_span
     ships = [base_ok[i] and i not in continuation for i in range(len(lines))]
     if not any(ships) or not text_layer_trusted("\n".join(t for t, ok in zip(texts, ships) if ok)):
         return None
