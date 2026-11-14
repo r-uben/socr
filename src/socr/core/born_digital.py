@@ -212,6 +212,23 @@ _GLUE_PUNCT = _OPENERS + _CLOSERS + _HYPHENS + "−"
 #: The one-letter English article. It is the only single letter that is a word, so it is
 #: the only one ``_is_printed_fraction`` has to tell apart from a variable.
 _ARTICLE = "a"
+#: Words that unit a number as "%" does: a fraction glued to a number and followed by one
+#: is a printed rate whatever comes next.
+_PERCENT_WORDS = frozenset({"percent", "pct"})
+#: Names that start a math operand in an equation. After a number they are the right-hand
+#: side of '=' ("2 = sin x"), never prose: "2 ¼ sin x" must not read as a printed fraction.
+#: A fixed list of standard function names, not corpus-tuned.
+_MATH_FUNCTIONS = frozenset({"sin", "cos", "tan", "log", "ln", "exp", "max", "min", "lim", "det"})
+#: Characters of a bare operator token ("x ¼ y + z", "x ¼ y 2"): ASCII arithmetic and
+#: relations, the Unicode relations (<= >= != ~= ==) and arithmetic signs (minus, times,
+#: divide, dot, plus-minus, asterisk and dot operators), and the set/logic relations.
+_OPERATOR_CHARS = frozenset("+-−*/^=<>×÷·±≤≥≠≈≡≅∼∝∗⋅∘∈∉⊂⊃⊆⊇∪∩∧∨")
+#: Short English words that are vowel-free or one-syllable connectives. They are prose in
+#: "2 ½ by 4" (dimensions), never a compact variable.
+_PROSE_FUNCTION_WORDS = frozenset({"by", "to", "of", "or", "in", "on", "at", "per", "and", "with"})
+#: A math function counts as an operand only with a math-shaped continuation. "min" is
+#: also minutes: "2 ½ min", "3 ¼ min later" stay printed.
+_FUNCTION_HEAD = re.compile(r"([A-Za-z]+)(.*)", re.DOTALL)
 
 
 def _is_plain_word(token: str) -> bool:
@@ -263,6 +280,59 @@ def _is_operator_shape(left_tok: str, right_tok: str) -> bool:
     )
 
 
+def _is_math_operand(right: list[str]) -> bool:
+    """True if the right-hand side after a number starts an equation operand.
+
+    A math function (``sin``, ``log``), a single-letter variable (``x``), or a vowel-free
+    compact variable followed by an operator or a number (``xy + 1``, ``xy 2``). Greek
+    and bracketed expressions are already not plain words, so they never reach this test.
+    """
+    if not right:
+        return False
+    word = _edge_piece(right[0], last=False).strip(_WORD_EDGE_PUNCT)
+    head = _FUNCTION_HEAD.match(right[0].lstrip(_OPENERS))
+    if head and head.group(1).lower() in _MATH_FUNCTIONS:
+        return _is_math_continuation(head.group(2), right[1:])
+    if len(word) == 1 and _is_latin_word(word):
+        return True
+    if (
+        word.lower() in _PROSE_FUNCTION_WORDS
+        or not (_is_compact_variable(word) and _is_vowel_free(word))
+        or len(right) < 2
+    ):
+        return False
+    nxt = right[1].strip(_WORD_EDGE_PUNCT)
+    return _is_number(nxt) or bool(nxt) and set(nxt) <= _OPERATOR_CHARS
+
+
+def _is_math_continuation(rest: str, after: list[str]) -> bool:
+    """True if what follows a function name is math-shaped: ``min(x, y)``, ``sin x``.
+
+    ``rest`` is the remainder of the function's own token; ``after`` the tokens behind
+    it. A bracket, digit or operator glued to the name, or a next token that is a variable,
+    number, operator, bracketed or non-Latin (Greek) is math. A name at the end of the
+    line, or before prose ("min later", "min."), is not.
+    """
+    if rest and rest[0] in _OPENERS + "".join(_OPERATOR_CHARS) + "0123456789":
+        return True
+    if rest.strip(_WORD_EDGE_PUNCT) or not after:
+        return False
+    nxt = after[0].strip(_WORD_EDGE_PUNCT)
+    if not nxt:
+        return after[0][0] in _OPENERS
+    return (
+        after[0][0] in _OPENERS
+        or _is_number(nxt)
+        or set(nxt) <= _OPERATOR_CHARS
+        or not _is_latin_word(nxt.translate({ord(h): None for h in _HYPHENS}))
+        or (
+            _is_compact_variable(nxt)
+            and nxt.lower() not in _PROSE_FUNCTION_WORDS
+            and (len(nxt) == 1 or _is_vowel_free(nxt))
+        )
+    )
+
+
 def _is_number(token: str) -> bool:
     word = token.strip(_WORD_EDGE_PUNCT).lstrip(_NUMBER_SIGNS)
     return bool(word) and all(ch.isdigit() or ch in ".," for ch in word)
@@ -288,6 +358,11 @@ def _operand_tokens(text: str) -> list[str]:
     ]
 
 
+def _is_percent_word(token: str) -> bool:
+    """True for the words that unit a number like '%' does ("2 ½ percent", "2 ½ pct")."""
+    return token.strip(_WORD_EDGE_PUNCT).lower() in _PERCENT_WORDS
+
+
 def _is_printed_fraction(line: str, i: int) -> bool:
     """True if the fraction glyph at ``line[i]`` is a real printed fraction.
 
@@ -304,6 +379,8 @@ def _is_printed_fraction(line: str, i: int) -> bool:
     * L is a number: printed iff a ``%``, a word or the end of the line follows
       (``1 ¼ percent``, ``8 ½%``, ``is 2 ½`` + wrapped ``percent``). A line never ends on
       the '=' of ``2 ¼``: mojibake '=' sits between two operands.
+      A math function, a one-letter variable or a vowel-free variable before an operator or
+      number after the glyph is an operand: ``2 ¼ sin x``, ``1 ¼ x + y`` are operator.
     * L is the article "a": printed iff a word follows and the word after that is a word
       or absent (``a ¼ point cut``). ``a ¼ sin x`` ends on a variable: operator.
     * L and R are both compact (at most two letters, or no vowel) and one is vowel-free
@@ -341,9 +418,13 @@ def _is_printed_fraction(line: str, i: int) -> bool:
     # The neighbour is the piece against the glyph: "mid-2018—about ½" -> "about".
     left_tok = _edge_piece(left[-1], last=True) if left else ""
     right_tok = _edge_piece(right[0], last=False) if right else ""
+    if _is_number(left_tok) and (percent or _is_percent_word(right_tok)):
+        return True  # "2 ½% a year", "2 ½% by 2027", "8 ½%, then": a rate, whatever follows
     if not (left_tok or right_tok) or _is_number(right_tok):
         return False
     if _is_number(left_tok):
+        if _is_math_operand(right):
+            return False  # "2 ¼ sin x", "1 ¼ x + y": the '=' of an equation
         return percent or not right_tok or _is_plain_word(right_tok)
     if left_tok.lower() == _ARTICLE:
         return _is_plain_word(right_tok) and (len(right) < 2 or _is_plain_word(right[1]))
