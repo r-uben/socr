@@ -244,6 +244,8 @@ def test_agreement_with_a_shape_refused_clean_layer_is_reworded_not_removed() ->
     clause = text_layer_numbers_clause(_out(AGREES), _p())
     assert clause is not None and clause.result is CheckResult.UNKNOWN
     assert clause.reason == SHAPE_REFUSED_LAYER_AGREES_REASON
+    # states only what the numbers check did: nothing about the page being checked otherwise
+    assert "otherwise" not in clause.reason
     assert "damaged" not in clause.reason.replace("not found damaged", "")
 
 
@@ -536,3 +538,36 @@ def test_the_refinalize_page_state_carries_the_shape_fact() -> None:
     absent = _page_state(sidecar, SimpleNamespace(**fields))
     assert shown.layer_refused_for_shape_alone is True
     assert absent.layer_refused_for_shape_alone is False
+
+
+# ---------------------------------------- "not found damaged" uses the verdict's damage line
+
+
+def test_a_layer_over_the_encoding_flag_is_not_shown_clean(tmp_path: Path) -> None:
+    """The verdict words a layer over ENCODING_CORRUPTION_FLAG as damaged
+    (``has_encoding_hygiene_suspect``), so the shape refusal must not call it "not found
+    damaged" between the flag and the (higher) refusal ceiling."""
+    doc, page = _shape_page(tmp_path)
+    detector = BornDigitalDetector()
+    raw = page.get_text("text")
+    between = (detector.ENCODING_CORRUPTION_FLAG + detector.MAX_ENCODING_CORRUPTION) / 2
+    assert detector.ENCODING_CORRUPTION_FLAG < between <= detector.MAX_ENCODING_CORRUPTION
+    assert detector._shape_refusal_layer_is_clean(page, raw, (False, False)) is True, "premise"
+    with patch.object(BornDigitalDetector, "_encoding_corruption_ratio", lambda self, t: between):
+        assert detector._shape_refusal_layer_is_clean(page, raw, (False, False)) is False
+    doc.close()
+
+
+def test_a_shredded_rotated_layer_is_not_shown_clean(tmp_path: Path) -> None:
+    """#263: a rotated layer whose lines are pieces of one run is not "not found damaged"."""
+    doc, page = _shape_page(tmp_path)
+    detector = BornDigitalDetector()
+    raw = page.get_text("text")
+    rotated = (0.0, -1.0)
+    with patch.object(born_digital, "rotated_text_is_shredded", lambda *_: True):
+        assert detector._shape_refusal_layer_is_clean(page, raw, (False, False), rotated) is False
+        # the same layer, upright: the predicate does not apply
+        assert detector._shape_refusal_layer_is_clean(page, raw, (False, False), (1.0, 0.0)) is True
+    with patch.object(born_digital, "rotated_text_is_shredded", lambda *_: False):
+        assert detector._shape_refusal_layer_is_clean(page, raw, (False, False), rotated) is True
+    doc.close()

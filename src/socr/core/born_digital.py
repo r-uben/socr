@@ -3932,6 +3932,7 @@ class BornDigitalDetector:
         page: fitz.Page,
         raw_text: str,
         prior_ocr: tuple[bool, bool],
+        direction: tuple[float, float] = (0.0, 0.0),
     ) -> bool:
         """#1270 class 3: after a SHAPE refusal, did every check the refusal skipped pass?
 
@@ -3970,7 +3971,15 @@ class BornDigitalDetector:
                 return False
             if count_digit_corruption(raw_text) >= self.MAX_DIGIT_CORRUPTION_HITS:
                 return False
-            if self._encoding_corruption_ratio(raw_text) > self.MAX_ENCODING_CORRUPTION:
+            # ENCODING_CORRUPTION_FLAG, not MAX_ENCODING_CORRUPTION: the verdict words a layer over
+            # the flag as damaged (``has_encoding_hygiene_suspect``), so "not found damaged" must
+            # use the same line.
+            if self._encoding_corruption_ratio(raw_text) > self.ENCODING_CORRUPTION_FLAG:
+                return False
+            # #263: a rotated layer whose lines are pieces of one run is character confetti.
+            if text_direction_is_rotated(direction) and rotated_text_is_shredded(
+                self._text_blocks(page), direction
+            ):
                 return False
             if self._has_invisible_text_over_raster(page):
                 return False
@@ -4069,7 +4078,7 @@ class BornDigitalDetector:
                 has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
                 layer_refused_for_shape_alone=self._shape_refusal_layer_is_clean(
-                    page, raw_text, prior_ocr
+                    page, raw_text, prior_ocr, direction
                 ),
             )
 
@@ -4223,7 +4232,7 @@ class BornDigitalDetector:
                 has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
                 layer_refused_for_shape_alone=self._shape_refusal_layer_is_clean(
-                    page, raw_text, prior_ocr
+                    page, raw_text, prior_ocr, direction
                 ),
                 # The checks below this return would have passed: spacing is the only doubt.
                 refused_for_spacing_alone=(
@@ -4251,7 +4260,7 @@ class BornDigitalDetector:
                 has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
                 layer_refused_for_shape_alone=self._shape_refusal_layer_is_clean(
-                    page, raw_text, prior_ocr
+                    page, raw_text, prior_ocr, direction
                 ),
             )
 
@@ -4272,7 +4281,7 @@ class BornDigitalDetector:
                 has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
                 layer_refused_for_shape_alone=self._shape_refusal_layer_is_clean(
-                    page, raw_text, prior_ocr
+                    page, raw_text, prior_ocr, direction
                 ),
             )
 
@@ -4642,7 +4651,10 @@ class BornDigitalDetector:
             if private_use_bullets_only:
                 # #1270 class 1: the note above is the font-blind finding; this says what the
                 # span-level scan found, so the page's notes never claim mathematics alone.
-                notes.append("the private-use codepoints are bullet or dingbat glyphs")
+                notes.append(
+                    "the private-use codepoints are private-use symbol glyphs (bullets, dingbats "
+                    "or other non-mathematical Symbol marks)"
+                )
 
         return PageAssessment(
             page_num=page_num,

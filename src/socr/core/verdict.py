@@ -1448,8 +1448,7 @@ SHAPE_REFUSED_LAYER_PREFIX = (
 #: dropped.
 SHAPE_REFUSED_LAYER_AGREES_REASON = (
     "the reading's numbers agree with this page's text layer, which was refused as a scan for its "
-    "shape (not found damaged); no check covers what the reading omits, so the page is not "
-    "otherwise checked"
+    "shape (not found damaged); no check covers what the reading omits"
 )
 #: The reading agrees with a layer socr's page analysis refused or found damaged. Not a
 #: CHECK: the owner's ruling asks for the page's OWN born-digital text, and a refused layer

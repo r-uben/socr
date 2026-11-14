@@ -94,7 +94,10 @@ def test_a_bullet_is_recorded_as_bullets_only_and_the_flag_is_unchanged(
     assert pa.has_unmapped_math_glyphs is True
     # ... and the new fact says no private-use codepoint is mathematics
     assert pa.private_use_bullets_only is True
-    assert any("bullet or dingbat glyphs" in n for n in pa.notes), "the note says what was found"
+    assert any(
+        "private-use symbol glyphs (bullets, dingbats or other non-mathematical Symbol marks)" in n
+        for n in pa.notes
+    ), "the note says what was found"
     assert pa.needs_ocr_enhancement is False
 
 
@@ -356,3 +359,25 @@ def test_the_detector_fact_reaches_the_page_state(tmp_path):
         assessment.pages[0].private_use_bullets_only = fact
         state.apply_born_digital(assessment)
         assert state.pages[1].private_use_bullets_only is fact
+
+
+def test_the_bullet_detail_claims_shipping_only_when_private_use_chars_ship() -> None:
+    """The accounting detail has the verdict's scope (the native text layer) and says the
+    glyphs ship only when residual private-use characters are in the shipped text."""
+    from socr.math.accounting import UnresolvedMathDetail
+
+    def detail(residual: int) -> str:
+        return UnresolvedMathDetail(
+            reason="r",
+            lane="",
+            regions_total=0,
+            regions_covered=0,
+            residual_pua=residual,
+            bullets_only=True,
+        ).detail
+
+    shipped, not_shipped = detail(2), detail(0)
+    assert "in this page's native text layer" in shipped
+    assert "ship in the page text" in shipped
+    assert "in this page's native text layer" in not_shipped
+    assert "ship" not in not_shipped

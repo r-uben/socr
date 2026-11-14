@@ -43,23 +43,34 @@ def pdf_of(fed_root, stem):
     return None
 
 
+def sidecars(run_root):
+    """One sidecar per (document stem, page): a document retried into several run folders is
+    counted once (the newest file wins, so the choice does not depend on glob order)."""
+    newest = {}
+    for path in glob.glob(f"{run_root}/*/out/*/*/pages/*.json"):
+        stem, name = path.split("/")[-3], os.path.basename(path)
+        key = (stem, name)
+        if key not in newest or os.path.getmtime(path) > os.path.getmtime(newest[key]):
+            newest[key] = path
+    return [newest[k] for k in sorted(newest)]
+
+
 def measure(run_root, fed_root, out_path):
     from socr.core.born_digital import BornDigitalDetector
-    from socr.core.result import FailureMode, PageOutput, PageStatus
-    from socr.core.verdict import derive_clauses
+    from socr.core.manifest import apply_verdict_marks
+    from socr.core.result import FailureMode, PageOutput
     from socr.pipeline.refinalize_own_text import _page_state
 
     detector = BornDigitalDetector()
     rows, skipped = [], collections.Counter()
-    for path in glob.glob(f"{run_root}/*/out/*/*/pages/*.json"):
+    for path in sidecars(run_root):
         try:
             side = json.load(open(path))
         except Exception:
             continue
         verdict = side.get("verdict")
         clauses = verdict.get("clauses", []) if isinstance(verdict, dict) else []
-        classes = sorted({c for c in map(cls_of, clauses) if c})
-        if not classes or side.get("terminal") is not True:
+        if not any(map(cls_of, clauses)) or side.get("terminal") is not True:
             continue
         stem, page = path.split("/")[-3], int(side["page_num"])
         pdf = pdf_of(fed_root, stem)
@@ -77,19 +88,19 @@ def measure(run_root, fed_root, out_path):
         disposition = side.get("table_ladder_disposition")
         p.table_ladder_disposition = FailureMode(disposition) if disposition else None
         kinds = frozenset(e["kind"] for e in side.get("audit_events") or [])
-        wo = side["winning_output"]
-        out = PageOutput(
-            page_num=page,
-            text=wo["text"],
-            status=PageStatus(side["status"]),
-            engine=side.get("engine") or "qwen",
-            failure_mode=FailureMode(side.get("failure_mode") or "none"),
+        out = PageOutput.from_dict({"page_num": page, **side["winning_output"]})
+        # The status is what THIS arm's seam computes from the page, never the sidecar's.
+        final, new_verdict = apply_verdict_marks(out, p, page, event_kinds=kinds)
+        after = [(c.check.value, c.result.value, c.scope, c.reason) for c in new_verdict.clauses]
+        rows.append(
+            dict(
+                stem=stem,
+                page=page,
+                status=final.status.value,
+                failure_mode=final.failure_mode.value,
+                clauses=after,
+            )
         )
-        after = [
-            (c.check.value, c.result.value, c.scope, c.reason)
-            for c in derive_clauses(out, p, None, kinds)
-        ]
-        rows.append(dict(stem=stem, page=page, classes=classes, clauses=after))
     json.dump(dict(rows=rows, skipped=dict(skipped)), open(out_path, "w"), indent=1)
     print("measured", len(rows), "skipped", dict(skipped))
 
@@ -99,16 +110,29 @@ def compare(main_path, branch_path):
     b = {(r["stem"], r["page"]): r for r in json.load(open(branch_path))["rows"]}
     assert a.keys() == b.keys(), "the two runs measured different pages"
     key = lambda cs: sorted(c[:3] for c in cs)
-    changed = [k for k in a if key(a[k]["clauses"]) != key(b[k]["clauses"])]
-    reworded = collections.Counter()
+    differs = [
+        k
+        for k in a
+        if key(a[k]["clauses"]) != key(b[k]["clauses"])
+        or (a[k]["status"], a[k]["failure_mode"]) != (b[k]["status"], b[k]["failure_mode"])
+    ]
+    marked, reworded = collections.Counter(), collections.Counter()
     for k in a:
-        for cls in a[k]["classes"]:
-            diff = {tuple(c) for c in b[k]["clauses"]} - {tuple(c) for c in a[k]["clauses"]}
-            reworded[cls] += 1 if diff else 0
-    per_class = collections.Counter(c for r in a.values() for c in r["classes"])
-    print("pages measured", len(a), "marked per class", dict(per_class))
-    print("marks reworded per class", dict(reworded))
-    print("pages whose (check, result, scope) set differs from main:", len(changed))
+        branch_by_key = collections.defaultdict(set)
+        for c in b[k]["clauses"]:
+            branch_by_key[tuple(c[:3])].add(c[3])
+        for clause in a[k]["clauses"]:
+            cls = cls_of(dict(check=clause[0], reason=clause[3]))
+            if not cls:
+                continue
+            marked[cls] += 1
+            # Clause level: this clause's reason is not among the branch's for the same
+            # (check, result, scope).
+            if clause[3] not in branch_by_key[tuple(clause[:3])]:
+                reworded[cls] += 1
+    print("pages measured", len(a), "class clauses on main", dict(marked))
+    print("clauses reworded per class", dict(reworded))
+    print("pages whose status, failure mode or (check, result, scope) set differs:", len(differs))
 
 
 if __name__ == "__main__":
