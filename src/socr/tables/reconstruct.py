@@ -1756,6 +1756,17 @@ def chart_region_bboxes(page) -> list[object]:
 
     Never raises.
     """
+    return [expanded for _core, expanded in chart_region_clusters(page)]
+
+
+def chart_region_clusters(page) -> list[tuple[tuple[float, float, float, float], object]]:
+    """``(drawing cluster, expanded bbox)`` per chart region, in ``chart_region_bboxes`` order.
+
+    The cluster is the union of the region's own drawings (no margin); the bbox is that cluster
+    expanded as ``chart_region_bboxes`` documents, to the page's left edge included. A caller
+    that needs where the chart is DRAWN, rather than where its labels might be, wants the
+    cluster (#1276: the crop must not run across the neighbouring column). Never raises.
+    """
     try:
         import fitz
     except ImportError:  # pragma: no cover
@@ -1780,7 +1791,7 @@ def chart_region_bboxes(page) -> list[object]:
     else:
         row_margin = _SPLIT_GAP_MIN_PT
 
-    result: list[object] = []
+    result: list[tuple[tuple[float, float, float, float], object]] = []
     for cx0, cy0, cx1, cy1 in clusters:
         area = (cx1 - cx0) * (cy1 - cy0)
         if area < _CHART_MIN_CLUSTER_AREA_PT2:
@@ -1809,7 +1820,7 @@ def chart_region_bboxes(page) -> list[object]:
             min(pw, cx1 + row_margin),
             min(ph, cy1 + row_margin),
         )
-        result.append(expanded)
+        result.append(((cx0, cy0, cx1, cy1), expanded))
     return result
 
 

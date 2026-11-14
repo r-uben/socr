@@ -6757,6 +6757,15 @@ def _warn_success_status_for_verdict(output: PageOutput, clauses=(), kind: str =
 #: in ``tables_trust``: this is sidecar DATA from finished runs, and a rename must not
 #: silently stop matching what is already on disk.
 _FIGURE_RENDER_FAILED_KIND = "unshipped_figure_render_failed"
+#: #1276: the native chart-presence lane's own transient outcome (a literal, for the same reason).
+_FIGURE_PRESENCE_RENDER_FAILED_KIND = "figure_presence_render_failed"
+_FIGURE_PRESENCE_SHIPPED_KIND = "figure_presence_shipped"
+_FIGURE_PRESENCE_CROP_KINDS = frozenset(
+    {_FIGURE_PRESENCE_SHIPPED_KIND, _FIGURE_PRESENCE_RENDER_FAILED_KIND}
+)
+_FIGURE_RENDER_FAILED_KINDS = frozenset(
+    {_FIGURE_RENDER_FAILED_KIND, _FIGURE_PRESENCE_RENDER_FAILED_KIND}
+)
 
 
 def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
@@ -6807,7 +6816,7 @@ def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
             # shown, which the clause cannot say and the page state can. A located region
             # whose crop failed to save is transient and must be retried on resume; the other
             # outcomes are deterministic and must not be.
-            if scoped is FailureMode.FIGURE_NOT_SHOWN and kind == _FIGURE_RENDER_FAILED_KIND:
+            if scoped is FailureMode.FIGURE_NOT_SHOWN and kind in _FIGURE_RENDER_FAILED_KINDS:
                 return FailureMode.FIGURE_RENDER_FAILED
             return scoped
         return by_check.get(clause.check) or by_result.get((clause.check, clause.result))
@@ -7168,7 +7177,12 @@ def _apply_unshipped_figure_guard(output: PageOutput, p) -> PageOutput:
     # check found it unkillable -- this lane's own block opens a line with ``![``, so the
     # broad gate is what makes a second application a no-op, and a second guard that can
     # never fire is not a guard (CLAUDE.md).
-    if body_shows_a_picture(text):
+    # #1276: the native chart-presence lane's crops are PER REGION, so another region's image
+    # on the page excuses nothing. Its idempotence test is its own refs, not the broad gate.
+    if str(getattr(p, "unshipped_figure_kind", "") or "") in _FIGURE_PRESENCE_CROP_KINDS:
+        if all(ref in text for ref in refs):
+            return output
+    elif body_shows_a_picture(text):
         return output
     # #1187 round 2 (Fable P1-1, reproduced): a page whose body is a whole-page failure
     # marker keeps it. ``is_page_failed_marker`` admits "a marker plus at most one image"

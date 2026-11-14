@@ -597,6 +597,11 @@ def clause_records(page_num: int, captions: tuple[str, ...], kind: str) -> tuple
     page has no figure -- it failed to show one the page names, or shipped a crop it cannot
     prove complete.
     """
+    from socr.figures import figure_presence
+
+    if kind in figure_presence.PRESENCE_MARKED_KINDS:
+        # #1276: figure-specific wording for a lost chart region / an unmatched placeholder.
+        return figure_presence.clause_records(page_num, captions, kind)
     from socr.core.marks import Check, CheckResult, region_scope
 
     reason = _CLAUSE_REASON.get(kind, _CLAUSE_REASON[UNLOCATED_KIND])
@@ -616,7 +621,15 @@ def clause_records(page_num: int, captions: tuple[str, ...], kind: str) -> tuple
 NOTE_PREFIX = "unshipped figures: "
 
 
-def document_note(shipped: list[int], marked: list[int], skeleton: list[int] | None = None) -> str:
+def document_note(
+    shipped: list[int],
+    marked: list[int],
+    skeleton: list[int] | None = None,
+    *,
+    chart_shipped: list[int] | None = None,
+    chart_lost: list[int] | None = None,
+    placeholder: list[int] | None = None,
+) -> str:
     """The lane's ``metadata.json`` note, built from the pages in each class.
 
     One builder, used by the live run's ``_unshipped_figure_note`` and by the re-finalize tool,
@@ -627,9 +640,19 @@ def document_note(shipped: list[int], marked: list[int], skeleton: list[int] | N
     *skeleton* (#1225) is the chart-skeleton pages. They are MARKED too, but the ``marked``
     sentence says they "name a figure", which they do not, so they are taken out of it and get
     their own.
+
+    *chart_shipped*, *chart_lost* and *placeholder* (#1276) are the figure-presence pages: a
+    chart drawn on a native page that ships as an image, a chart region whose crop could not be
+    saved, and a model reading's figure placeholder that no picture matches. The latter two are
+    MARKED, and the ``marked`` sentence ("name a figure socr could not locate") is false for
+    both: a native page names no figure, and a placeholder names one socr did locate the mark
+    for. They are taken out of it and each gets its own.
     """
     skeleton = sorted(set(skeleton or ()))
-    marked = [n for n in marked if n not in skeleton]
+    chart_shipped = sorted(set(chart_shipped or ()))
+    chart_lost = sorted(set(chart_lost or ()))
+    placeholder = sorted(set(placeholder or ()))
+    marked = [n for n in marked if n not in {*skeleton, *chart_lost, *placeholder}]
     parts = []
     if shipped:
         parts.append(
@@ -647,6 +670,21 @@ def document_note(shipped: list[int], marked: list[int], skeleton: list[int] | N
         parts.append(
             f"page(s) {', '.join(str(n) for n in skeleton)} carry a chart's axis ticks, "
             "show no picture of it, and are marked"
+        )
+    if chart_shipped:
+        parts.append(
+            f"page(s) {', '.join(str(n) for n in chart_shipped)} draw a chart that ships as an "
+            "image crop rather than a reading, so its values are not transcribed"
+        )
+    if chart_lost:
+        parts.append(
+            f"page(s) {', '.join(str(n) for n in chart_lost)} draw a chart with axis ticks "
+            "whose crop could not be saved, so it is preserved nowhere, and are marked"
+        )
+    if placeholder:
+        parts.append(
+            f"page(s) {', '.join(str(n) for n in placeholder)} carry an unmatched figure "
+            "placeholder, a figure the reading marked and no picture of it ships, and are marked"
         )
     # No ``;`` ANYWHERE inside, including between the two clauses: ``;`` is what separates one
     # lane's note from another's in ``metadata.json``'s ``error``, so a note carrying one

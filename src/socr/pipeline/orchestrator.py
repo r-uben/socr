@@ -90,6 +90,8 @@ from socr.core.state import (
 )
 from socr.engines.registry import get_engine, resolve_auto_engine
 from socr.figures import crop_descriptions as _crop_descriptions
+from socr.figures import figure_crop as _figure_crop
+from socr.figures import figure_presence as _figure_presence
 from socr.figures import unshipped_figures as _unshipped_figures
 from socr.figures.extractor import ExtractionResult, FigureExtractor, has_chart_marks
 from socr.math.accounting import (
@@ -416,9 +418,14 @@ def _sidecar_layer_caused_records(meta: dict) -> list[str]:
 
 #: #1187: re-exported from the lane's own module so the orchestrator, the replay allowlist,
 #: the document note and the CLI line all read one definition.
-UNSHIPPED_FIGURE_EVENT_KINDS: frozenset[str] = _unshipped_figures.EVENT_KINDS
-#: The subset that means a figure this page names is preserved NOWHERE.
-UNSHIPPED_FIGURE_MARKED_KINDS: frozenset[str] = _unshipped_figures.MARKED_KINDS
+UNSHIPPED_FIGURE_EVENT_KINDS: frozenset[str] = (
+    _unshipped_figures.EVENT_KINDS | _figure_presence.PRESENCE_KINDS
+)
+#: The subset that means a figure this page names is preserved NOWHERE. #1276 adds the lost
+#: native chart region and the unmatched model placeholder.
+UNSHIPPED_FIGURE_MARKED_KINDS: frozenset[str] = (
+    _unshipped_figures.MARKED_KINDS | _figure_presence.PRESENCE_MARKED_KINDS
+)
 UNSHIPPED_FIGURE_RENDERED_KIND = _unshipped_figures.RENDERED_KIND
 UNSHIPPED_FIGURE_RENDER_FAILED_KIND = _unshipped_figures.RENDER_FAILED_KIND
 #: #1225: marked like the others, but it names no figure, so the note and the CLI word it apart.
@@ -7433,6 +7440,7 @@ class UnifiedPipeline:
         shipped: list[int] = []
         marked: list[int] = []
         skeleton: list[int] = []
+        chart_shipped, chart_lost, placeholder = UnifiedPipeline._presence_pages(state)
         for event in state.events:
             kind = getattr(event, "kind", "")
             page = getattr(event, "page_num", None)
@@ -7450,7 +7458,37 @@ class UnifiedPipeline:
                 marked.append(int(page))
             if kind == UNSHIPPED_FIGURE_CHART_SKELETON_KIND:
                 skeleton.append(int(page))
-        return _unshipped_figures.document_note(shipped, marked, skeleton) or None
+        return (
+            _unshipped_figures.document_note(
+                shipped,
+                marked,
+                skeleton,
+                chart_shipped=chart_shipped,
+                chart_lost=chart_lost,
+                placeholder=placeholder,
+            )
+            or None
+        )
+
+    @staticmethod
+    def _presence_pages(state) -> tuple[list[int], list[int], list[int]]:
+        """#1276: ``(chart shipped as an image, chart crop lost, unmatched figure placeholder)``
+        pages. One derivation for the document note and the CLI line."""
+        by_kind: dict[str, set[int]] = {
+            _figure_presence.PRESENCE_SHIPPED_KIND: set(),
+            _figure_presence.PRESENCE_RENDER_FAILED_KIND: set(),
+            _figure_presence.PLACEHOLDER_KIND: set(),
+        }
+        for event in state.events:
+            page = getattr(event, "page_num", None)
+            bucket = by_kind.get(getattr(event, "kind", ""))
+            if page is not None and bucket is not None:
+                bucket.add(int(page))
+        return (
+            sorted(by_kind[_figure_presence.PRESENCE_SHIPPED_KIND]),
+            sorted(by_kind[_figure_presence.PRESENCE_RENDER_FAILED_KIND]),
+            sorted(by_kind[_figure_presence.PLACEHOLDER_KIND]),
+        )
 
     @staticmethod
     def _scanned_figure_split(state, records) -> tuple[list[int], list[int], list[int]]:
@@ -13258,6 +13296,11 @@ class UnifiedPipeline:
                 # lesson, same loop).
                 with clock.span("figures"):
                     self._agentic_unshipped_figure_page(state, page_num, ps, bo, _chart_figures_dir)
+                    # #1276: a chart the page draws ships as a picture or is marked, and a model
+                    # placeholder is matched one-to-one by a shipped image.
+                    self._agentic_figure_presence_page(
+                        state, page_num, ps, bo, _chart_figures_dir, doc_dir=_agentic_doc_dir
+                    )
 
                 # #1282: a dropped decimal point is restored from the page's own text layer here,
                 # on the winning output, so that the finalize below (verdict, marks) and the
@@ -14017,6 +14060,354 @@ class UnifiedPipeline:
                 engine="",
                 detail=decision.detail,
                 data=decision.event_data(),
+            )
+        )
+
+    def _agentic_figure_presence_page(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        page_out,
+        figures_dir: Path | None,
+        doc_dir: Path | None = None,
+    ) -> None:
+        """#1276: the shipped body is final. Does every chart the page draws ship, or say why not?
+
+        Native winners: ``_agentic_native_chart_presence``. Model readings:
+        ``_agentic_placeholder_presence``. Decided on the bytes about to ship, after both table
+        withholding gates, for the reason ``_agentic_unshipped_figure_page`` gives. Never edits
+        the text (``manifest._apply_unshipped_figure_guard`` appends the crops at finalisation)
+        and never touches ``audit_passed``: the winner-selection flag (#252).
+
+        The lane is chosen from ``page_out``'s engine: the best reading as the loop holds it
+        here, BEFORE ``finalized_page_record`` selects what ships. The selector can still
+        replace a refused model reading by the native text (``NATIVE_FALLBACK``) or a floor,
+        and then the lane that ran judged text that does not ship. Not decided from the
+        finalised record: selection has side effects (the chart floor renders crops) and runs
+        after this lane's events and crops must exist. The limit is stated in
+        ``docs/log/2026-11-13_1276-figure-presence.md``.
+        """
+        from socr.core.manifest import is_page_failed_marker, page_ships_its_own_page_image
+
+        body = (getattr(page_out, "text", "") or "") if page_out is not None else ""
+        if not body.strip() or is_page_failed_marker(body):
+            return
+        if getattr(ps, "chart_floor_body", False) or page_ships_its_own_page_image(ps, body):
+            return
+        engine = str(getattr(page_out, "engine", "") or "").strip().lower()
+        if not engine:
+            return
+        if _unshipped_figures.page_was_read_by_a_model(engine):
+            self._agentic_placeholder_presence(
+                state,
+                page_num,
+                ps,
+                body,
+                doc_dir if doc_dir is not None else (figures_dir.parent if figures_dir else None),
+            )
+        elif engine != "chart_asset":
+            self._agentic_native_chart_presence(state, page_num, ps, body, figures_dir)
+
+    def _agentic_native_chart_presence(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        body: str,
+        figures_dir: Path | None,
+    ) -> None:
+        """A native page with a chart box: ship the crop of each region that has tick evidence.
+
+        The rule is ``figure_presence.decide_presence``; the evidence is tied to the region
+        (box AND tick run among the words inside it, table words and table regions excluded).
+        Pages with a table signal are GH-189's (``_preserve_chart_regions`` crops every box of
+        exactly that candidate set at assembly), so they are not decided here twice. A page the
+        PDF cannot be opened for is recorded, not passed: "could not look" is not "nothing
+        there".
+        """
+        import fitz
+
+        from socr.core.audit_log import AuditEvent
+        from socr.core.pdf import open_pdf
+        from socr.figures import figure_presence as fp
+        from socr.figures.chart_regions import render_chart_region_crops
+        from socr.tables.reconstruct import chart_region_clusters
+
+        # A page this lane or #1187 already answered is not decided twice -- except the one
+        # TRANSIENT answer, a crop that could not be saved. It is retried on resume (the replay
+        # restores the kind, and the manifest reprocesses the page), and the retry replaces the
+        # old record instead of being refused by it (cubic, PR #1309).
+        recorded = getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, "")
+        if recorded and recorded != _figure_presence.PRESENCE_RENDER_FAILED_KIND:
+            return
+        if self._page_has_tables(page_num, ps):
+            self._apply_presence_decision(
+                state, page_num, ps, fp.left_to_chart_region_pass_decision()
+            )
+            return
+        try:
+            with open_pdf(str(state.handle.path)) as _doc:
+                _page = _doc[page_num - 1]
+                clusters = chart_region_clusters(_page)
+                boxes = [box for _core, box in clusters]
+                if not boxes:
+                    self._apply_presence_decision(state, page_num, ps, fp.no_box_decision())
+                    return
+                words = list(_page.get_text("words") or [])
+                page_rect = _page.rect
+                groups = _figure_crop.crop_groups(
+                    words, [tuple(core) for core, _box in clusters], page_rect
+                )
+                crop_boxes = list(boxes)
+                for g in groups:
+                    crop_boxes[g.index - 1] = fitz.Rect(*g.rect)
+                group_of = {i: g.index for g in groups for i in g.indices}
+        except Exception as exc:  # noqa: BLE001 -- recorded below, never a silent pass
+            logger.warning("#1276: chart presence inventory failed for p%d: %s", page_num, exc)
+            ps.chart_region_inventory_failed = True
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="chart_region_inventory_failed",
+                    engine="figure_presence",
+                    detail=(
+                        "chart presence could not be checked: the page could not be read; no "
+                        "crop was shipped and none is claimed"
+                    ),
+                    data={"error_type": type(exc).__name__, "error": str(exc)},
+                )
+            )
+            return
+
+        assessments = fp.assess_regions(
+            words,
+            boxes,
+            _figure_crop.expand_covered(fp.own_region_refs(body, page_num), groups),
+            list(getattr(ps, "detected_table_bboxes", []) or []),
+            page_shipped=False,
+        )
+
+        def _render(indices: list[int]) -> dict[int, str]:
+            if figures_dir is None:
+                return {}
+            wanted = sorted({group_of[i] for i in indices})
+            saved = {
+                asset.region_index: asset.rel_path
+                for asset in render_chart_region_crops(
+                    state.handle.path,
+                    page_num,
+                    crop_boxes,
+                    figures_dir,
+                    indices=wanted,
+                    filename=fp.crop_filename,
+                )
+                if asset.rendered and asset.rel_path
+            }
+            return {i: saved[group_of[i]] for i in indices if group_of[i] in saved}
+
+        decision = fp.decide_presence(assessments, _render)
+        if decision is None:
+            return
+        self._apply_presence_decision(state, page_num, ps, decision)
+
+    @staticmethod
+    def _drop_presence_record(state: DocumentState, page_num: int, ps, recorded: str) -> None:
+        """Remove what a superseded render failure left: its event, the #1174 lines its partial
+        crops wrote, the located-labels and the refs. One page, one answer."""
+        state.events[:] = [
+            e
+            for e in state.events
+            if not (
+                getattr(e, "page_num", None) == page_num
+                and (
+                    e.kind == recorded
+                    or (
+                        e.kind == VISUAL_VALUES_NOT_TRANSCRIBED_KIND
+                        and getattr(e, "engine", "") == "figure_presence"
+                    )
+                )
+            )
+        ]
+        ps.unshipped_figure_refs = []
+        ps.unshipped_figure_unlocated = []
+
+    def _apply_presence_decision(self, state: DocumentState, page_num: int, ps, decision) -> None:
+        from socr.core.audit_log import AuditEvent
+
+        recorded = getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, "")
+        if recorded == _figure_presence.PRESENCE_RENDER_FAILED_KIND:
+            self._drop_presence_record(state, page_num, ps, recorded)
+        setattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, decision.kind)
+        if decision.refs:
+            ps.unshipped_figure_refs = list(decision.refs)
+        if decision.failed:
+            ps.unshipped_figure_unlocated = [f"chart region {i}" for i in decision.failed]
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=decision.kind,
+                engine="figure_presence",
+                detail=decision.detail,
+                data=decision.event_data(),
+            )
+        )
+        # The #1174 statement, through its own event so the clause, the visible line, the
+        # document note and the resume replay are the ones the chart lane already has. One
+        # event per shipped crop: a multi-region page names every one, not the first.
+        for ref in decision.refs:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=VISUAL_VALUES_NOT_TRANSCRIBED_KIND,
+                    engine="figure_presence",
+                    detail="figure shipped as image, values not transcribed",
+                    data={"png_saved": True, "png_path": ref},
+                )
+            )
+
+    def _agentic_placeholder_presence(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        body: str,
+        doc_dir: Path | None = None,
+    ) -> None:
+        """A model reading's ``<!-- Image`` placeholders, matched one-to-one by shipped images.
+
+        Decided here for a page with NO table signal, so the terminal sidecar the loop flushes
+        already carries the mark. A page with a table signal is GH-189's: its chart boxes are
+        cropped at assembly, so a placeholder there may be matched by a crop that does not exist
+        yet, and nothing is decided here. EVERY model page, this one included, is judged again by
+        ``_reconcile_model_placeholders`` at assembly from the bytes that ship, which is the only
+        decision a RESUMED page ever gets (it skips this loop) and needs no state carried between
+        the two (Carbon, PR #1309 round 4: a transient ``placeholder_pending`` was lost on an
+        interrupted run and the page shipped SUCCESS with its placeholders unmatched).
+        """
+        if self._page_has_tables(page_num, ps):
+            return
+        self._judge_placeholders(state, page_num, ps, body, doc_dir)
+
+    def _judge_placeholders(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        body: str,
+        doc_dir: Path | None,
+    ) -> None:
+        """Count the placeholders of *body* against the figure images it ships; mark the rest.
+
+        Images counted: figure images in the body that resolve to a file on disk under *doc_dir*
+        (a link to a file nobody saved ships nothing), each file once. On a page with a table
+        signal a GH-189 chart-region crop counts only for a box with the regional tick evidence
+        (a decorative box's crop is not the figure the model marked).
+
+        A page #1187 already answered (a figure it located, one it could not, one it could not
+        save, a chart skeleton) is not decided twice, and it is not left without a record: the
+        #1187 event IS its record, that kind is a MARKED one (the page is demoted, the document
+        note and the CLI name it), and a second placeholder count would only restate the same
+        loss under a second kind. ``NOT_FOUND`` marked nothing, so it is decided here and its
+        event replaced. Deciding the same page twice with the same bytes is idempotent.
+        """
+        from socr.figures import figure_presence as fp
+
+        placeholders = fp.placeholder_count(body)
+        if not placeholders:
+            return
+        recorded = getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, "")
+        if recorded and recorded not in (_unshipped_figures.NOT_FOUND_KIND, fp.PLACEHOLDER_KIND):
+            return
+        credited: set[int] | None = None
+        if self._page_has_tables(page_num, ps):
+            from socr.core.pdf import open_pdf
+            from socr.tables.reconstruct import chart_region_bboxes
+
+            try:
+                with open_pdf(str(state.handle.path)) as _doc:
+                    _page = _doc[page_num - 1]
+                    credited = {
+                        a.index
+                        for a in fp.assess_regions(
+                            list(_page.get_text("words") or []),
+                            chart_region_bboxes(_page),
+                            set(),
+                            list(getattr(ps, "detected_table_bboxes", []) or []),
+                            page_shipped=False,
+                        )
+                        if a.has_evidence
+                    }
+            except Exception:  # noqa: BLE001 -- unreadable: no crop is credited, mark
+                credited = set()
+        shipped = fp.shipped_image_count(
+            body, doc_dir, page_num=page_num, credited_chart_regions=credited
+        )
+        self._mark_unmatched_placeholders(state, page_num, ps, placeholders, shipped)
+
+    def _reconcile_model_placeholders(
+        self,
+        state: DocumentState,
+        page_texts: list[str],
+        records: list,
+        output_dir: Path,
+    ) -> None:
+        """After GH-189 ran: judge EVERY model page's placeholders against the bytes that ship.
+
+        No state is carried from the page loop. The page's text is the final one (crops GH-189
+        linked are in it), the lane is the finalised record's engine, and a page a resumed run
+        skipped is judged exactly like a fresh one, so an interrupted run cannot ship a model
+        page's unmatched placeholders as a silent SUCCESS. A page that ships its own page
+        image, a floor, a failed marker or a native body has nothing to judge.
+        """
+        from socr.core.manifest import is_page_failed_marker, page_ships_its_own_page_image
+
+        doc_dir, _figures_dir = self._doc_and_figures_dir(state.handle.path, output_dir)
+        for page_num in sorted(state.pages):
+            if page_num < 1 or page_num > len(page_texts) or page_num > len(records):
+                continue
+            ps = state.pages[page_num]
+            body = page_texts[page_num - 1] or ""
+            engine = str(getattr(records[page_num - 1].output, "engine", "") or "").strip().lower()
+            if not body.strip() or is_page_failed_marker(body) or not engine:
+                continue
+            if not _unshipped_figures.page_was_read_by_a_model(engine):
+                continue
+            if getattr(ps, "chart_floor_body", False) or page_ships_its_own_page_image(ps, body):
+                continue
+            self._judge_placeholders(state, page_num, ps, body, doc_dir)
+
+    def _mark_unmatched_placeholders(
+        self, state: DocumentState, page_num: int, ps, placeholders: int, shipped: int
+    ) -> None:
+        """Record and mark the placeholders nothing ships. No-op when every one is matched."""
+        from socr.core.audit_log import AuditEvent
+        from socr.figures import figure_presence as fp
+
+        unmatched = placeholders - shipped
+        if unmatched <= 0:
+            return
+        recorded = getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, "")
+        if recorded:
+            state.events[:] = [
+                e
+                for e in state.events
+                if not (getattr(e, "page_num", None) == page_num and e.kind == recorded)
+            ]
+        ps.unshipped_figure_kind = fp.PLACEHOLDER_KIND
+        ps.unshipped_figure_unlocated = [
+            f"image placeholder {i}" for i in range(shipped + 1, placeholders + 1)
+        ]
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=fp.PLACEHOLDER_KIND,
+                engine="",
+                detail=(
+                    f"the reading carries {placeholders} image placeholder(s) and only "
+                    f"{shipped} figure image(s) ship; {unmatched} figure(s) ship nowhere"
+                ),
+                data={"placeholders": placeholders, "images": shipped, "unmatched": unmatched},
             )
         )
 
@@ -18223,10 +18614,9 @@ class UnifiedPipeline:
             # permanent), and the transient failure then never came back. The lane's own
             # record of what happened is the authority, so it is read directly: whatever the
             # mode says, a page whose kind is the render failure is reprocessed.
-            if (
-                is_permanently_unverifiable
-                and str(meta.get("unshipped_figure_kind") or "")
-                == UNSHIPPED_FIGURE_RENDER_FAILED_KIND
+            if is_permanently_unverifiable and str(meta.get("unshipped_figure_kind") or "") in (
+                UNSHIPPED_FIGURE_RENDER_FAILED_KIND,
+                _figure_presence.PRESENCE_RENDER_FAILED_KIND,
             ):
                 is_permanently_unverifiable = False
 
@@ -19642,6 +20032,9 @@ class UnifiedPipeline:
         # flush, the status aggregation, the initial save and the metadata --
         # so every terminal writer serializes the same reconciled text.
         page_texts = self._preserve_chart_regions(state, page_texts, output_dir)
+        # #1276: every model page's placeholders are judged against the bytes that ship, the
+        # crops GH-189 just linked included, resumed pages included.
+        self._reconcile_model_placeholders(state, page_texts, pre_records, output_dir)
 
         # #635 Stage 0, CLI surface. Counted from the document's own events so a
         # resumed run reports what THIS run's body actually contains rather than
@@ -21629,6 +22022,7 @@ class UnifiedPipeline:
                         and getattr(e, "page_num", None) is not None
                     }
                 )
+                _pr_shipped, _pr_lost, _pr_placeholder = self._presence_pages(state)
                 _uf_marked = sorted(
                     {
                         int(e.page_num)
@@ -21637,6 +22031,8 @@ class UnifiedPipeline:
                         and getattr(e, "page_num", None) is not None
                     }
                     - set(_uf_skeleton)
+                    - set(_pr_lost)
+                    - set(_pr_placeholder)
                 )
                 if _uf_shipped:
                     console.print(
@@ -21649,6 +22045,23 @@ class UnifiedPipeline:
                         f"  [red]{len(_uf_marked)} page(s) named a figure socr could not "
                         f"locate, could not save, or could not tell apart from the others the "
                         f"page names; the page is marked: {_uf_marked}[/red]"
+                    )
+                if _pr_shipped:
+                    console.print(
+                        f"  [cyan]{len(_pr_shipped)} page(s) draw a chart that ships as an "
+                        f"image crop, its values untranscribed: {_pr_shipped}[/cyan]"
+                    )
+                if _pr_lost:
+                    console.print(
+                        f"  [red]{len(_pr_lost)} page(s) draw a chart with axis ticks whose "
+                        f"crop could not be saved; it is preserved nowhere; the page is "
+                        f"marked: {_pr_lost}[/red]"
+                    )
+                if _pr_placeholder:
+                    console.print(
+                        f"  [red]{len(_pr_placeholder)} page(s) carry an unmatched figure "
+                        f"placeholder (a figure the reading marked, with no picture of it); "
+                        f"the page is marked: {_pr_placeholder}[/red]"
                     )
                 if _uf_skeleton:
                     console.print(
