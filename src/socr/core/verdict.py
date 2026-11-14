@@ -2131,6 +2131,52 @@ def independent_page_evidence(entries: Iterable[TraceEntry], text: str) -> bool:
     )
 
 
+def row_binding_release_evidence(
+    entries: Iterable[TraceEntry], text: str, *, model_read: bool
+) -> bool:
+    """May a page's row-binding mark be lifted from the table(s) B1's exact evidence bound (#1257)?
+
+    The evidence moves a table's record from UNVERIFIABLE to BOUND, which says the table's rows sit
+    on the layer's lines. It says nothing about the rest of the page, so the page's mark goes only
+    when the shipped *text* has independent page-scope evidence, digest-verified
+    (:func:`verify_pass_digests`):
+
+    * a model-read page: :func:`independent_page_evidence` (the page's own layer, which no model
+      wrote, passes the words check at page scope, the numbers check passes or does not apply, and
+      no entry of any check is a FAIL or UNKNOWN);
+    * any other page (the text IS the layer, so a words check against the layer is circular): the
+      ink-versus-layer ``native_coverage`` check (#1050) must PASS at page scope and no entry of
+      any check may be a FAIL or UNKNOWN. The words and numbers checks are not consulted.
+
+    Pure over the entries, like :func:`independent_page_evidence`."""
+    if model_read:
+        return independent_page_evidence(entries, text)
+    checked = verify_pass_digests(entries, text)
+    if any(e.result in (TraceResult.FAIL, TraceResult.UNKNOWN) for e in checked):
+        return False
+    return any(
+        e.check == Check.NATIVE_COVERAGE.value
+        and e.scope == SCOPE_PAGE
+        and e.result is TraceResult.PASS
+        for e in checked
+    )
+
+
+def page_row_binding_release(
+    output: PageOutput,
+    p: Any,
+    event_kinds: frozenset[str] = frozenset(),
+    providers_available: bool = True,
+) -> bool:
+    """:func:`row_binding_release_evidence` on the pass trace of *output* as a run states it now."""
+    text = output.text or ""
+    entries = [
+        stamp_text_digest(o.entry, text)
+        for o in pass_trace_outcomes(output, p, event_kinds, providers_available)
+    ]
+    return row_binding_release_evidence(entries, text, model_read=_is_model_reading(output))
+
+
 def _judge_only_clauses(
     output: PageOutput, p: Any, event_kinds: frozenset[str]
 ) -> tuple[VerdictClause, ...]:

@@ -123,6 +123,7 @@ class RowEvidence:
     native_label: str  # label of the native line the row was assigned to ("" when none)
     values: tuple[str, ...]  # shipped value tokens (numeric) or cell texts (categorical)
     native_line: int | None  # index of the assigned native line, None when unassigned
+    evidence: str = ""  # the positive evidence kind that bound the row, "" for the same-line rule
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,17 @@ class RowBindingResult:
 
     def count(self, verdict: RowVerdict) -> int:
         return sum(1 for r in self.rows if r.verdict is verdict)
+
+    def evidence_counts(self) -> dict[str, int]:
+        """BOUND rows per positive evidence kind (#1257); the same-line rule is not listed."""
+        out: dict[str, int] = {}
+        for r in self.rows:
+            if r.verdict is RowVerdict.BOUND and r.evidence:
+                out[r.evidence] = out.get(r.evidence, 0) + 1
+        return out
+
+    def bound_count(self) -> int:
+        return self.count(RowVerdict.BOUND)
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +364,7 @@ class _Row:
     is_header: bool = False  # the markdown header row (judged apart, see check_row_binding)
     values_only: bool = True  # every value cell holds numbers only (no words beside them)
     cells_raw: tuple[str, ...] = ()  # full text of every non-empty data cell, in order
+    cells_all: tuple[str, ...] = ()  # every data cell in column order, empty ones included
 
     @property
     def has_content(self) -> bool:
@@ -418,6 +431,7 @@ def _shipped_rows(markdown: str) -> list[_Row]:
                     is_header=is_header,
                     values_only=values_only,
                     cells_raw=tuple(c.strip() for c in cells[1:] if c.strip()),
+                    cells_all=tuple(c.strip() for c in cells[1:]),
                 )
             )
     return rows
@@ -877,15 +891,376 @@ def _judge_empty(
     return RowVerdict.UNVERIFIABLE, "no native line carries this label", None
 
 
+# ---------------------------------------------------------------------------
+# Positive evidence beyond the same-line rule (#1257, plan B1)
+# ---------------------------------------------------------------------------
+# The same-line rule binds a row only when its whole label is printed before its values on one text
+# line.  Three layouts are correct and still abstained: a label wrapped over several lines (E1), a
+# heading stacked over several lines (E2) and a row whose label and cells reproduce the printed line
+# word for word, though the label is not the stretch before the first number (E3: a label spread over
+# two cells, ranges and ellipses).  Each may only move an UNVERIFIABLE row to BOUND: the pending rows
+# are the ones whose verdict is already final and not a conviction, and nothing here convicts or
+# removes a conviction.  Every check is exact (footnote marks and symbols included, as on the
+# same-line path); a check that cannot be exact leaves the row UNVERIFIABLE.  None of them binds a
+# table that left a row-shaped line of its region without a shipped row (``_unclaimed_row_lines``):
+# the labels of such a table may be exact while the table has lost content, and the mark it carries is
+# then the only one it has.
+
+EVIDENCE_WRAPPED_LABEL = "wrapped_label_exact"
+EVIDENCE_STACKED_HEADING = "stacked_heading_geometry"
+EVIDENCE_WHOLE_LINE = "whole_line_exact"
+REASON_WHOLE_LINE = "whole line: the row's label and cells are the printed line, word for word"
+REASON_WRAPPED_LABEL = "wrapped label: the label is the exact join of consecutive printed fragments"
+REASON_STACKED_HEADING = (
+    "stacked heading: every heading cell is exactly the words stacked over its data column"
+)
+
+
+def _line_centre(line: _Line) -> float:
+    return statistics.fmean((w.y0 + w.y1) / 2 for w in line.words)
+
+
+def _line_height(line: _Line) -> float:
+    return statistics.median(w.y1 - w.y0 for w in line.words)
+
+
+def _pitch_bound(lines: list[_Line]) -> float | None:
+    """The largest centre-to-centre distance at which two lines still count as consecutive: the
+    median distance between consecutive native lines of the region (the page's own line pitch) plus
+    the jitter a word is allowed on its own line (``LINE_CENTRE_TOL`` of the line height, the rule
+    that put the words on that line).  None when the region has fewer than two lines."""
+    if len(lines) < 2:
+        return None
+    centres = [_line_centre(ln) for ln in lines]
+    gaps = [b - a for a, b in zip(centres, centres[1:])]
+    return statistics.median(gaps) + LINE_CENTRE_TOL * statistics.median(
+        _line_height(ln) for ln in lines
+    )
+
+
+def _consecutive(upper: _Line, lower: _Line, bound: float | None) -> bool:
+    return bound is not None and 0 < _line_centre(lower) - _line_centre(upper) <= bound
+
+
+def _has_run(seq: list[str], run: list[str]) -> bool:
+    n = len(run)
+    return bool(run) and any(seq[i : i + n] == run for i in range(len(seq) - n + 1))
+
+
+def _fragment_text(line: _Line) -> str:
+    return " ".join(w.text for w in line.words)
+
+
+def _claimed_elsewhere(line: _Line, others: list[_Row]) -> bool:
+    """Another shipped row (group label, categorical row, heading, any row) carries this line's words
+    as a run of its own label or cells: the line may be that row's, so it is nobody's continuation."""
+    run = [w.tok for w in line.words if w.tok]
+    if not run:
+        return True
+    for q in others:
+        if _has_run(q.label_tokens, run):
+            return True
+        if any(_has_run(_label_tokens(c), run) for c in q.cells_raw):
+            return True
+    return False
+
+
+def _single_home(opts: list[tuple[_Cand, int]]) -> tuple[_Cand, int] | None:
+    """The one place the row's values sit: its only option, or several options that are one and the
+    same stretch of one line (a whole line and the gap-separated panel carrying the values, both
+    starting at the same first value): the widest of them.  Options in different panels of a line
+    (twin tables with equal values) have no single home."""
+    if len(opts) == 1:
+        return opts[0]
+    widest = max(opts, key=lambda o: o[0].stop - o[0].start)
+    wide, wi = widest
+    if all(
+        c.line.index == wide.line.index
+        and w == wi
+        and c.start >= wide.start
+        and c.stop <= wide.stop
+        for c, w in opts
+    ):
+        return widest
+    return None
+
+
+def _wrapped_label_fragments(
+    row: _Row,
+    cand: _Cand,
+    first_value_word: int,
+    lines: list[_Line],
+    bound: float | None,
+    anchored: set[int],
+    others: list[_Row],
+) -> frozenset[int] | None:
+    """E1.  The native line indices of the valueless fragment lines whose exact join with the
+    same-line fragment is the shipped label, or None.
+
+    All must hold: the fragments are valueless lines directly above and/or below the row's line,
+    each consecutive with the next (``_pitch_bound``); each lies in the label column (every word ends
+    before the row's first value, and no line starts left of the first line of the label by more than
+    the overprint tolerance); none is the line of another shipped row nor a run of another row's label
+    or cells (``_claimed_elsewhere``); the join equals the shipped label under the strict gate
+    (footnote marks included); and exactly one such split exists."""
+    line = cand.line
+    value_x0 = line.words[first_value_word].x0
+    printed = _printed_label(cand, first_value_word)
+    height = _line_height(line)
+    tol = DUP_OVERPRINT_TOL_HEIGHTS * height
+
+    def free(ln: _Line) -> bool:
+        return (
+            _label_only(ln)
+            and ln.index not in anchored
+            and all(w.x1 <= value_x0 for w in ln.words)
+            and not _claimed_elsewhere(ln, others)
+        )
+
+    above: list[_Line] = []
+    j = line.index - 1
+    nxt = line
+    while j >= 0 and free(lines[j]) and _consecutive(lines[j], nxt, bound):
+        above.append(lines[j])
+        nxt = lines[j]
+        j -= 1
+    below: list[_Line] = []
+    j = line.index + 1
+    prv = line
+    while j < len(lines) and free(lines[j]) and _consecutive(prv, lines[j], bound):
+        below.append(lines[j])
+        prv = lines[j]
+        j += 1
+    hits: list[frozenset[int]] = []
+    for a in range(len(above) + 1):
+        for b in range(len(below) + 1):
+            if a + b == 0 or (not printed and not (a and b)):
+                continue
+            top = [*reversed(above[:a])]
+            parts = [_fragment_text(ln) for ln in top]
+            if printed:
+                parts.append(printed)
+            parts.extend(_fragment_text(ln) for ln in below[:b])
+            if not _labels_exact(row.label, " ".join(parts), strict=True):
+                continue
+            head_x0 = top[0].words[0].x0 if top else cand.words[0].x0
+            starts = [ln.words[0].x0 for ln in (*top[1:], *below[:b])]
+            if printed and top:
+                starts.append(cand.words[0].x0)
+            if any(x < head_x0 - tol for x in starts):
+                continue
+            hits.append(frozenset(ln.index for ln in (*top, *below[:b])))
+    return hits[0] if len(hits) == 1 else None
+
+
+def _expand_dots(tokens: list[str]) -> list[str]:
+    """A run of full stops (`...`) is the same text whether the layer spaces it (`. . .`) or not."""
+    out: list[str] = []
+    for t in tokens:
+        out.extend("." * len(t) if len(t) > 1 and set(t) == {"."} else [t])
+    return out
+
+
+def _row_words(row: _Row) -> list[str]:
+    """Every word the shipped row prints: label cell, then every data cell, in order."""
+    parts = [row.label, *row.cells_raw]
+    return _expand_dots(
+        [t for p in parts for t in _strip_markup(p).translate(_UNICODE_MINUS).split()]
+    )
+
+
+def _whole_line_matches(row: _Row, cand: _Cand) -> bool:
+    """E3.  The shipped row reproduces the whole candidate line, word for word and in order: its
+    label cell and data cells are the line's words, none missing and none left over.  A label spread
+    over two cells (`1` | `LR`), a range or ellipsis cell (`.0-3.0`, `...`) and a row with an empty
+    label cell all print exactly what the page prints on that line.  Words compare as in
+    ``_same_word`` (footnote marks and symbols included, no tolerance)."""
+    shipped = _row_words(row)
+    native = _expand_dots([w.text.translate(_UNICODE_MINUS) for w in cand.words])
+    return (
+        bool(shipped)
+        and len(shipped) == len(native)
+        and all(_same_word(n, t) for n, t in zip(native, shipped))
+    )
+
+
+def _wrapped_group_label(
+    row: _Row,
+    lines: list[_Line],
+    bound: float | None,
+    anchored: set[int],
+    others: list[_Row],
+) -> frozenset[int] | None:
+    """E1 for a row with a label and no values (a group label): the label is the exact join of two or
+    more consecutive valueless lines, each free (no row owns it), consecutive (``_pitch_bound``) and
+    none starting left of the first by more than the overprint tolerance.  Exactly one run may do it."""
+    hits: list[frozenset[int]] = []
+    for i, first in enumerate(lines):
+        run: list[_Line] = []
+        for j in range(i, len(lines)):
+            ln = lines[j]
+            if (
+                not _label_only(ln)
+                or ln.index in anchored
+                or _claimed_elsewhere(ln, others)
+                or (run and not _consecutive(run[-1], ln, bound))
+            ):
+                break
+            run.append(ln)
+            tol = DUP_OVERPRINT_TOL_HEIGHTS * _line_height(first)
+            if (
+                len(run) >= 2
+                and all(r.words[0].x0 >= first.words[0].x0 - tol for r in run[1:])
+                and _labels_exact(row.label, " ".join(_fragment_text(r) for r in run), strict=True)
+            ):
+                hits.append(frozenset(r.index for r in run))
+    return hits[0] if len(hits) == 1 else None
+
+
+def _stacked_heading_binds(
+    header: _Row,
+    body: list[tuple[_Row, _Cand, int]],
+    lines: list[_Line],
+    bound: float | None,
+    group_rows: list[_Row] = (),  # type: ignore[assignment]
+) -> frozenset[int] | None:
+    """E2.  Every cell of the heading row is exactly the words stacked over its data column.
+
+    *body* lists the body rows that have ONE assigned line (row, candidate, first value word).  The
+    data columns are the x-extents of the j-th value of every body row that has exactly one value
+    per heading cell (they must be ordered and disjoint).  The heading lines are the N lines directly
+    above the first body line (or above a group label printed right under the heading), consecutive
+    (``_pitch_bound``).  Each word of those lines belongs to the column slot its centre lies in (slots
+    are cut halfway between neighbouring columns; the label column ends where the printed labels
+    end).  The words of a slot, read top to bottom and left to right, must be the cell's words one
+    by one, the stub words the label's, and no word may be left over (so at most one N can fit).
+    Membership comes from the geometry of the columns, not from the flattened word sequence: the
+    same words under the wrong column fail, and a spanning heading, whose words fall in several
+    slots, can only match cells that split it the way the page does.  Returns the heading's native
+    line indices, or None."""
+    cells = header.cells_all
+    if not cells or any(not _strip_markup(c).strip() for c in cells) or not body:
+        return None
+    wanted = [_strip_markup(c).translate(_UNICODE_MINUS).split() for c in cells]
+    stub_words = _strip_markup(header.label).translate(_UNICODE_MINUS).split()
+    n_cols = len(cells)
+    extents: list[list[float]] = [[float("inf"), float("-inf")] for _ in range(n_cols)]
+    full = 0
+    stub_right = float("-inf")  # right edge of the label column, from the labels the rows print
+    for r, c, wi in body:
+        if r.categories or len(r.numbers) != n_cols:
+            continue
+        vals = [w for w in c.line.words[wi : c.stop] if w.num is not None][:n_cols]
+        if len(vals) != n_cols:
+            continue
+        full += 1
+        stub_right = max([stub_right, *(w.x1 for w in c.words[: wi - c.start])])
+        for k, w in enumerate(vals):
+            extents[k][0] = min(extents[k][0], w.x0)
+            extents[k][1] = max(extents[k][1], w.x1)
+    if not full or any(
+        a >= b for a, b in zip((e[1] for e in extents), (e[0] for e in extents[1:]))
+    ):
+        return None
+    if stub_right >= extents[0][0]:
+        return None  # the label column reaches the first data column: no room to tell them apart
+    # Slot borders: halfway between two neighbouring data columns; the label column ends where the
+    # labels the rows print end (minus infinity when no row prints one).  A heading word belongs to
+    # the slot its centre lies in, so a heading wider than its numbers still sits over its column.
+    edges = [(extents[k][1] + extents[k + 1][0]) / 2 for k in range(n_cols - 1)]
+    edges = [stub_right, *edges]  # edges[k] is the left border of data column k
+    first = min(c.line.index for _, c, _ in body)
+    # A group label printed between the heading and the first data line (`Annual`, `Monthly Growth
+    # Rates`) is a shipped row of its own: the heading ends above the line that prints it exactly.
+    for g in group_rows:
+        homes = [
+            ln.index
+            for ln in lines[:first]
+            if _label_only(ln) and _labels_exact(g.label, _fragment_text(ln), strict=True)
+        ]
+        if len(homes) == 1:
+            first = min(first, homes[0])
+    for n in range(1, first + 1):
+        block = lines[first - n : first]
+        if any(not _consecutive(a, b, bound) for a, b in zip(block, block[1:])):
+            break  # a longer block would only add a gap
+        groups: list[list[tuple[int, float, str]]] = [[] for _ in range(n_cols + 1)]  # [0] = stub
+        for li, ln in enumerate(block):
+            for w in ln.words:
+                centre = (w.x0 + w.x1) / 2
+                slot = sum(1 for e in edges if centre > e)  # 0 = label column
+                groups[slot].append((li, w.x0, w.text))
+        reads = [[t.translate(_UNICODE_MINUS) for _, _, t in sorted(g)] for g in groups]
+        expected = [stub_words, *wanted]
+        if all(
+            len(got) == len(want) and all(_same_word(g, w) for g, w in zip(got, want))
+            for got, want in zip(reads, expected)
+        ):
+            return frozenset(ln.index for ln in lines[first - n : first])
+    return None
+
+
+def _value_columns(chosen: dict[int, list[tuple[_Cand, int]]]) -> list[tuple[float, float]]:
+    """The x-extents of the table's value columns: the value words of every assigned line, merged
+    where they overlap."""
+    spans = sorted(
+        (w.x0, w.x1)
+        for opts in chosen.values()
+        for c, wi in opts[:1]
+        for w in c.line.words[wi : c.stop]
+        if w.num is not None
+    )
+    merged: list[list[float]] = []
+    for x0, x1 in spans:
+        if merged and x0 < merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], x1)
+        else:
+            merged.append([x0, x1])
+    return [(a, b) for a, b in merged]
+
+
+def _unclaimed_row_lines(
+    lines: list[_Line], claimed: set[int], columns: list[tuple[float, float]]
+) -> list[int]:
+    """Native lines of the region that look like a table row and that no shipped row or heading
+    accounts for: a first number, then only numbers and symbols to the end of the line, with numbers
+    in at least ``MIN_VALUES_TO_CONVICT`` different value columns of the table (prose with a date,
+    or a running head, sits in one column at most)."""
+    out: list[int] = []
+    for ln in lines:
+        if ln.index in claimed:
+            continue
+        at = next((k for k, w in enumerate(ln.words) if w.num is not None), None)
+        if at is None:
+            continue
+        tail = ln.words[at:]
+        if not all(w.num is not None or not _has_letter([w.tok]) for w in tail):
+            continue
+        hit = {
+            k
+            for w in tail
+            if w.num is not None
+            for k, (x0, x1) in enumerate(columns)
+            if w.x0 < x1 and w.x1 > x0
+        }
+        if len(hit) >= MIN_VALUES_TO_CONVICT:
+            out.append(ln.index)
+    return out
+
+
 def check_row_binding(
     words: list,
     region: tuple[float, float, float, float] | None,
     table_markdown: str,
+    *,
+    extra_evidence: bool = True,
 ) -> RowBindingResult:
     """Compare every shipped data row of *table_markdown* with the text layer.
 
     *words* are fitz word tuples in the reading frame; *region* is the table box in the same frame
-    (None = whole page)."""
+    (None = whole page).  *extra_evidence* lets the wrapped-label and stacked-heading evidence
+    (E1, E2) move UNVERIFIABLE rows to BOUND; the point-repair gate passes False, so a repair is
+    judged by the same-line rule it was built on."""
     lines = build_native_lines(words, region)
     shipped = _shipped_rows(table_markdown)
     rows = [r for r in shipped if not r.is_header]
@@ -905,6 +1280,8 @@ def check_row_binding(
         idx = {c.line.index for c, _ in opts}
         anchors.append(idx.pop() if len(idx) == 1 else None)
     evidence: list[RowEvidence] = []
+    # evidence index -> (row position, assigned candidate and first value word; None for a row without values)
+    wrap_pending: dict[int, tuple[int, _Cand | None, int]] = {}
     for pos, r in enumerate(rows):
         values = r.cell_texts or r.cells_raw  # the evidence records what shipped, symbols included
         if not r.has_content:
@@ -938,6 +1315,8 @@ def check_row_binding(
                     RowVerdict.UNVERIFIABLE,
                     "cells hold only symbols, which the check cannot bind",
                 )
+            if extra_evidence and v is RowVerdict.UNVERIFIABLE and r.label_tokens:
+                wrap_pending[len(evidence)] = (pos, None, -1)
             evidence.append(RowEvidence(r.line_index, v, why, r.label, "", values, None))
             continue
         if r.line_index in infeasible:
@@ -1002,7 +1381,67 @@ def check_row_binding(
                 RowVerdict.UNVERIFIABLE,
                 "label not printed exactly before these values, or their line carries another stub",
             )
+        home = _single_home(opts) if extra_evidence else None
+        if home is not None and v is not RowVerdict.BOUND and v not in CONVICTING:
+            wrap_pending[len(evidence)] = (pos, home[0], home[1])
         evidence.append(RowEvidence(r.line_index, v, why, r.label, nat, values, c.line.index))
+    # E1 / E3 (#1257): wrapped labels and whole-line rows, resolved over the whole table so that no
+    # line serves two rows and no line another shipped row may own is taken.
+    bound_gap = _pitch_bound(lines)
+    proposals: list[tuple[RowEvidence, RowEvidence]] = []  # (as judged, as it would bind)
+    anchored_lines = {c.line.index for opts in chosen.values() for c, _ in opts}
+    if wrap_pending:
+        anchored_lines = {c.line.index for opts in chosen.values() for c, _ in opts}
+        found: dict[int, tuple[frozenset[int], str, str]] = {}
+        for at, (pos, c, wi) in wrap_pending.items():
+            row = rows[pos]
+            others = [q for q in shipped if q is not row]
+            if c is None:
+                if not row.cells_raw:
+                    frags = _wrapped_group_label(row, lines, bound_gap, anchored_lines, others)
+                    if frags is not None:
+                        found[at] = (frags, EVIDENCE_WRAPPED_LABEL, REASON_WRAPPED_LABEL)
+                    continue
+                homes = [k for k in cands if not k.line.nums and _whole_line_matches(row, k)]
+                if len(homes) == 1 and homes[0].line.index not in anchored_lines:
+                    found[at] = (
+                        frozenset({homes[0].line.index}),
+                        EVIDENCE_WHOLE_LINE,
+                        REASON_WHOLE_LINE,
+                    )
+                continue
+            if _whole_line_matches(row, c):
+                found[at] = (frozenset(), EVIDENCE_WHOLE_LINE, REASON_WHOLE_LINE)
+                continue
+            frags = (
+                _wrapped_label_fragments(row, c, wi, lines, bound_gap, anchored_lines, others)
+                if row.label_tokens
+                else None
+            )
+            if frags is not None and _cells_cover_line(row, c, wi):
+                found[at] = (frags, EVIDENCE_WRAPPED_LABEL, REASON_WRAPPED_LABEL)
+        for at, (frags, kind, reason) in found.items():
+            if frags and any(
+                frags & other[0] for k, other in found.items() if k != at and other[0]
+            ):
+                continue  # a shared line: nobody's
+            old = evidence[at]
+            proposals.append(
+                (
+                    old,
+                    RowEvidence(
+                        old.line_index,
+                        RowVerdict.BOUND,
+                        reason,
+                        old.shipped_label,
+                        old.native_label,
+                        old.values,
+                        old.native_line,
+                        kind,
+                    ),
+                )
+            )
+    heading_lines: set[int] = set()  # native lines the heading rows account for
     # Header-position rows (adversarial pass F1; rounds 3-5). Round 5 (R2, COMPLETE JUDGEMENT): a table
     # is BOUND only if every markdown row was judged by the exact gate, so EVERY header row with a
     # non-empty data cell (numbers, mixed text and numbers, or words) is judged like a body row, outside
@@ -1047,6 +1486,7 @@ def check_row_binding(
             and (has_decimal or (_has_letter(h.label_tokens) and not all_years))
         )
         opts = _options(h, cands)
+        heading_lines.update(c.line.index for c, _ in opts)
         if not opts:
             v, why, nat, line_no = (
                 RowVerdict.UNVERIFIABLE,
@@ -1078,7 +1518,48 @@ def check_row_binding(
                     RowVerdict.UNVERIFIABLE,
                     "header-position row: label not printed exactly before these cells",
                 )
+        if extra_evidence and v is RowVerdict.UNVERIFIABLE and "ambiguous" not in why:
+            body = [
+                (rows[k], chosen[rows[k].line_index][0][0], chosen[rows[k].line_index][0][1])
+                for k in range(len(rows))
+                if len(chosen.get(rows[k].line_index, ())) == 1
+            ]
+            lead = next(
+                (k for k in range(len(rows)) if len(chosen.get(rows[k].line_index, ())) == 1),
+                len(rows),
+            )
+            group_rows = [q for q in rows[:lead] if not q.has_content and not _label_cell_empty(q)]
+            block = _stacked_heading_binds(h, body, lines, bound_gap, group_rows)
+            if block is not None:
+                heading_lines |= block
+                judged = RowEvidence(h.line_index, v, why, h.label, nat, h.cell_texts, line_no)
+                evidence.insert(0, judged)
+                proposals.append(
+                    (
+                        judged,
+                        RowEvidence(
+                            h.line_index,
+                            RowVerdict.BOUND,
+                            REASON_STACKED_HEADING,
+                            h.label,
+                            "",
+                            h.cell_texts,
+                            None,
+                            EVIDENCE_STACKED_HEADING,
+                        ),
+                    )
+                )
+                continue
         evidence.insert(0, RowEvidence(h.line_index, v, why, h.label, nat, h.cell_texts, line_no))
+    # The new evidence binds only a COMPLETE table: no row-shaped value line of the region is left
+    # without a shipped row (a dropped row is not a binding fault, but a table that lost one must not
+    # lose its mark because its remaining labels are exact).  The same-line rule is unchanged.
+    if proposals and not _unclaimed_row_lines(
+        lines, anchored_lines | heading_lines, _value_columns(chosen)
+    ):
+        for old, new in proposals:
+            at = next(k for k, e in enumerate(evidence) if e is old)
+            evidence[at] = new
     if any(e.verdict in CONVICTING for e in evidence):
         outcome = TableOutcome.CONTRADICTED
     # (a table with no data rows has nothing shipped to bind; the empty-table checks own it)
@@ -1146,9 +1627,14 @@ def table_payload(
     outcome: str,
     rows: list[dict],
     error: str = "",
+    result: RowBindingResult | None = None,
     table_sha: str = "",
 ) -> dict:
     """One table's ``ps.row_binding`` record (before ``withheld_markdown`` / ``repairs``).
+
+    *result* adds what a pass leaves behind (#1257): ``rows_bound`` / ``rows_total`` and, when a row
+    was bound by evidence beyond the same-line rule, ``evidence`` (rows per kind).  ``rows`` still
+    lists only the rows that are not BOUND.
 
     *table_sha* (#1183) is the digest of the table block the check ran on; the pass trace states a
     ``bound`` record only for a shipped table with that digest."""
@@ -1162,6 +1648,11 @@ def table_payload(
         "counts": counts,
         "rows": rows,
     }
+    if result is not None:
+        payload["rows_bound"] = result.bound_count()
+        payload["rows_total"] = len(result.rows)
+        if evidence := result.evidence_counts():
+            payload["evidence"] = evidence
     if error:
         payload["error"] = error
     if table_sha:
@@ -1638,7 +2129,7 @@ def propose_point_repairs(
        is itself a point-only hit for the row (:func:`_rival_lines`).
 
     The number written is the text layer's printed string.  Pure and idempotent."""
-    base = check_row_binding(words, region, table_markdown)
+    base = check_row_binding(words, region, table_markdown, extra_evidence=False)
     if base.outcome is TableOutcome.CONTRADICTED:  # condition 0
         return table_markdown, [], [PointRefusal(-1, "", (REFUSE_CONTRADICTED,))]
     lines = build_native_lines(words, region)
@@ -1806,7 +2297,7 @@ def propose_point_repairs(
             continue
         trial = list(md)
         trial[r.line_index] = "| " + " | ".join(new_cells) + " |"
-        after = check_row_binding(words, region, "\n".join(trial))
+        after = check_row_binding(words, region, "\n".join(trial), extra_evidence=False)
         after_by = {e.line_index: e for e in after.rows}
         mine = after_by.get(r.line_index)
         worse = any(

@@ -60,9 +60,15 @@ def md(rows: list[tuple[str, list[str]]], header: str = EMPTY_HEADER) -> str:
     return "\n".join(out) + "\n"
 
 
-def run(native, rows, rotation) -> RowBindingResult:
+def run(native, rows, rotation, *, extra_evidence: bool = True) -> RowBindingResult:
     page = build_page(native, rotation)
-    results, rot = check_page_row_binding(page, md(rows))
+    if extra_evidence:
+        results, rot = check_page_row_binding(page, md(rows))
+    else:  # the same-line rule alone, as before #1257
+        from socr.tables import row_binding_check as _rbc
+
+        words, (boxes, union), rot = _rbc._page_frame(page, None)
+        results = [_rbc.check_row_binding(words, union, md(rows), extra_evidence=False)]
     assert rot in (0, 90, 270)
     assert len(results) == 1
     return results[0]
@@ -161,7 +167,9 @@ def test_identical_value_rows_with_right_labels_are_bound(rotation):
 @pytest.mark.parametrize("rotation", ROTATIONS)
 def test_wrapped_two_line_label_is_never_convicted(rotation):
     """Round 4: a label wrapped onto a band above its values is not printed before the values on their
-    line, so it is UNVERIFIABLE (marked), never BOUND, and never convicted."""
+    line, so the same-line rule leaves it UNVERIFIABLE (marked) and never convicts it.  #1257 (E1)
+    adds exact evidence: the shipped label IS the join of the consecutive fragments (see
+    ``test_gh1257_row_binding_evidence``).  With that evidence off, round 4 holds unchanged."""
     native = [
         ("Cash operating balance,", []),
         ("end of period", ["13", "24", "30"]),
@@ -171,9 +179,10 @@ def test_wrapped_two_line_label_is_never_convicted(rotation):
         ("Cash operating balance, end of period", ["13", "24", "30"]),
         ("Receipts", ["1775", "1825", "1853"]),
     ]
-    res = run(native, rows, rotation)
+    res = run(native, rows, rotation, extra_evidence=False)
     assert res.outcome is TableOutcome.UNVERIFIABLE
     assert res.rows[0].verdict is RowVerdict.UNVERIFIABLE
+    assert run(native, rows, rotation).outcome is not TableOutcome.CONTRADICTED
 
 
 @pytest.mark.parametrize("rotation", ROTATIONS)
@@ -1157,17 +1166,28 @@ def test_an_empty_group_row_binds_only_on_an_exact_valueless_line(rotation):
 @pytest.mark.parametrize("rotation", ROTATIONS)
 def test_a_header_row_binds_only_on_its_exact_printed_label(rotation):
     """Round 4: a header-position data row whose label comes from a band above its line (pool
-    evidence) is UNVERIFIABLE, not BOUND."""
+    evidence) is UNVERIFIABLE, not BOUND.  #1257 (E2) binds it only on the exact stacked words: the
+    words stacked over the stub and each data column are the cells, word for word."""
     native = [
         ("Real GDP", []),
         ("growth", ["1.1", "1.2", "1.3"]),
         ("Net exports", ["2.1", "2.2", "2.3"]),
     ]
+    page = build_page(native, rotation)
+    header_row = ("Real GDP growth", native[1][1])
+    from socr.tables import row_binding_check as _rbc
+
+    words, (_, union), _ = _rbc._page_frame(page, None)
+    plain = _rbc.check_row_binding(
+        words, union, _with_header(header_row, [native[2]]), extra_evidence=False
+    )
+    assert plain.outcome is TableOutcome.UNVERIFIABLE
+    assert plain.rows[0].verdict is RowVerdict.UNVERIFIABLE
+    # a label that is not the words stacked on the page stays UNVERIFIABLE with the evidence on
     res, _ = check_page_row_binding(
-        build_page(native, rotation), _with_header(("Real GDP growth", native[1][1]), [native[2]])
+        page, _with_header(("Real GDP expansion", native[1][1]), [native[2]])
     )
     assert res[0].outcome is TableOutcome.UNVERIFIABLE
-    assert res[0].rows[0].verdict is RowVerdict.UNVERIFIABLE
 
 
 # Round 5 (Astra / Fable), each pinned at the check level.

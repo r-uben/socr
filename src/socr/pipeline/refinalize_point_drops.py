@@ -197,6 +197,7 @@ def repair_page(
                 idx,
                 effective_outcome(result.outcome.value, bool(rows_data)),
                 row_evidence_dicts(result),
+                result=result,
                 table_sha=table_block_digest(new_text, idx),
             )
             if "withheld_markdown" in records[table_id]:
