@@ -10,9 +10,12 @@ Both are repairs of shipped text, never a drop of content:
 * **Hidden footnote wrapper.** The Fed's accessible PDFs carry an invisible tagged copy of
   each footnote in the running text: ``[Footnote 3. text End footnote 3.]`` (or ``End of
   footnote``, or the same without the brackets). The printed footnote is a second copy of the
-  same words. The wrapper is removed only when the printed copy, with the SAME note number
-  and the FULL text, is on the same page (:func:`strip_hidden_footnotes`); a lone, continued
-  or differing note keeps its wrapper because it may be the only copy of those words.
+  same words. The wrapper is removed only when BOTH hold (:func:`strip_hidden_footnotes`):
+  the PDF's own painted glyphs do not draw the wrapper (its ``Footnote N.`` / ``End footnote
+  N.`` frame is replacement text, not ink; evidence from page analysis, never from the text
+  alone), and the printed note is a complete note line on the page (starts a line with the
+  same note number, same full text, ends its line). A lone, continued or differing note, or
+  a wrapper the layer visibly paints, keeps its wrapper because it may be content.
 """
 
 from __future__ import annotations
@@ -61,6 +64,9 @@ _WRAPPER_RE = re.compile(
 KEPT_NUMBER_MISMATCH = "number_mismatch"
 KEPT_NO_PRINTED_COPY = "printed_copy_absent"
 KEPT_PRINTED_NOTE_DIFFERS = "printed_note_differs"
+#: A printed copy is on the page but nothing shows the wrapper is hidden text: the painted
+#: glyphs draw its frame, or the page's painted glyphs were not read. Kept (fail closed).
+KEPT_NOT_EVIDENCED_HIDDEN = "hidden_not_evidenced"
 
 
 @dataclass(frozen=True)
@@ -105,24 +111,47 @@ def _normalised(text: str) -> str:
     return " ".join(text.split())
 
 
+def painted_form(painted: str) -> str:
+    """The painted glyphs of a page reduced to what a wrapper's frame is looked for in:
+    lower case, no whitespace (a line or a span may break inside the frame)."""
+    return "".join((painted or "").split()).lower()
+
+
+def _frame_is_painted(painted: str, note: int) -> bool:
+    """True iff the page's painted glyphs draw the wrapper's ``Footnote N.`` opener or its
+    ``End [of] footnote N.`` closer. Hidden accessibility text is replacement text (PDF
+    ``/ActualText``) or invisible text (render mode 3); neither is painted ink, so neither
+    frame is in the painted glyphs. A visibly printed example has both."""
+    n = str(note)
+    return (
+        f"footnote{n}." in painted
+        or f"endfootnote{n}." in painted
+        or f"endoffootnote{n}." in painted
+    )
+
+
 def _printed_copy_re(note: int, body: str) -> re.Pattern:
-    """The printed form of a note: its number (``1``, ``1.`` or ``1)``), then the SAME words,
-    whitespace between words free to differ (a printed line wraps). Bounded by whitespace or
-    the text's ends on both sides, so a note is never found inside a longer word or number."""
+    """The printed form of a note, a COMPLETE note line: it starts a line with its number
+    (``1``, ``1.`` or ``1)``), carries exactly the same words (whitespace between words free to
+    differ: a printed line wraps) and ends where its line ends. A note that only begins with
+    the wrapper's words, or sits inside a longer line, does not match."""
     words = r"\s+".join(re.escape(w) for w in body.split())
-    return re.compile(rf"(?<![^\s])0*{note}[.)]?[ \t]+{words}(?![^\s])")
+    return re.compile(rf"(?m)^[ \t]*0*{note}[.)]?[ \t]+{words}[ \t]*$")
 
 
 def _printed_number_re(note: int) -> re.Pattern:
     return re.compile(rf"(?m)^[ \t]*0*{note}[.)]?[ \t]+\S")
 
 
-def strip_hidden_footnotes(text: str) -> FootnoteResult:
-    """*text* without the hidden wrappers whose printed copy is on the page.
+def strip_hidden_footnotes(text: str, painted: str | None = None) -> FootnoteResult:
+    """*text* without the hidden wrappers that are shown hidden and whose printed copy is there.
 
-    A wrapper is stripped iff all hold: it is on one line; its opening and closing numbers
-    agree; and the page carries, OUTSIDE every wrapper, a printed copy with that number
-    and exactly its text (whitespace-normalised, nothing else). One record per wrapper
+    *painted* is the page's painted glyphs from the PDF (see :func:`painted_form`), ``None``
+    when they were not read. A wrapper is stripped iff all hold: it is on one line; its
+    opening and closing numbers agree; the page carries, OUTSIDE every wrapper, a complete
+    printed note line with that number and exactly its text; and *painted* is known and does
+    not draw the wrapper's frame. Removal keeps the token boundary: the neighbours of an
+    inline wrapper are joined by one space, never concatenated. One record per wrapper
     stripped. Everything else is kept and reported with its reason.
     """
     text = text or ""
@@ -144,25 +173,29 @@ def strip_hidden_footnotes(text: str) -> FootnoteResult:
             continue
         body = _normalised(m.group("body"))
         copies = len(_printed_copy_re(n_open, body).findall(outside))
-        if copies:
+        if not copies:
+            if _printed_number_re(n_open).search(outside):
+                kept.append(KeptFootnote(n_open, KEPT_PRINTED_NOTE_DIFFERS))
+            else:
+                kept.append(KeptFootnote(n_open, KEPT_NO_PRINTED_COPY))
+        elif painted is None or _frame_is_painted(painted, n_open):
+            kept.append(KeptFootnote(n_open, KEPT_NOT_EVIDENCED_HIDDEN))
+        else:
             stripped.append(StrippedFootnote(n_open, m.group(), body, copies))
             cut.append((m.start(), m.end()))
-        elif _printed_number_re(n_open).search(outside):
-            kept.append(KeptFootnote(n_open, KEPT_PRINTED_NOTE_DIFFERS))
-        else:
-            kept.append(KeptFootnote(n_open, KEPT_NO_PRINTED_COPY))
     if not cut:
         return FootnoteResult(text, kept=tuple(kept))
     res = ""
     pos = 0
     for start, end in cut:
         res += text[pos:start]
-        # The layer's separator after the wrapper goes with it; the space before stays,
-        # unless the wrapper ended its line (then nothing follows to need it).
+        res = res.rstrip(" \t")
         while end < len(text) and text[end] in " \t":
             end += 1
-        if end >= len(text) or text[end] == "\n":
-            res = res.rstrip(" \t")
+        # Both neighbours on this line: one space keeps them two tokens (``Growth[..] slowed``,
+        # ``1[..] 2``). A wrapper at either edge of its line leaves no separator to keep.
+        if res and not res.endswith("\n") and end < len(text) and text[end] != "\n":
+            res += " "
         pos = end
     res += text[pos:]
     words = " ".join(s.wrapper for s in stripped)

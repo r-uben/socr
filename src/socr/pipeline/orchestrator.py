@@ -16986,7 +16986,7 @@ class UnifiedPipeline:
 
     @staticmethod
     def _record_damaged_layer_events(state: DocumentState, page_num: int, ps, winning_out) -> None:
-        """#1306: one audit event per control-byte replacement and per hidden footnote stripped.
+        """#1306: one aggregated control-byte event per page and one event per hidden footnote stripped.
 
         Called by every sidecar flush, so an event equal to one the page already has is not
         added again. A page restored on resume carries none of the guard's page state and

@@ -7555,18 +7555,28 @@ def _apply_damaged_layer_guard(output: PageOutput, p) -> PageOutput:
     turn ``\\x010.47`` (-0.47) into a clean ``0.47``. The page is marked by the verdict's
     ``control_bytes`` clause, which reads what this records on the page state.
 
-    The hidden footnote wrapper is removed only when the page carries the printed note (same
-    number, same full text); see ``damaged_layer.strip_hidden_footnotes``. Both are idempotent:
+    The hidden footnote wrapper is removed only from the layer's own text (a native-text
+    winner), only when the page analysis shows the PDF does not paint it, and only when the
+    page carries the printed note as a complete line; see ``damaged_layer.strip_hidden_footnotes``. Both are idempotent:
     a second pass over shipped text finds nothing, and then leaves the record of the first
     untouched, because the seam runs again at assemble over the text it already repaired.
     """
-    from socr.core.damaged_layer import replace_control_bytes, strip_hidden_footnotes
+    from socr.core.damaged_layer import (
+        FootnoteResult,
+        replace_control_bytes,
+        strip_hidden_footnotes,
+    )
 
     text = output.text or ""
     if not text or is_page_failed_marker(text):
         return output
     repaired, controls = replace_control_bytes(text)
-    footnotes = strip_hidden_footnotes(repaired)
+    # Only the layer's own text carries the wrapper, and only a page whose analysis read the
+    # painted glyphs can show it is hidden. A model reading is never rewritten here.
+    if engine_ships_native_text(output.engine):
+        footnotes = strip_hidden_footnotes(repaired, getattr(p, "painted_layer_text", None))
+    else:
+        footnotes = FootnoteResult(repaired)
     if p is not None:
         # Written only when something was found: a pass over already-repaired text finds
         # nothing and must not erase what the pass that repaired it recorded.

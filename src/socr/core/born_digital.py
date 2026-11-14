@@ -2627,6 +2627,12 @@ class PageAssessment:
     #: layer, a failed computation, or no word), never "nothing missing". In memory only.
     own_layer_word_reference: str = ""
     own_layer_figure_words: str = ""
+    #: #1306: the glyphs the page PAINTS (``damaged_layer.painted_form``): the text read
+    #: ignoring ``/ActualText`` replacement text, minus invisible (render mode 3 or alpha 0)
+    #: and off-page text. A hidden accessibility wrapper is in the extracted layer but not
+    #: here; that difference is the evidence the wrapper is hidden. ``None`` = not read (a
+    #: failed scan), which keeps every wrapper.
+    painted_layer_text: str | None = None
     #: #961: the scan raised, so the page is UNKNOWN. Treated exactly as a hit (fail closed).
     invisible_text_scan_failed: bool = False
     #: #960: the non-zero :class:`GarbledMathSignals` counts (empty when clean). Any entry
@@ -3464,6 +3470,37 @@ class BornDigitalDetector:
             logger.warning("#1294: the layer's words could not be read", exc_info=True)
             return "", ""
 
+    def _painted_layer_text(self, page: fitz.Page) -> str | None:
+        """#1306: the page's painted glyphs, or ``None`` when they could not be read.
+
+        The page's text read with ``TEXT_IGNORE_ACTUALTEXT`` (the glyphs the content stream
+        draws, not the replacement text a tagged PDF attaches to them: the Fed's hidden
+        footnote wrapper is such replacement text) and clipped to the page, minus spans whose
+        alpha is 0 (render mode 3 and fully transparent text both report 0). Not
+        ``get_texttrace``: on PyMuPDF 1.27.2 it corrupts a refcount and kills the interpreter
+        after a few hundred pages of the Fed corpus. A failure returns ``None``, logged: the
+        caller keeps what it cannot show is hidden.
+        """
+        try:
+            from socr.core.damaged_layer import painted_form
+
+            flags = (
+                fitz.TEXT_PRESERVE_LIGATURES
+                | fitz.TEXT_PRESERVE_WHITESPACE
+                | fitz.TEXT_MEDIABOX_CLIP
+                | fitz.TEXT_IGNORE_ACTUALTEXT
+            )
+            chars: list[str] = []
+            for block in page.get_text("dict", flags=flags)["blocks"]:
+                for line in block.get("lines", ()):
+                    for span in line["spans"]:
+                        if span.get("alpha", 255):
+                            chars.append(span["text"])
+            return painted_form(" ".join(chars))
+        except Exception:
+            logger.warning("#1306: the page's painted glyphs could not be read", exc_info=True)
+            return None
+
     def _assess_page(self, page: fitz.Page, page_num: int) -> PageAssessment:
         """Assess a page and stamp its dominant text direction onto the result.
 
@@ -3556,6 +3593,7 @@ class BornDigitalDetector:
             assessment.own_layer_word_reference,
             assessment.own_layer_figure_words,
         ) = self._own_layer_word_reference(page)
+        assessment.painted_layer_text = self._painted_layer_text(page)
         # #1144 round 4: the page's /Rotate value, needed by the prose-recovery
         # floor. ``get_text("words")`` reports UNROTATED coordinates while
         # ``find_tables()`` reports rotated ones, so on a /Rotate 90 page the two

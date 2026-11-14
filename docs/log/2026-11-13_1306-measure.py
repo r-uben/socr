@@ -6,7 +6,11 @@ a hidden footnote wrapper is found on. No OCR, no model, cached data only.
 
 Stage 1 reads each ``pages/NNNNN.md`` fragment (the text the run shipped) and counts, before
 and after the guard, the control bytes by code point and the hidden wrappers stripped and kept
-(with the reason kept). Stage 2 rebuilds the words reference from the PDF for each page that
+(with the reason kept). A wrapper is stripped only on a native-text page and only when the
+PDF's painted glyphs (``BornDigitalDetector._painted_layer_text``, the same function a run
+uses) do not draw its frame; a page whose PDF is missing or unreadable keeps its wrappers and
+is listed in ``skipped``. U+FFFD counted after the guard excludes those already in the
+fragment (``pre_existing_replacement_chars``). Stage 2 rebuilds the words reference from the PDF for each page that
 carries a wrapper and counts the words the check reports missing with the wrapper in place
 (what run 51270eb5 shipped), with the wrapper stripped and not excused (what a guard without
 the words-reference change would ship) and stripped and excused (what this change ships).
@@ -28,9 +32,30 @@ def _pages():
         yield md.parents[1].name, md
 
 
+def _painted(doc: str, page_num: int, cache: dict, skipped: list):
+    """The page's painted glyphs, or None (recorded once per doc in *skipped*)."""
+    from socr.core.born_digital import BornDigitalDetector
+
+    if doc not in cache:
+        pdf = PDFS / f"{doc}.pdf"
+        try:
+            import fitz
+
+            cache[doc] = fitz.open(pdf)
+        except Exception as exc:  # reported, never hidden
+            cache[doc] = None
+            skipped.append({"doc": doc, "skipped": f"PDF not opened: {exc!r}"})
+    handle = cache[doc]
+    if handle is None:
+        return None
+    return BornDigitalDetector()._painted_layer_text(handle[page_num - 1])
+
+
 def _stage1():
+    from socr.core.manifest import engine_ships_native_text
     from socr.core.damaged_layer import (
         CONTROL_BYTE_RE,
+        FootnoteResult,
         REPLACEMENT_CHAR,
         replace_control_bytes,
         strip_hidden_footnotes,
@@ -41,6 +66,9 @@ def _stage1():
         "before_control": collections.Counter(),
         "after_control": collections.Counter(),
         "after_replacement_chars": 0,
+        "pre_existing_replacement_chars": 0,
+        "model_pages_with_wrapper": 0,
+        "skipped": [],
         "control_pages": [],
         "wrapper_pages": [],
         "stripped": 0,
@@ -50,19 +78,32 @@ def _stage1():
         "pages_with_kept": 0,
         "pages_stripped_and_kept": 0,
     }
+    cache: dict = {}
     for doc, md in _pages():
         text = md.read_text(errors="replace")
         out["pages"] += 1
+        out["pre_existing_replacement_chars"] += text.count(REPLACEMENT_CHAR)
         for m in CONTROL_BYTE_RE.findall(text):
             out["before_control"][f"U+{ord(m):04X}"] += 1
         repaired, found = replace_control_bytes(text)
         if found:
             out["control_pages"].append((doc, md.name, dict(found)))
-        footnotes = strip_hidden_footnotes(repaired)
+        painted, native = None, True
+        if "ootnote" in repaired:
+            side = json.loads(md.with_suffix(".json").read_text())
+            native = engine_ships_native_text(side.get("engine"))
+            painted = _painted(doc, int(md.stem), cache, out["skipped"]) if native else None
+            if not native:
+                out["model_pages_with_wrapper"] += 1
+        footnotes = (
+            strip_hidden_footnotes(repaired, painted) if native else FootnoteResult(repaired)
+        )
         final = footnotes.text
         for m in CONTROL_BYTE_RE.findall(final):
             out["after_control"][f"U+{ord(m):04X}"] += 1
-        out["after_replacement_chars"] += final.count(REPLACEMENT_CHAR)
+        out["after_replacement_chars"] += final.count(
+            REPLACEMENT_CHAR
+        )  # minus pre-existing: see below
         if footnotes.stripped or footnotes.kept:
             out["wrapper_pages"].append((doc, md.name))
         out["stripped"] += len(footnotes.stripped)
@@ -72,6 +113,7 @@ def _stage1():
         out["pages_stripped"] += bool(footnotes.stripped)
         out["pages_with_kept"] += bool(footnotes.kept)
         out["pages_stripped_and_kept"] += bool(footnotes.stripped and footnotes.kept)
+    out["after_replacement_chars"] -= out["pre_existing_replacement_chars"]
     return out
 
 
@@ -115,7 +157,7 @@ def _stage2(wrapper_pages):
             output = PageOutput.from_dict(side.get("winning_output") or {})
             output.text = text
             before = page_missing_words(output, p)
-            result = strip_hidden_footnotes(text)
+            result = strip_hidden_footnotes(text, pa.painted_layer_text)
             stripped = PageOutput.from_dict(side.get("winning_output") or {})
             stripped.text = result.text
             plain = page_missing_words(stripped, p)  # no excuse recorded on p
@@ -161,6 +203,8 @@ def main(out_path: str) -> None:
             if (r["missing_stripped_not_excused"] or 0) > (r["missing_in_run"] or 0)
         ),
     )
+    skipped = [r for r in stage2 if "skipped" in r] + stage1["skipped"]
+    print("skipped docs:", len(skipped), [(r["doc"], r["skipped"]) for r in skipped])
 
 
 if __name__ == "__main__":

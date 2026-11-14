@@ -5,7 +5,8 @@ Two repairs at the shipping boundary (``manifest._apply_damaged_layer_guard``):
 * a C0 control byte (not tab, LF, CR) becomes U+FFFD and the page is marked, never deleted:
   deleting ``\\x010.47`` would ship a clean, positive ``0.47`` for -0.47;
 * the invisible tagged copy of a footnote (``[Footnote N. ... End footnote N.]``) is removed
-  only when the printed note, same number and same full text, is on the page.
+  only from native text, only when the PDF's painted glyphs do not draw it (hidden text), and
+  only when the printed note is a complete note line, same number and same full text.
 
 Hermetic: synthetic fitz PDFs, no provider, no judge. Pipeline pins are DIFFERENCES between
 two runs in one process (the guard live vs switched off), in both provider states, never an
@@ -26,7 +27,9 @@ from socr.core.damaged_layer import (
     KEPT_NO_PRINTED_COPY,
     KEPT_NUMBER_MISMATCH,
     KEPT_PRINTED_NOTE_DIFFERS,
+    KEPT_NOT_EVIDENCED_HIDDEN,
     REPLACEMENT_CHAR,
+    painted_form,
     replace_control_bytes,
     strip_hidden_footnotes,
 )
@@ -70,6 +73,14 @@ def test_a_control_byte_is_replaced_never_deleted() -> None:
 # ----------------------------------------------------------------------------- footnote rule
 
 
+#: What a page that paints only its visible words (not the wrapper's frame) reads as.
+CLEAN = painted_form(f"policy rates.1 On the other hand. Body text line. More body text. 1 {NOTE}")
+
+
+def _strip(text: str, painted: str | None = CLEAN):
+    return strip_hidden_footnotes(text, painted)
+
+
 def _page(note: str = NOTE, printed: str | None = NOTE, wrapper_note: str | None = None) -> str:
     wrapped = wrapper_note if wrapper_note is not None else note
     body = f"policy rates.1 [Footnote 1. {wrapped} End footnote 1.]   On the other hand."
@@ -80,7 +91,7 @@ def _page(note: str = NOTE, printed: str | None = NOTE, wrapper_note: str | None
 
 
 def test_exact_printed_copy_strips_the_wrapper_and_records_it() -> None:
-    result = strip_hidden_footnotes(_page())
+    result = _strip(_page())
     assert "[Footnote" not in result.text and "End footnote" not in result.text
     assert "policy rates.1 On the other hand." in result.text
     assert f"1 {NOTE}" in result.text, "the printed copy stays"
@@ -90,20 +101,20 @@ def test_exact_printed_copy_strips_the_wrapper_and_records_it() -> None:
 
 def test_printed_copy_may_wrap_and_use_other_whitespace() -> None:
     printed = NOTE.replace(" will", "\n   will")
-    assert strip_hidden_footnotes(_page(printed=printed)).stripped
+    assert _strip(_page(printed=printed)).stripped
 
 
 @pytest.mark.parametrize("end", ["End footnote 1.", "End of footnote 1.", "End of Footnote 1."])
 def test_both_closing_forms_and_the_unbracketed_wrapper(end: str) -> None:
     text = f"MR. KOS.1 Footnote 1. {NOTE} {end}   Thank you.\n1 {NOTE}"
-    assert strip_hidden_footnotes(text).text == f"MR. KOS.1 Thank you.\n1 {NOTE}"
+    assert _strip(text).text == f"MR. KOS.1 Thank you.\n1 {NOTE}"
     bracketed = f"MR. KOS.1 [Footnote 1. {NOTE} {end}]   Thank you.\n1 {NOTE}"
-    assert strip_hidden_footnotes(bracketed).text == f"MR. KOS.1 Thank you.\n1 {NOTE}"
+    assert _strip(bracketed).text == f"MR. KOS.1 Thank you.\n1 {NOTE}"
 
 
 def test_a_differing_printed_note_keeps_the_wrapper() -> None:
     page = _page(printed="The advance estimate for second-quarter GDP will be released today.")
-    result = strip_hidden_footnotes(page)
+    result = _strip(page)
     assert result.text == page
     assert [(k.note, k.reason) for k in result.kept] == [(1, KEPT_PRINTED_NOTE_DIFFERS)]
 
@@ -111,34 +122,34 @@ def test_a_differing_printed_note_keeps_the_wrapper() -> None:
 def test_a_continued_note_keeps_the_wrapper() -> None:
     """The printed copy on this page holds only the first part; the rest is on the next page."""
     page = _page(note=NOTE + " The release includes revisions.", printed=NOTE)
-    assert strip_hidden_footnotes(page).text == page
+    assert _strip(page).text == page
 
 
 def test_a_lone_wrapper_is_kept() -> None:
     page = _page(printed=None)
-    result = strip_hidden_footnotes(page)
+    result = _strip(page)
     assert result.text == page
     assert [(k.note, k.reason) for k in result.kept] == [(1, KEPT_NO_PRINTED_COPY)]
 
 
 def test_the_wrapper_never_vouches_for_itself() -> None:
     page = f"text.1 [Footnote 1. {NOTE} End footnote 1.] more"
-    assert strip_hidden_footnotes(page).text == page
+    assert _strip(page).text == page
 
 
 def test_a_printed_copy_with_another_number_does_not_count() -> None:
     page = _page(printed=None) + f"\n2 {NOTE}"
-    assert strip_hidden_footnotes(page).text == page
+    assert _strip(page).text == page
 
 
 def test_a_multi_line_wrapper_is_not_recognised_and_stays() -> None:
     page = f"text [Footnote 1. {NOTE}\n End footnote 1.] more\n1 {NOTE}"
-    assert strip_hidden_footnotes(page).text == page
+    assert _strip(page).text == page
 
 
 def test_opening_and_closing_numbers_must_agree() -> None:
     page = f"text [Footnote 1. {NOTE} End footnote 2.] more\n1 {NOTE}"
-    result = strip_hidden_footnotes(page)
+    result = _strip(page)
     assert result.text == page
     assert [(k.note, k.reason) for k in result.kept] == [(1, KEPT_NUMBER_MISMATCH)]
 
@@ -148,7 +159,7 @@ def test_two_notes_one_matching_one_not_strip_one_record() -> None:
         f"a.1 [Footnote 1. {NOTE} End footnote 1.] b.2 [Footnote 2. Other words here. "
         f"End footnote 2.] c\n1 {NOTE}\n2 Different words here."
     )
-    result = strip_hidden_footnotes(page)
+    result = _strip(page)
     assert [s.note for s in result.stripped] == [1]
     assert "[Footnote 2." in result.text and "[Footnote 1." not in result.text
 
@@ -157,7 +168,7 @@ def test_the_old_lowercase_form_without_brackets_is_left_alone() -> None:
     page = (
         "Messrs. A,1 footnote 1 Attended the meeting.end of footnote 1 footnote 2 end of footnote 2"
     )
-    assert strip_hidden_footnotes(page).text == page
+    assert _strip(page).text == page
 
 
 # ----------------------------------------------------------------------------- words check
@@ -167,7 +178,7 @@ def test_stripping_causes_no_new_missing_word_and_hides_no_other() -> None:
     from socr.tables.layer_words import word_tokens_in_order
 
     page = _page()
-    stripped = strip_hidden_footnotes(page)
+    stripped = _strip(page)
     # The layer holds the note twice (hidden and printed) plus the wrapper's own words.
     reference = WordReference(" ".join(word_tokens_in_order(page)))
     assert (
@@ -185,14 +196,83 @@ def test_stripping_causes_no_new_missing_word_and_hides_no_other() -> None:
     )
 
 
+# --- hidden-text evidence (Astra blocker 1): the text alone is never proof
+
+
+def test_a_wrapper_the_pdf_paints_is_kept_even_with_a_matching_printed_note() -> None:
+    """A visible quoted example, printed in full, and the real note elsewhere."""
+    page = _page()
+    painted = painted_form(f"[Footnote 1. {NOTE} End footnote 1.] 1 {NOTE}")
+    result = _strip(page, painted)
+    assert result.text == page
+    assert [(k.note, k.reason) for k in result.kept] == [(1, KEPT_NOT_EVIDENCED_HIDDEN)]
+    assert result.stripped == () and result.stripped_words == ""
+
+
+def test_painted_glyphs_not_read_keep_every_wrapper() -> None:
+    page = _page()
+    result = _strip(page, None)
+    assert result.text == page
+    assert [(k.note, k.reason) for k in result.kept] == [(1, KEPT_NOT_EVIDENCED_HIDDEN)]
+
+
+@pytest.mark.parametrize(
+    "frame", ["Footnote 1.", "End footnote 1.", "End of footnote 1."], ids=["open", "end", "end-of"]
+)
+def test_either_painted_frame_half_is_enough_to_keep(frame: str) -> None:
+    painted = painted_form(f"x {frame} y 1 {NOTE}")
+    assert _strip(_page(), painted).text == _page()
+
+
+def test_a_printed_note_that_only_begins_with_the_wrapper_words_does_not_count() -> None:
+    """cubic: a longer, differing printed note shares the wrapper's words as a prefix."""
+    page = _page(printed=NOTE + " It is also revised later.")
+    result = _strip(page)
+    assert result.text == page
+    assert [(k.note, k.reason) for k in result.kept] == [(1, KEPT_PRINTED_NOTE_DIFFERS)]
+
+
+def test_a_printed_copy_must_start_its_line() -> None:
+    page = _page(printed=None) + f"\nsee also 1 {NOTE}"
+    result = _strip(page)
+    assert result.text == page
+    assert [(k.note, k.reason) for k in result.kept] == [(1, KEPT_NO_PRINTED_COPY)]
+
+
+# --- token boundary (Astra blocker 2)
+
+
+def test_an_attached_word_stays_a_separate_token() -> None:
+    page = f"Growth[Footnote 1. {NOTE} End footnote 1.] slowed.\n1 {NOTE}"
+    assert _strip(page).text == f"Growth slowed.\n1 {NOTE}"
+    attached = f"Growth[Footnote 1. {NOTE} End footnote 1.]slowed.\n1 {NOTE}"
+    assert _strip(attached).text == f"Growth slowed.\n1 {NOTE}"
+
+
+def test_an_attached_number_stays_a_separate_token() -> None:
+    page = f"rose 1[Footnote 1. {NOTE} End footnote 1.] 2 percent.\n1 {NOTE}"
+    assert _strip(page).text == f"rose 1 2 percent.\n1 {NOTE}"
+    attached = f"rose 1[Footnote 1. {NOTE} End footnote 1.]2 percent.\n1 {NOTE}"
+    assert _strip(attached).text == f"rose 1 2 percent.\n1 {NOTE}"
+
+
+def test_edge_and_adjacent_wrappers_keep_one_space_or_none() -> None:
+    w = f"[Footnote 1. {NOTE} End footnote 1.]"
+    assert _strip(f"{w} Starts the line.\n1 {NOTE}").text == f"Starts the line.\n1 {NOTE}"
+    assert _strip(f"Ends the line. {w}\n1 {NOTE}").text == f"Ends the line.\n1 {NOTE}"
+    two = f"a {w}{w} b\n1 {NOTE}"
+    assert _strip(two).text == f"a b\n1 {NOTE}"
+
+
 # ----------------------------------------------------------------------------- process()
 
 
 class _StubEngine:
     name = "qwen"
 
-    def __init__(self) -> None:
+    def __init__(self, text: str = "PROVIDER_READ") -> None:
         self.calls = 0
+        self.text = text
 
     def is_available(self) -> bool:
         return True
@@ -202,7 +282,7 @@ class _StubEngine:
 
         self.calls += 1
         return [
-            PageOutput(page_num=n, text="PROVIDER_READ", status=PageStatus.SUCCESS, engine="qwen")
+            PageOutput(page_num=n, text=self.text, status=PageStatus.SUCCESS, engine="qwen")
             for n in page_nums
         ]
 
@@ -214,7 +294,12 @@ class _AcceptingJudge:
         return AcceptDecision(accept=True, reason="stub accepts all")
 
 
-def _pdf(path: Path, lines: list[str]) -> Path:
+def _hidden(text: str) -> tuple[str, bool]:
+    """A segment drawn invisibly (render mode 3): in the layer, not painted."""
+    return (text, True)
+
+
+def _pdf(path: Path, lines: list) -> Path:
     doc = fitz.open()
     page = doc.new_page()
     y = 72
@@ -222,7 +307,16 @@ def _pdf(path: Path, lines: list[str]) -> Path:
         page.insert_text((72, y), _PROSE, fontname="helv", fontsize=10)
         y += 14
     for line in lines:
-        page.insert_text((72, y + 10), line, fontname="helv", fontsize=10)
+        # A line is a string, or segments drawn left to right on one baseline.
+        x = 72
+        for seg in [(line, False)] if isinstance(line, str) else line:
+            text, hidden = seg if isinstance(seg, tuple) else (seg, False)
+            # Hidden text is small so the line stays inside the page (a clipped word is lost).
+            size = 5 if hidden else 10
+            page.insert_text(
+                (x, y + 10), text, fontname="helv", fontsize=size, render_mode=3 if hidden else 0
+            )
+            x += fitz.get_text_length(text + " ", "helv", size)
         y += 14
     doc.save(path)
     doc.close()
@@ -233,16 +327,17 @@ def _run(
     tmp_path: Path,
     tag: str,
     monkeypatch,
-    lines: list[str],
+    lines: list,
     *,
     provider: bool,
+    model_text: str = "PROVIDER_READ",
     guard: bool = True,
     native_only: bool = False,
     reprocess: bool = False,
 ):
     from socr.core.providers import PROFILE_QWEN_LOCAL
 
-    engine = _StubEngine()
+    engine = _StubEngine(model_text)
     pdf = tmp_path / f"{tag}.pdf"
     if not pdf.exists():
         _pdf(pdf, lines)
@@ -352,6 +447,27 @@ def test_control_byte_ships_as_u_fffd_with_a_mark_never_a_clean_number(
     assert "\x01" not in on
 
 
+def test_a_control_byte_in_a_model_reading_is_replaced_and_marked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The provider arm with the byte reaching shipped text: a clean native page cannot carry
+    one, so the model's own reading does. Guard off ships the byte; guard on ships U+FFFD and
+    the mark; the engine path (the stub was called) is the same in both arms."""
+    reading = "the model read a coefficient of \x010.47 here"
+    lines = CONTROL_LINES
+    kw = {"provider": True, "model_text": reading}
+    _, eng_off = _run(tmp_path, "off", monkeypatch, lines, guard=False, **kw)
+    result, eng_on = _run(tmp_path, "on", monkeypatch, lines, **kw)
+    off, on = _page_text(tmp_path, "off"), _page_text(tmp_path, "on")
+    assert eng_on.calls == eng_off.calls
+    assert eng_on.calls > 0, "setup: the page went to the provider"
+    assert "\x01" in off, "setup: without the guard the model's byte ships"
+    assert "\x01" not in on and f"{REPLACEMENT_CHAR}0.47" in on
+    assert "control_bytes=FAIL" in on
+    assert "control_bytes_replaced" in _kinds(_sidecar(tmp_path, "on"))
+    assert result.status is not DocumentStatus.SUCCESS
+
+
 def test_a_control_byte_outside_the_digit_case_no_longer_ships_a_clean_success(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -379,14 +495,26 @@ def test_a_clean_page_is_untouched_by_the_guard(tmp_path: Path, monkeypatch, pro
     assert "control_bytes_replaced" not in _kinds(_sidecar(tmp_path, "on"))
 
 
+WRAPPER = f"[Footnote 1. {NOTE} End footnote 1.]"
 FOOT_LINES = [
-    f"policy rates.1 [Footnote 1. {NOTE} End footnote 1.]   On the other hand.",
+    ["policy rates.1", _hidden(WRAPPER), "On the other hand."],
     "more body text on the page.",
-    f"1 {NOTE}",
+    "",
+    "",
+    f"1 {NOTE}",  # a footnote sits apart from the body: its own paragraph in the shipped text
+]
+VISIBLE_WRAPPER_LINES = [  # the same bytes in the layer, but the PDF paints them
+    f"policy rates.1 {WRAPPER} On the other hand.",
+    "more body text on the page.",
+    "",
+    "",
+    f"1 {NOTE}",  # a footnote sits apart from the body: its own paragraph in the shipped text
 ]
 DIFFERING_LINES = [
     FOOT_LINES[0],
     "more body text on the page.",
+    "",
+    "",
     "1 The advance estimate for second-quarter GDP will be released today.",
 ]
 
@@ -488,3 +616,86 @@ def test_resume_restores_the_control_byte_page_with_its_mark_and_event(
         e for e in first["audit_events"] if e["kind"] == "control_bytes_replaced"
     ]
     assert result.status is not DocumentStatus.SUCCESS
+
+
+@pytest.mark.parametrize("provider", [True, False])
+def test_a_wrapper_the_pdf_paints_is_kept_through_the_pipeline(
+    tmp_path: Path, monkeypatch, provider: bool
+) -> None:
+    """Same bytes in the layer as FOOT_LINES, but drawn: the guard must leave the page alone."""
+    _run(tmp_path, "off", monkeypatch, VISIBLE_WRAPPER_LINES, provider=provider, guard=False)
+    _run(tmp_path, "on", monkeypatch, VISIBLE_WRAPPER_LINES, provider=provider)
+    on = _page_text(tmp_path, "on")
+    assert "[Footnote 1." in on, "setup: the wrapper is in the shipped layer"
+    assert on == _page_text(tmp_path, "off")
+    assert "hidden_footnote_stripped" not in _kinds(_sidecar(tmp_path, "on"))
+
+
+def test_the_inline_strip_keeps_the_token_boundary_through_the_pipeline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lines = [["Growth", _hidden(WRAPPER), "slowed."], "", "", f"1 {NOTE}"]
+    _run(tmp_path, "on", monkeypatch, lines, provider=False)
+    on = _page_text(tmp_path, "on")
+    assert "[Footnote" not in on
+    assert "Growth slowed." in on and "Growthslowed" not in on
+
+
+def _guard(engine: str, painted: str | None, text: str):
+    from socr.core.result import PageOutput, PageStatus
+    from socr.core.state import PageState
+
+    p = PageState(page_num=1)
+    p.painted_layer_text = painted
+    out = PageOutput(page_num=1, text=text, status=PageStatus.SUCCESS, engine=engine)
+    return manifest._apply_damaged_layer_guard(out, p).text, p
+
+
+def test_the_guard_never_rewrites_a_model_reading() -> None:
+    """Astra/cubic: a model reading that happens to carry a wrapper and a printed note is the
+    model's text. It is not stripped, and nothing is recorded for the event writer."""
+    page = _page()
+    text, p = _guard("qwen", CLEAN, page)
+    assert text == page
+    assert p.hidden_footnotes_stripped == []
+
+
+def test_the_guard_strips_native_text_only_with_painted_evidence() -> None:
+    page = _page()
+    text, p = _guard("native", CLEAN, page)
+    assert "[Footnote" not in text
+    assert [s["note"] for s in p.hidden_footnotes_stripped] == [1]
+    assert _guard("native", None, page)[0] == page, "no evidence, no strip"
+
+
+def _actualtext_pdf(path: Path, replacement: str) -> Path:
+    """A page whose visible ``1`` carries ``/ActualText`` *replacement*, as the Fed's tagged
+    PDFs carry the footnote wrapper: extraction returns the replacement, the page paints ``1``."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 50), "placeholder", fontname="helv")  # creates the content stream
+    hexed = "FEFF" + replacement.encode("utf-16-be").hex().upper()
+    stream = "BT /helv 10 Tf 72 700 Td (policy rates.) Tj ET\n"
+    stream += f"BT /helv 10 Tf 150 700 Td /Span <</ActualText <{hexed}>>> BDC (1) Tj EMC ET\n"
+    doc.update_stream(page.get_contents()[0], stream.encode())
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_painted_glyphs_of_an_actualtext_wrapper_page_lack_the_frame(tmp_path: Path) -> None:
+    """The layer reads the wrapper; the page paints only the ``1``. This is the evidence the
+    strip rests on, taken from a real ``/ActualText`` marked-content PDF."""
+    from socr.core.born_digital import BornDigitalDetector
+
+    pdf = _actualtext_pdf(tmp_path / "a.pdf", f"1 {WRAPPER}")
+    with fitz.open(pdf) as doc:
+        page = doc[0]
+        assert "[Footnote 1." in page.get_text("text"), "setup: the layer carries the wrapper"
+        painted = BornDigitalDetector()._painted_layer_text(page)
+    assert painted is not None and "footnote" not in painted
+    assert "policyrates.1" in painted
+    # And a wrapper actually drawn is in the painted glyphs.
+    drawn = _pdf(tmp_path / "d.pdf", [WRAPPER])
+    with fitz.open(drawn) as doc:
+        assert "footnote1." in BornDigitalDetector()._painted_layer_text(doc[0])
