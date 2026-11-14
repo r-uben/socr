@@ -201,6 +201,17 @@ class PageState:
     #: rather than write an empty list or drop the record.
     persisted_words_missing_events: list[dict] = field(default_factory=list)
     persisted_text_layer_words: dict | None = None
+    #: #1306: what the damaged-layer guard did to this page's shipped text, set at the
+    #: finalisation seam (``manifest._apply_damaged_layer_guard``) and read there by the verdict
+    #: clause and by the audit events. Runtime only: a resumed page takes its mark from the
+    #: published verdict and its events from the replayed sidecar events, so a field that is
+    #: empty in a new process loses nothing.
+    #: ``{"U+0003": 2}``: the control bytes replaced by U+FFFD, by code point.
+    control_bytes_replaced: dict[str, int] = field(default_factory=dict)
+    #: One ``StrippedFootnote.to_dict()`` per hidden footnote wrapper removed, and the words
+    #: those wrappers held (excused from the words check's reference, which holds them too).
+    hidden_footnotes_stripped: list[dict] = field(default_factory=list)
+    hidden_footnote_words: str = ""
     #: #960: the non-zero garbled-math signal counts and whether that scan failed (unknown,
     #: treated as a hit). See ``born_digital.GarbledMathSignals``.
     garbled_math_signals: dict[str, int] = field(default_factory=dict)
