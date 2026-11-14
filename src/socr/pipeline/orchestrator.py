@@ -4253,9 +4253,6 @@ class UnifiedPipeline:
             {
                 "crop_path": region.crop_path,
                 "source_text_aligned": region.source_aligned,
-                # #1305: the source line carries prose, so its native text ships whole
-                # and the candidate sits beside it.
-                "native_line_kept": region.keeps_native_line,
                 "validation_ok": region.validation_ok,
                 "validation_reason": region.validation_reason,
                 "model_id": region.model_id,

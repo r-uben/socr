@@ -353,13 +353,15 @@ def test_complete_aligned_recovery_clears_this_warning_only(tmp_path: Path) -> N
         tmp_path, corrupt=True, regions=[_region(DAMAGED_EQUATION)], tag="covered"
     )
 
-    assert _unresolved_events(state) == [], (
-        "a fully covered page still reports unrecovered math glyphs"
-    )
-    assert "unrecovered math glyphs" not in (result.error or "")
+    # #1305 (never delete source text): the reading sits BESIDE the native glyphs, so the
+    # damaged codepoints still ship and the page keeps its math mark.
+    events = _unresolved_events(state)
+    assert len(events) == 1
+    assert "survive in the selected body" in events[0].data["reason"]
+    assert "unrecovered math glyphs" in (result.error or "")
 
     body = result.pages[0].text
-    assert count_pua_chars(body) == 0
+    assert count_pua_chars(body) > 0
     assert r"\hat{T} = f_o(T)" in body
 
     # The existing, separate uncertainty survives untouched.
@@ -634,7 +636,8 @@ def test_complete_evidence_survives_the_round_trip(tmp_path: Path) -> None:
     pipeline, state, _, out_dir = _run(
         tmp_path, corrupt=True, regions=[_region(DAMAGED_EQUATION)], tag="resume_covered"
     )
-    assert _unresolved_events(state) == []
+    fresh_events = _unresolved_events(state)
+    assert len(fresh_events) == 1  # #1305: the native glyphs stay, so the mark stays
 
     sidecar = json.loads(next(out_dir.rglob("pages/00001.json")).read_text())
     assert sidecar["math_recovery_evidence"]["regions_total"] == 1
@@ -650,15 +653,9 @@ def test_complete_evidence_survives_the_round_trip(tmp_path: Path) -> None:
     pipeline._restore_terminal_page_state(resumed, 1, page_out, out_dir)
 
     assert resumed.pages[1].math_recovery_evidence is not None
-    assert _unresolved_events(resumed) == []
-    assert (
-        unresolved_math_detail(
-            has_unmapped_math_glyphs=resumed.pages[1].has_unmapped_math_glyphs,
-            evidence=resumed.pages[1].math_recovery_evidence,
-            text=page_out.text,
-        )
-        is None
-    )
+    assert [e.data["reason"] for e in _unresolved_events(resumed)] == [
+        e.data["reason"] for e in fresh_events
+    ]
 
 
 def test_a_fresh_recovery_outranks_a_restored_one(tmp_path: Path) -> None:

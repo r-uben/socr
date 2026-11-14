@@ -4,7 +4,8 @@ The corrupt-math lane read the printed glyphs of "2¾ percent" as font damage, t
 replaced the whole prose line with a candidate (``2^{3/4}``). Two guards:
 
 * the trigger: a vulgar fraction counts as the '=' mojibake only in operator position;
-* the splice: a resolved region over a source that carries prose keeps the native line.
+* the splice: a resolved region never replaces its native line (owner rule: never
+  delete source text); crop, label and candidate go after it.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from socr.core.born_digital import (
     BornDigitalDetector,
     corrupt_math_glyph_count,
     line_has_corrupt_math,
-    line_has_prose_run,
 )
 from socr.math import recover as recover_module
 from socr.math.recover import (
@@ -35,26 +35,55 @@ _FED_SENTENCE = (
     "year and then gradually slows to 1¾ percent in 2020."
 )
 
-#: Real printed fractions, taken from the 156-doc Fed run.
-_PRINTED = [
-    _FED_SENTENCE,
-    "higher. We now expect the unemployment rate to be around 8 ½% by the end of 2011 and 7 ½ % by the end ",
-    "deflator are now likely to top out in the 2 ½ % to 2 ¾% range in 2011Q3. Reflecting the higher readings on ",
-    "the Committee decided to [maintain] {raise} the target range for the federal funds rate [at ½] to 3/4 {to 1} percent. The stance",
-    "funds rate in a target range of [¼ to] ½{ to ¾}[¼ to] ½{ to ¾}percent, including overnight reverse ",
-    "the Committee raised rates by a ¼ percentage point cut in rates today",
-    "the ¼-point increase was widely expected by the market this year",
+#: (line, is_printed_fraction). Every verdict of the trigger rule, pinned. The first
+#: group is taken from the 156-doc Fed run.
+_VERDICTS = [
+    # printed: glued after a digit, not followed by a digit
+    (_FED_SENTENCE, True),
+    ("growth of 2¾", True),
+    ("an 8 ½% rate, up from 2¾% last year", True),
+    # printed: stand-alone after a number, before a word or %
+    ("We now expect the unemployment rate to be around 8 ½% by the end of 2011 and 7 ½ % by", True),
+    ("deflator are now likely to top out in the 2 ½ % to 2 ¾% range in 2011Q3.", True),
+    ("it grew 1 ¼ percent", True),
+    ("1 ¼ percent", True),
+    # printed: after an article or word, before a word
+    ("the Committee raised rates by a ¼ percentage point cut in rates today", True),
+    ("a ¼ point cut", True),
+    ("the ½ share of output", True),
+    ("raised it ¼ percentage point", True),
+    # printed: hyphen compound, bracketed series
+    ("the ¼-point increase was widely expected", True),
+    ("target range for the federal funds rate [at ½] to 3/4 {to 1} percent. The stance", True),
+    ("range of [¼ to] ½{ to ¾}[¼ to] ½{ to ¾}percent, including overnight reverse", True),
+    ("a state-of-the-art ¼ share", True),
+    # printed: dash and sign neighbours, a line that ends on the number (wrapped)
+    ("a 3¼ percent in the third quarter—½ percentage point faster", True),
+    ("plunging to -¼ percent in the third quarter", True),
+    ("the move was −¼ percent", True),
+    ("Potential GDP growth is 2 ½ ", True),
+    ("real GDP ½ percentage point lower at the end", True),
+    ("the ¾ percent—is well below its average", True),
+    ("by mid-2018—about ½ percentage point", True),
+    # operator: the '=' mojibake
+    ("10¼5", False),
+    ("x¼1", False),
+    ("2 ¼ 4", False),
+    ("see 2 ¼ 4", False),
+    ("x ¼ y", False),
+    ("y ¼ αx", False),
+    ("y ¼ ax", False),
+    ("P ¼ NP", False),
+    ("log likelihood ¼ 0", False),
+    ("a ¼ sin x", False),
+    ("a ¼ b", False),
+    ("f(x) ¼ 1", False),
+    ("y ¼ sin x and then the model holds up", False),
+    ("the state-of-the-art model y ¼ x holds", False),
+    ("rate ¼ 3", False),
 ]
-
-#: The '=' -> '¼' mojibake of non-TeX fonts (AdvP4C4E74, AdvOT*, MTSYN, Symbol).
-_OPERATOR = [
-    "y ¼ αx",
-    "y ¼ ax",
-    "x¼1",
-    "P ¼ NP",
-    "y ¼ sin x and then the model holds up",
-    "see 2 ¼ 4",
-]
+_PRINTED = [line for line, printed in _VERDICTS if printed]
+_OPERATOR = [line for line, printed in _VERDICTS if not printed]
 
 _MOJIBAKE = "PðA or BÞ ¼ PðAÞ þ PðBÞ"
 
@@ -66,10 +95,19 @@ def test_printed_fractions_are_not_corrupt_math(line):
 
 
 @pytest.mark.parametrize("line", _OPERATOR)
-def test_standalone_operator_fraction_glyph_stays_detected(line):
+def test_operator_fraction_glyph_stays_detected(line):
     """Carbon: 14.5% of the Papers library depends on '¼' standing in for '='."""
     assert corrupt_math_glyph_count(line) >= 1
     assert line_has_corrupt_math(line)
+
+
+def test_hyphen_compounds_are_plain_words():
+    from socr.core.born_digital import _is_plain_word
+
+    assert _is_plain_word("state-of-the-art")
+    assert not _is_plain_word("-x")
+    assert _is_plain_word("GDP")
+    assert not _is_plain_word("x")
 
 
 def test_delimiter_mojibake_and_c0_still_count_everywhere():
@@ -136,49 +174,39 @@ def _resolved(source, latex, crop="equations/crop.png"):
 
 
 _MIXED = "In the model PðAÞ ¼ 2¾ percent growth this year and then slows."
+#: Sources whose prose is short or hyphenated: no prose-run test may decide deletion.
+_SHORT_LABEL = "Real GDP ðx"
+_HYPHENATED = "The state-of-the-art model PðAÞ ¼ 1"
+_PURE = "ðxÞ ¼ y"
 
 
-def test_resolved_mixed_line_keeps_the_whole_native_line():
-    assert line_has_prose_run(_MIXED)
-    native = f"Before.\n{_MIXED}\nAfter."
-    region = _resolved(_MIXED, r"P(A) = 2^{3/4}")
+@pytest.mark.parametrize("source", [_MIXED, _SHORT_LABEL, _HYPHENATED, _PURE, _MOJIBAKE])
+def test_resolved_region_keeps_the_whole_native_line(source):
+    native = f"Before.\n{source}\nAfter."
+    region = _resolved(source, r"P(A) = 2^{3/4}")
     out = splice_math(None, native, [region])
 
-    assert out.startswith(f"Before.\n{_MIXED}\n")
+    assert out.startswith(f"Before.\n{source}\n")
     assert out.endswith("\nAfter.")
     assert region.source_aligned is True
     assert "![Corrupt equation crop](equations/crop.png)" in out
     assert "equation candidate, unverified" in out
     assert r"P(A) = 2^{3/4}" in out
-    # the native mixed number precedes the candidate and is labelled against it
-    assert out.index("2¾") < out.index("2^{3/4}")
+    # the native text precedes the crop, and the label precedes the candidate
+    assert out.index(source) < out.index("![Corrupt equation crop]")
     assert out.index("equation candidate, unverified") < out.index("2^{3/4}")
 
 
-def test_resolved_pure_equation_line_is_still_replaced():
-    native = f"Prose before here today.\n{_MOJIBAKE}\nAfter."
-    out = splice_math(None, native, [_resolved(_MOJIBAKE, "P(A)=1")])
-    assert "¼" not in out and "ð" not in out
-    assert "equation candidate, unverified" not in out
-
-
-def test_mixed_region_is_not_credited_as_recovered_in_place():
-    from socr.math.accounting import corrupt_region_evidence
-
-    region = _resolved(_MIXED, "x=1")
-    splice_math(None, _MIXED, [region])
-    evidence = corrupt_region_evidence([region], _MIXED)
-    assert evidence["covered_replacements"] == []
-
-
-def test_recover_then_splice_on_a_real_mixed_page(tmp_path):
-    _doc, page = _page([(100, _MIXED)])
+@pytest.mark.parametrize("source", [_MIXED, _SHORT_LABEL, _HYPHENATED, _PURE])
+def test_recover_then_splice_on_a_real_page(tmp_path, source):
+    _doc, page = _page([(100, source)])
     ocr = MagicMock(return_value=r"P(A) = 2^{3/4}")
     regions = recover_math_regions(page, ocr=ocr, crop_dir=tmp_path / "eq", page_num=1)
     native = page.get_text("text").rstrip("\n")
     out = splice_math(page, native, regions)
     assert len(regions) == 1 and regions[0].resolved
-    assert _MIXED in out
+    assert source in out
+    assert out.index(source) < out.index("equation candidate, unverified")
 
 
 # --- process(): the pair, in both provider states -----------------------------------------

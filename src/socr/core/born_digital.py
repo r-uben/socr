@@ -183,39 +183,47 @@ _MATH_CORRUPTION_GLYPHS = _MATH_MOJIBAKE_CHARS | _C0_CONTROL_CHARS
 #: Glyphs that count wherever they appear (everything except the fraction glyphs).
 _ALWAYS_CORRUPT_GLYPHS = _MATH_DELIMITER_MOJIBAKE_CHARS | _C0_CONTROL_CHARS
 
-#: A run of this many consecutive plain words is a sentence fragment, not an equation.
-#: Operator words in a formula come singly or in pairs ("P(A or B)", "for all x"); three
-#: in a row is the shortest run that carries a clause. It decides two things: whether a
-#: fraction glyph between words is a printed fraction, and whether a recovered line
-#: carries prose that must not be deleted (``line_has_prose_run``).
-PROSE_RUN_WORDS = 3
 #: Letters a token needs to count as a plain word (one letter is a variable).
 _PLAIN_WORD_MIN_LETTERS = 2
 _WORD_EDGE_PUNCT = ".,;:!?()[]{}\"'‘’“”"
-_HYPHENS = "-‐‑–"
-
-
+#: Hyphens and dashes. They join words ("state-of-the-art", "percent—is") and sit against a
+#: fraction as punctuation ("quarter—½ point"), never as an operand.
+_HYPHENS = "-‐‑–—"
 _OPENERS = "[{("
 _CLOSERS = "]})%.,;:"
+#: Punctuation that may touch a fraction glyph without being its neighbour: brackets, a
+#: trailing '%', a dash, and a leading sign ("-¼ percent", "−¼ percent").
+_GLUE_PUNCT = _OPENERS + _CLOSERS + _HYPHENS + "−"
+#: The one-letter English article. It is the only single letter that is a word, so it is
+#: the only one ``_is_printed_fraction`` has to tell apart from a variable.
+_ARTICLE = "a"
 
 
 def _is_plain_word(token: str) -> bool:
+    """A word of prose: letters only, hyphen compounds allowed, at least two letters.
+
+    ``state-of-the-art`` and ``GDP`` are words; ``x``, ``-x``, ``αx`` and ``f(x)`` are not.
+    An upper-case name like ``NP`` is a word too: ``P ¼ NP`` is caught by its one-letter
+    left side, not by the shape of the right.
+    """
     word = token.strip(_WORD_EDGE_PUNCT)
-    return (
-        len(word) >= _PLAIN_WORD_MIN_LETTERS
-        and word.isalpha()
-        and not any(ch in _MATH_CORRUPTION_GLYPHS for ch in word)
+    if not word or any(ch in _MATH_CORRUPTION_GLYPHS for ch in word):
+        return False
+    parts = word.translate({ord(h): " " for h in _HYPHENS}).split(" ")
+    return all(part.isalpha() for part in parts) and any(
+        len(part) >= _PLAIN_WORD_MIN_LETTERS for part in parts
     )
 
 
-def line_has_prose_run(line: str) -> bool:
-    """True if the line holds ``PROSE_RUN_WORDS`` consecutive plain words."""
-    run = 0
-    for token in line.split():
-        run = run + 1 if _is_plain_word(token) else 0
-        if run >= PROSE_RUN_WORDS:
-            return True
-    return False
+def _is_number(token: str) -> bool:
+    word = token.strip(_WORD_EDGE_PUNCT)
+    return bool(word) and all(ch.isdigit() or ch in ".," for ch in word)
+
+
+def _edge_piece(token: str, *, last: bool) -> str:
+    """The last (or first) dash-separated piece of ``token``; the token if that is empty."""
+    pieces = token.translate({ord(h): " " for h in _HYPHENS}).split()
+    return (pieces[-1] if last else pieces[0]) if pieces else token
 
 
 def _operand_tokens(text: str) -> list[str]:
@@ -235,47 +243,56 @@ def _operand_tokens(text: str) -> list[str]:
 def _is_printed_fraction(line: str, i: int) -> bool:
     """True if the fraction glyph at ``line[i]`` is a real printed fraction.
 
-    Real: attached to a digit before it (``2¾``), hyphen-compounded into a word
-    (``¼-point``), or a stand-alone token inside a sentence ("raised it ¼ percentage
-    point", "1 ¼ percent"). Operator (the '=' mojibake): everything else, in
-    particular ``y ¼ αx``, ``x¼1`` and ``P ¼ NP``, whose neighbours are variables or
-    numbers rather than words. Ties go to "operator": a false operator costs a crop, a
-    false fraction ships '=' as '¼' silently.
+    The rule, by neighbours (L = token before, R = token after, brackets and a ``%``
+    skipped, a neighbouring fraction of the same series skipped):
+
+    * glued after a digit and NOT followed by a digit: printed (``2¾``, ``2¾%``).
+      Followed by a digit it is the '=' of ``10¼5``: operator.
+    * glued before a hyphenated word (``¼-point``): printed.
+    * R is a number: operator (``x ¼ 0``, ``2 ¼ 4``, ``log likelihood ¼ 0``): a
+      fraction is never followed by a bare number in prose.
+    * L is a number: printed iff a ``%``, a word or the end of the line follows
+      (``1 ¼ percent``, ``8 ½%``, ``is 2 ½`` + wrapped ``percent``). A line never ends on
+      the '=' of ``2 ¼``: mojibake '=' sits between two operands.
+    * L is the article "a": printed iff a word follows and the word after that is a word
+      or absent (``a ¼ point cut``). ``a ¼ sin x`` ends on a variable: operator.
+    * L and R are each a plain word or missing: printed (``the ½ share``, ``raised it
+      ¼ point``).
+    * anything else is operator: a variable, a closing bracket or a math glyph on either
+      side (``x ¼ y``, ``y ¼ αx``, ``P ¼ NP``, ``f(x) ¼ 1``).
+
+    Ties go to "operator": a false operator costs a crop, a false fraction ships '='
+    as '¼' silently.
     """
     before = line[i - 1] if i else ""
     after = line[i + 1] if i + 1 < len(line) else ""
     if before.isdigit():
-        return True
+        return not after.isdigit()
     if after and after in _HYPHENS and i + 2 < len(line) and line[i + 2].isalpha():
         return True
-    # Neighbouring brackets and a trailing '%' are punctuation around the glyph, not
-    # operands: "[at ½] to 3/4", "an 8 ½% rate".
-    if (before and not before.isspace() and before not in _OPENERS + _CLOSERS) or (
-        after and not after.isspace() and after not in _OPENERS + _CLOSERS
+    # Neighbouring brackets, dashes, a sign and a trailing '%' are punctuation around the
+    # glyph, not operands: "[at ½] to 3/4", "an 8 ½% rate", "quarter—½ point", "-¼ percent".
+    if (before and not before.isspace() and before not in _GLUE_PUNCT) or (
+        after and not after.isspace() and after not in _GLUE_PUNCT
     ):
         return False
-    if not line_has_prose_run(line):
-        return False
-    left = _operand_tokens(line[:i].rstrip(_OPENERS + _CLOSERS + " \t"))
+    left = _operand_tokens(line[:i].rstrip(_GLUE_PUNCT + " \t"))
     tail = line[i + 1 :]
-    right_text = tail.lstrip(_OPENERS + _CLOSERS + " \t")
+    right_text = tail.lstrip(_GLUE_PUNCT + " \t")
     percent = "%" in tail[: len(tail) - len(right_text)]
     right = _operand_tokens(right_text)
-    left_tok = left[-1] if left else ""
-    right_tok = right[0] if right else ""
-    if not (left_tok or right_tok):
+    # The neighbour is the piece against the glyph: "mid-2018—about ½" -> "about".
+    left_tok = _edge_piece(left[-1], last=True) if left else ""
+    right_tok = _edge_piece(right[0], last=False) if right else ""
+    if not (left_tok or right_tok) or _is_number(right_tok):
         return False
-    if left_tok.isdigit():
-        # "1 ¼ percent", "8 ½% by": a number then a word or a percent sign. "2 ¼ 4" is math.
-        return percent or _is_plain_word(right_tok)
-    # An article or pronoun before the glyph ("a ¼ percentage point cut") is one letter,
-    # indistinguishable from a variable; the clause that follows it is what tells them
-    # apart, so a full prose run right after the glyph stands in for the left word.
-    right_run = len(right) >= PROSE_RUN_WORDS and all(
-        _is_plain_word(tok) for tok in right[:PROSE_RUN_WORDS]
+    if _is_number(left_tok):
+        return percent or not right_tok or _is_plain_word(right_tok)
+    if left_tok.lower() == _ARTICLE:
+        return _is_plain_word(right_tok) and (len(right) < 2 or _is_plain_word(right[1]))
+    return (not left_tok or _is_plain_word(left_tok)) and (
+        not right_tok or _is_plain_word(right_tok)
     )
-    left_ok = not left_tok or _is_plain_word(left_tok) or right_run
-    return left_ok and (not right_tok or _is_plain_word(right_tok))
 
 
 def _line_glyph_count(line: str) -> int:
