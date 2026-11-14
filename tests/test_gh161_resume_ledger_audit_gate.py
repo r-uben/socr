@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from c3_support import give_word_evidence
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.result import FailureMode, PageOutput, PageStatus
@@ -95,6 +96,10 @@ def test_legacy_success_audit_false_sidecar_is_not_resume_skippable(
     ps.native_text = ""
     # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
     ps.own_layer_text = "Goldman Sachs 2.3 1.9 judge-rejected body text"
+    # #1251: the layer's words, the page's independent evidence (a judge's refusal is no check)
+    give_word_evidence(
+        ps, "Goldman Sachs plausible judge-rejected body text without demotion guards"
+    )
 
     rejected = PageOutput(
         page_num=1,
@@ -227,6 +232,8 @@ def test_audit_passed_success_page_is_still_resume_skippable(
     ps.native_text = ""
     # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
     ps.own_layer_text = "Goldman Sachs 2.3 1.9 accepted body text"
+    # #1251: a judge's acceptance is not a check; the layer's words are the independent evidence
+    give_word_evidence(ps, "Goldman Sachs accepted body text")
 
     accepted = PageOutput(
         page_num=1,

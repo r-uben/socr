@@ -30,6 +30,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from socr.core.page_files import page_sidecar_paths
 from socr.core.verdict import PageVerdict, write_reconciled_trace
 
 LOG_NAME = "refinalized_boilerplate.json"
@@ -134,7 +135,7 @@ def refinalize_document(doc_dir: Path, *, apply: bool = False) -> list[PageChang
     changes: list[PageChange] = []
     strip_writes: list[tuple[Path, Path, dict, str]] = []
     reocr_writes: list[tuple[Path, dict]] = []
-    for path in sorted(pages_dir.glob("[0-9]*.json")):
+    for path in page_sidecar_paths(pages_dir, "[0-9]*.json"):
         sidecar = _read_json(path)
         engine = (sidecar.get("winning_output") or {}).get("engine") or ""
         if engine not in model_reading_engines():

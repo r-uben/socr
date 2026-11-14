@@ -48,6 +48,8 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
+
+from socr.core.page_files import page_sidecar_paths
 from socr.core.verdict import (
     published_audit_passed,
     rerun_text_dependent_checks,
@@ -126,6 +128,7 @@ def repair_page(
         page_dropped_numbers,
         text_layer_drops_clause,
         text_layer_numbers_clause,
+        with_judge_only_clause,
         with_text_layer_numbers_clause,
     )
     from socr.judge.table_verdict import TABLE_POINT_REPAIRED_KIND
@@ -160,44 +163,6 @@ def repair_page(
         skipped["nothing to repair"] += 1
         return None
     new_results, _rot = check_page_row_binding(page, new_text, regions)
-
-    # The verdict: the two text-layer clauses recomputed on the repaired reading.
-    published = PageVerdict.from_dict(sidecar.get("verdict") or {})
-    output2 = replace(output, text=without_text_layer_marks(new_text, page_num))
-    as_run = slot_reference_state(sidecar, page_num)
-    text_checks = (Check.TEXT_LAYER_NUMBERS, Check.TEXT_LAYER_DROPS)
-    extended = replace(
-        published,
-        page_num=page_num,
-        clauses=tuple(c for c in published.clauses if c.check not in text_checks),
-    )
-    numbers = text_layer_numbers_clause(output2, p)
-    drops = text_layer_drops_clause(output2, p)
-    if numbers is not None:
-        extended = with_text_layer_numbers_clause(extended, numbers, output2, as_run, event_kinds)
-    if drops is not None:
-        extended = replace(extended, clauses=tuple(in_fresh_run_order((*extended.clauses, drops))))
-    if published.clauses and not extended.clauses:
-        why = "the page would lose every clause it carries (a lifted mark; #1282 lifts none)"
-        skipped[why] += 1
-        if named is not None:
-            named[page_num] = why
-        return None
-    final, verdict = apply_verdict_marks(output2, p, page_num, published=extended)
-
-    # The sidecar: record-derived keys, as ``refinalize_own_text._updated_sidecar``.
-    winning = final.to_dict()
-    new_sidecar = dict(sidecar)
-    new_sidecar["status"] = winning.get("status", "missing")
-    new_sidecar["failure_mode"] = winning.get("failure_mode", "none")
-    new_sidecar["audit_passed"] = published_audit_passed(
-        new_sidecar["status"], winning.get("audit_passed", False), verdict
-    )
-    new_sidecar["verdict"] = verdict.to_dict()
-    new_sidecar["winning_output"] = winning
-    new_sidecar["page_fingerprint"] = _page_blob_key(winning)
-    new_sidecar["socr_source_digest"] = _socr_source_digest()
-    new_sidecar["socr_version"] = _socr_version()
 
     # The row-binding record and events, from the check on the repaired text.
     payloads: dict[str, dict] = {}
@@ -239,8 +204,60 @@ def repair_page(
             if rows_data:
                 payload["repairs"] = rows_data
             payloads[table_id] = payload
+    row_binding_after = {**records, **payloads}
+
+    # The verdict: the two text-layer clauses recomputed on the repaired reading.
+    published = PageVerdict.from_dict(sidecar.get("verdict") or {})
+    output2 = replace(output, text=without_text_layer_marks(new_text, page_num))
+    as_run = slot_reference_state(sidecar, page_num)
+    text_checks = (Check.TEXT_LAYER_NUMBERS, Check.TEXT_LAYER_DROPS)
+    extended = replace(
+        published,
+        page_num=page_num,
+        clauses=tuple(c for c in published.clauses if c.check not in text_checks),
+    )
+    numbers = text_layer_numbers_clause(output2, p)
+    drops = text_layer_drops_clause(output2, p)
+    if numbers is not None:
+        extended = with_text_layer_numbers_clause(extended, numbers, output2, as_run, event_kinds)
+    if drops is not None:
+        extended = replace(extended, clauses=tuple(in_fresh_run_order((*extended.clauses, drops))))
+    # #1251: the page_judge clause as a live run derives it, from the trace this tool writes (the
+    # layer checks run again on the repaired text, and the row-binding entries are the REPAIRED
+    # payloads built above, which the written trace is reconciled with: a repaired table is never
+    # BOUND, so its UNKNOWN is evidence against the page). A page that gained a clause loses it.
+    extended = with_judge_only_clause(
+        extended,
+        output2,
+        sidecar.get("checks"),
+        event_kinds,
+        recomputed=rerun_text_dependent_checks(output2, p, sidecar.get("checks")),
+        row_binding_records=row_binding_after if payloads else None,
+    )
+    if published.clauses and not extended.clauses:
+        why = "the page would lose every clause it carries (a lifted mark; #1282 lifts none)"
+        skipped[why] += 1
+        if named is not None:
+            named[page_num] = why
+        return None
+    final, verdict = apply_verdict_marks(output2, p, page_num, published=extended)
+
+    # The sidecar: record-derived keys, as ``refinalize_own_text._updated_sidecar``.
+    winning = final.to_dict()
+    new_sidecar = dict(sidecar)
+    new_sidecar["status"] = winning.get("status", "missing")
+    new_sidecar["failure_mode"] = winning.get("failure_mode", "none")
+    new_sidecar["audit_passed"] = published_audit_passed(
+        new_sidecar["status"], winning.get("audit_passed", False), verdict
+    )
+    new_sidecar["verdict"] = verdict.to_dict()
+    new_sidecar["winning_output"] = winning
+    new_sidecar["page_fingerprint"] = _page_blob_key(winning)
+    new_sidecar["socr_source_digest"] = _socr_source_digest()
+    new_sidecar["socr_version"] = _socr_version()
+
     if payloads:
-        new_sidecar["row_binding"] = {**records, **payloads}
+        new_sidecar["row_binding"] = row_binding_after
     # #1183: keep the pass trace consistent with the verdict and the row-binding records this tool
     # wrote (no invention): the check ran here, so its table entries are the records' own.
     # It also ran every text-dependent check again on the repaired text (it holds the page state),
@@ -249,7 +266,7 @@ def repair_page(
         new_sidecar,
         sidecar.get("checks"),
         verdict,
-        row_binding_records=new_sidecar.get("row_binding") if payloads else None,
+        row_binding_records=row_binding_after if payloads else None,
         recomputed=rerun_text_dependent_checks(final, p, sidecar.get("checks")),
         text=final.text or "",
     )
@@ -376,7 +393,7 @@ def refinalize_document(
     meta_path = doc_dir / "metadata.json"
     if not pages_dir.is_dir():
         return []
-    sidecar_paths = sorted(pages_dir.glob("[0-9]*.json"))
+    sidecar_paths = page_sidecar_paths(pages_dir, "[0-9]*.json")
     candidates = []
     for path in sidecar_paths:
         sidecar = _read_json(path)

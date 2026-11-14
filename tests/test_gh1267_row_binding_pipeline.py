@@ -812,11 +812,27 @@ ABSENT_VALUES_ROWS = [*GROUP[:3], ("Net xprts", GROUP[3][1])]
 
 @pytest.mark.parametrize("rotation", [0, 90])
 def test_unverifiable_table_is_marked_without_claiming_a_contradiction(tmp_path, rotation):
+    # #1251: a judge's acceptance is not a check, so the control arm needs the layer's words
+    # in the reading. The table slip drops one word the layer prints ("exports"); the reading
+    # also names it in a line below the table (the page's words check passes for it), so the
+    # arms differ only in whether the row-binding check ran.
+    slip_markdown = md(ABSENT_VALUES_ROWS) + "\nNet exports\n"
     _, res_on, _, on, pdf = _run(
-        tmp_path, ABSENT_VALUES_ROWS, rotation, check_runs=True, out_name="on"
+        tmp_path,
+        ABSENT_VALUES_ROWS,
+        rotation,
+        check_runs=True,
+        out_name="on",
+        markdown=slip_markdown,
     )
     _, res_off, _, off, _ = _run(
-        tmp_path, ABSENT_VALUES_ROWS, rotation, check_runs=False, out_name="off", pdf=pdf
+        tmp_path,
+        ABSENT_VALUES_ROWS,
+        rotation,
+        check_runs=False,
+        out_name="off",
+        pdf=pdf,
+        markdown=slip_markdown,
     )
     side_on, side_off = _sidecar(on), _sidecar(off)
     assert side_on["winning_output"]["status"] == PageStatus.WARNING.value

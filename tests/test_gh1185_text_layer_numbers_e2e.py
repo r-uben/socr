@@ -25,6 +25,20 @@ from socr.pipeline.orchestrator import UnifiedPipeline, _page_blob_key
 
 from test_gh1156_part_a_interim import _FixedJudge
 
+#: A horizontal line of prose the page also prints. #1251: a model reading the page judge accepts
+#: is CHECKED only on an independent confirmation, and the layer of the rotated rows alone owes no
+#: word (rotated blocks are not words the check compares). This line is the page's own text layer
+#: that the faithful reading matches word for word, so the page has the evidence, and the one
+#: character of the numbers is still the only difference between the arms.
+_PROSE = "Quarterly growth by country as reported by the national statistics offices"
+
+
+def _prose(n: int) -> str:
+    """Page *n*'s line. It differs per page: text identical on every page is running furniture,
+    and the words check does not owe furniture."""
+    return f"{_PROSE} {('alpha', 'beta', 'gamma', 'delta')[n - 1]}"
+
+
 #: The page's rows, as the PDF prints them; ``-.8`` is the cell the motivating page lost.
 _ROWS = ("Korea 4.0 2.6 5.7 -.8 4.0", "China 6.9 7.0 6.6 6.4 7.1", "Mexico 2.3 1.1 2.5 2.4")
 
@@ -38,8 +52,9 @@ def _rotated_pdf(path: Path, *, pages: int = 2) -> Path:
     import fitz
 
     doc = fitz.open()
-    for _ in range(pages):
+    for n in range(1, pages + 1):
         page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 300), _prose(n), fontsize=9)
         for i, row in enumerate(_ROWS * 6):
             page.insert_text((100 + i * 20, 700), row, fontsize=9, rotate=90)
     doc.save(path)
@@ -63,12 +78,14 @@ class _Reader:
         from socr.core.result import PageOutput, PageStatus
 
         self._pages_read.extend(page_nums)
-        text = (
+        body = (
             f"Korea grew 4.0 2.6 5.7 {self._korea_q4} 4.0. China grew 6.9 7.0 6.6 6.4 7.1. "
             "Mexico grew 2.3 1.1 2.5 2.4."
         )
         return [
-            PageOutput(page_num=n, text=text, status=PageStatus.SUCCESS, engine="qwen")
+            PageOutput(
+                page_num=n, text=f"{_prose(n)}. {body}", status=PageStatus.SUCCESS, engine="qwen"
+            )
             for n in page_nums
         ]
 
@@ -204,6 +221,9 @@ def test_refinalize_then_resume_equals_a_run_of_this_code(
     old = tmp_path / "old"
     with monkeypatch.context() as m:
         m.setattr(verdict_module, "text_layer_numbers_clause", lambda output, p: None)
+        # An old run is a run before #1251 too: with the numbers clause gone its trace still
+        # says FAIL, which the page_judge clause (a later check) would read as "no evidence".
+        m.setattr(verdict_module, "_judge_only_clauses", lambda output, p, event_kinds: ())
         _run(old, pdf, monkeypatch, korea_q4="-8", pages_read=[])
     assert _clauses(_page(old)[0]) == [], "fixture premise: the old run already had the check"
 
@@ -300,6 +320,9 @@ def test_refinalize_carries_a_disagreement_to_the_document_and_the_root_index(
     _run(fresh, pdf, monkeypatch, korea_q4="-8", pages_read=[])
     with monkeypatch.context() as m:
         m.setattr(verdict_module, "text_layer_numbers_clause", lambda output, p: None)
+        # An old run is a run before #1251 too: with the numbers clause gone its trace still
+        # says FAIL, which the page_judge clause (a later check) would read as "no evidence".
+        m.setattr(verdict_module, "_judge_only_clauses", lambda output, p, event_kinds: ())
         _run(old, pdf, monkeypatch, korea_q4="-8", pages_read=[])
 
     def recorded(out: Path) -> tuple[dict, dict]:

@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+from c3_support import give_word_evidence
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.result import (
@@ -105,6 +106,9 @@ def _seed_and_flush(
     # #1185 round 2 (approved fixture change, Argon finding 8): a control given a layer is
     # given a born-digital one; agreement with a refused layer is no longer a CHECK
     ps.is_born_digital = bool(own_layer)
+    if own_layer:
+        # #1251: a judge's acceptance is not a check; the layer's words are the evidence
+        give_word_evidence(ps, accepted.text)
 
     # The fragment must be written from the FINALIZED record, as production does. Every
     # production call site of ``_flush_page_fragment`` passes finalized text --

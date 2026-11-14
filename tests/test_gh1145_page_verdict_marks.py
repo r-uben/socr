@@ -36,6 +36,7 @@ import pytest
 
 fitz = pytest.importorskip("fitz")
 
+from c3_support import reading_words  # noqa: E402
 from socr.core.config import EngineType, PipelineConfig  # noqa: E402
 from socr.core.document import DocumentHandle  # noqa: E402
 from socr.core.manifest import (  # noqa: E402
@@ -510,7 +511,12 @@ def test_the_fail_closed_fallback_marks_a_page_whose_reason_socr_cannot_name(
 
     checked_text = "Prose that ships 4.25."
     checked = _output(checked_text, status=PageStatus.SUCCESS, failure_mode=FailureMode.NONE)
-    layer = SimpleNamespace(own_layer_text="Prose that ships 4.25.", is_born_digital=True)
+    # #1251: the layer's words too: a judge's acceptance alone is not a check.
+    layer = SimpleNamespace(
+        own_layer_text="Prose that ships 4.25.",
+        is_born_digital=True,
+        own_layer_word_reference=reading_words(checked_text),
+    )
     out_ok, verdict_ok = _apply_verdict_marks(checked, layer, 1)
     assert_agreed_on(calls, "4.25")
     assert verdict_ok.checked, "the fallback fired on a page socr DID confirm"

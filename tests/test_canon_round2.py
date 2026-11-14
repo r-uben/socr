@@ -39,6 +39,7 @@ from ocr_output_contract import (  # noqa: E402
     relative_key,
 )
 
+from c3_support import give_word_evidence  # noqa: E402
 from socr.core.config import EngineType, PipelineConfig  # noqa: E402
 from socr.core.result import (  # noqa: E402
     DocumentStatus,
@@ -96,6 +97,8 @@ def _backbone_writing_pages(text_by_page):
             text = f"{text} 4.2"
             state.pages[page_num].own_layer_text = text
             state.pages[page_num].is_born_digital = True
+            # #1251: a judge's acceptance is not a check; the layer's words are the evidence
+            give_word_evidence(state.pages[page_num], text)
             state.pages[page_num].best_output = PageOutput(
                 page_num=page_num,
                 text=text,

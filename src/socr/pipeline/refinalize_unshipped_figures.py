@@ -36,7 +36,13 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from socr.core.verdict import in_fresh_run_order, published_audit_passed, write_reconciled_trace
+from socr.core.page_files import page_sidecar_paths
+from socr.core.verdict import (
+    in_fresh_run_order,
+    published_audit_passed,
+    with_judge_only_clause,
+    write_reconciled_trace,
+)
 from socr.figures.unshipped_figures import (
     CHART_SKELETON_KIND,
     EVENT_KINDS,
@@ -321,14 +327,16 @@ def refinalize_page(
         return None
     for name, value in decision.state_fields.items():
         setattr(p, name, value)
-    output, verdict = refinalize_unshipped_figure_page(
-        output,
-        p,
-        page_num,
-        published=_published_verdict(
+    # #1251: this lane's clause is another clause on the page, so a page_judge clause an earlier
+    # pass wrote is dropped (a live run gives the judge-only clause to a page nothing else marks).
+    published = with_judge_only_clause(
+        _published_verdict(
             sidecar, page_num, clause_records(page_num, decision.unlocated, decision.kind)
         ),
+        output,
+        sidecar.get("checks"),
     )
+    output, verdict = refinalize_unshipped_figure_page(output, p, page_num, published=published)
     return output, verdict, decision
 
 
@@ -407,7 +415,7 @@ def _answered_sidecars(pages_dir: Path, pending: dict[int, dict]) -> list[dict]:
     as the disk, because the sidecars are written LAST and are the commit point.
     """
     out: list[dict] = []
-    for path in sorted(pages_dir.glob("*.json")):
+    for path in page_sidecar_paths(pages_dir):
         try:
             data = _read_json(path)
         except (OSError, ValueError):
@@ -494,7 +502,7 @@ def refinalize_document(
     changes: list[PageChange] = []
     fragments: list[tuple[Path, str]] = []
     sidecars: list[tuple[Path, dict]] = []
-    for sidecar_path in sorted(pages_dir.glob("*.json")):
+    for sidecar_path in page_sidecar_paths(pages_dir):
         sidecar = _read_json(sidecar_path)
         result = refinalize_page(sidecar, pdf, figures_dir, max_per_page, render=not dry_run)
         if result is None:
@@ -539,9 +547,8 @@ def refinalize_document(
     manifest_path = doc_dir / "manifest.json"
     if manifest_path.is_file():
         from socr.core.cache import BlobStore
-        from socr.core.result import PageOutput
-
         from socr.core.manifest import page_asset_refs
+        from socr.core.result import PageOutput
 
         manifest = _read_json(manifest_path)
         store = BlobStore(doc_dir / "cache")

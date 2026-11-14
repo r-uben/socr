@@ -96,12 +96,13 @@ def _grid_pdf(path: Path, pages: int) -> Path:
     return path
 
 
-def _route_fn(page_num, ladder, run_provider, judge, **kwargs):
-    """Every page routes to a fixed candidate missing two native columns."""
+def _route_fn(page_num, ladder, run_provider, judge, *, reading_text=None, **kwargs):
+    """Every page routes to a fixed candidate missing two native columns (or *reading_text*,
+    which a fixture passes so the judge assesses the very reading that ships)."""
     prof = ladder[0]
     out = PageOutput(
         page_num=page_num,
-        text=_MISSING_COLUMNS_CANDIDATE,
+        text=_MISSING_COLUMNS_CANDIDATE if reading_text is None else reading_text,
         status=PageStatus.SUCCESS,
         # Label the output with the profile it is actually packaged under.
         # A hardcoded name here can disagree with `ladder[0]` and make the

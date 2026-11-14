@@ -1041,15 +1041,64 @@ class VLMPageJudge:
     the document handle and testable.
     """
 
-    def __init__(self, judge, render_image: Callable[[int], object]) -> None:
+    def __init__(
+        self,
+        judge,
+        render_image: Callable[[int], object],
+        record_call: Callable[[dict], None] | None = None,
+    ) -> None:
         self._judge = judge
         self._render_image = render_image
+        # #1251: every call this judge makes is handed to this callback, reply included, so the
+        # page's side file holds it. ``None`` keeps the judge usable standalone.
+        self._record_call = record_call
+
+    def _record(self, page_num: int, build_record: Callable[[], dict]) -> None:
+        """Hand one call record to the recorder. The record is BUILT in here, inside the same
+        fail-open boundary as the hand-over: a failure to build or keep it must never decide a
+        verdict, replace a judge's own exception, or fail the page."""
+        if self._record_call is None:
+            return
+        try:
+            self._record_call(build_record())
+        except Exception as exc:
+            logger.warning("page-judge call record failed on p%s: %s", page_num, exc)
 
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
+        from socr.judge.judge import (
+            JUDGE_CALL_ERROR,
+            JUDGE_CALL_TIMEOUT,
+            JUDGE_CALL_VERDICT,
+            judge_call_record,
+        )
+
         if output.status != PageStatus.SUCCESS or not output.text.strip():
             return AcceptDecision(accept=False, reason="empty/error output")
         image_path = self._render_image(output.page_num)
-        verdict = self._judge.judge(image_path, output.text)
+        try:
+            verdict = self._judge.judge(image_path, output.text)
+        except Exception as exc:
+            self._record(
+                output.page_num,
+                lambda exc=exc: judge_call_record(
+                    page_num=output.page_num,
+                    outcome=JUDGE_CALL_TIMEOUT if is_page_judge_timeout(exc) else JUDGE_CALL_ERROR,
+                    judge=self._judge,
+                    reading=output.text,
+                    error=exc,
+                ),
+            )
+            raise
+        self._record(
+            output.page_num,
+            lambda: judge_call_record(
+                page_num=output.page_num,
+                outcome=JUDGE_CALL_VERDICT,
+                judge=self._judge,
+                reading=output.text,
+                verdict=verdict,
+            ),
+        )
         return AcceptDecision(
             accept=bool(verdict.faithful),
             reason="; ".join(verdict.issues) if verdict.issues else "faithful",

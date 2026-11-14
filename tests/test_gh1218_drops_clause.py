@@ -94,8 +94,12 @@ def test_a_dropped_row_fails_and_names_every_number() -> None:
 
 
 def test_the_same_page_with_and_without_the_row_differs_only_in_the_clause() -> None:
+    # #1251: the full arm is CHECKED by the layer's words, not by a judge: the one word both
+    # arms carry (the dropped row's own label is not owed here, so the arms differ only in the
+    # dropped numbers).
+    evidence = _p(own_layer_word_reference="korea")
     got = {
-        name: [c.check for c in silent_success_clauses(_out(text), _p())]
+        name: [c.check for c in silent_success_clauses(_out(text), evidence)]
         for name, text in (("full", FULL), ("short", MISSING_ROW))
     }
     assert got["full"] == []

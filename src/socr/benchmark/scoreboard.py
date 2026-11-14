@@ -34,6 +34,8 @@ import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
+from socr.core.page_files import page_sidecar_paths
+
 # In-text marks a reader can see: a ``> [`` line, a failed-page stub, a withheld number.
 _MARK_RE = re.compile(r"^> \[|\[page \d+ failed|\[number withheld", re.M)
 # Control bytes other than tab/newline/carriage return, and the Unicode private-use area.
@@ -48,6 +50,17 @@ _WORD_RE = re.compile(r"[A-Za-z]{4,}")
 _BANNER_RE = re.compile(r"^> \[.*$", re.M)
 _IMAGE_MD_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+
+#: #1251: a words PASS that compared fewer than this many words is counted as WEAK
+#: (``records.pages_weak_words_pass``). A reporting bucket, not a gate: it moves a counter and
+#: nothing that ships, and it was NOT used to change the release rule (#1251 ruling).
+#: Derivation (docs/log/2026-11-14_1251-judge-not-a-check.md, "Weak words passes"): on the 43 qwen
+#: SUCCESS pages of the Fed words run the words check compared 4 to 550 words, lower quartile
+#: 19-25. 20 words is about one sentence of running text: a pass on fewer is a pass on a title or a
+#: caption, which a model can reproduce without having read the page. It separates nothing the
+#: gold labels call defective (one defective page compared 5 words, the other eight 123 or more),
+#: which is why it is a counter to watch and not a gate.
+WEAK_WORDS_PASS_BELOW = 20
 
 GROUPS = ("coverage", "labels", "tells", "events", "textlayer", "records", "gold")
 # Counts kept in --json but not rendered: one row per value would bury the table.
@@ -95,7 +108,7 @@ def _read_json(path: Path) -> dict | None:
 
 def _doc_rank(doc_dir: Path) -> tuple[int, int]:
     return (
-        len(list((doc_dir / "pages").glob("*.json"))),
+        len(page_sidecar_paths(doc_dir / "pages")),
         int((doc_dir / "metadata.json").exists()),
     )
 
@@ -117,6 +130,68 @@ def _checks(sidecar: dict) -> list[dict]:
 
     raw = sidecar.get("checks")
     return raw if trace_from_dicts(raw) is not None else []
+
+
+def _pass_digest_mismatch(sidecar: dict, checks: list[dict]) -> bool:
+    """True when some PASS of the page's trace is not tied to ``winning_output.text`` (the text
+    the sidecar itself holds): the digest differs, is absent, or names a table block that text
+    does not have. The same rule the writers apply (``verify_pass_digests``)."""
+    from socr.core.pass_trace import trace_from_dicts
+    from socr.core.verdict import verify_pass_digests
+
+    entries = trace_from_dicts(checks)
+    if not entries or not any(e.result.value == "PASS" for e in entries):
+        return False
+    winning = sidecar.get("winning_output")
+    text = winning.get("text") if isinstance(winning, dict) else None
+    if not isinstance(text, str):
+        return True
+    return any(
+        a.result is not b.result for a, b in zip(entries, verify_pass_digests(entries, text))
+    )
+
+
+def _words_pass_page_scope(sidecar: dict, checks: list[dict]) -> bool:
+    """True when the page-scope words check is a PASS that still names the sidecar's own winning
+    text: the digest rule the writers apply (``verify_pass_digests``) comes first, so a stale or
+    digest-less PASS is not evidence and not counted."""
+    from socr.core.pass_trace import trace_from_dicts
+    from socr.core.verdict import verify_pass_digests
+
+    winning = sidecar.get("winning_output")
+    text = winning.get("text") if isinstance(winning, dict) else None
+    entries = trace_from_dicts(checks)
+    if not entries or not isinstance(text, str):
+        return False
+    return any(
+        e.check == "text_layer_words" and e.result.value == "PASS" and e.scope == "page"
+        for e in verify_pass_digests(entries, text)
+    )
+
+
+def _model_success_without_evidence(sidecar: dict, checks: list[dict], status: str) -> bool:
+    """#1251 (C3): a model-read page that ships SUCCESS although its pass trace holds no
+    independent evidence of the text the sidecar itself carries (``independent_page_evidence``:
+    digest-verified words PASS and numbers PASS or not-applicable, nothing FAIL or UNKNOWN). The
+    invariant C3 enforces; expected 0."""
+    from socr.core.pass_trace import trace_from_dicts
+    from socr.core.verdict import engine_is_model_reading, independent_page_evidence
+
+    if status != "success" or not engine_is_model_reading(str(sidecar.get("engine") or "")):
+        return False
+    winning = sidecar.get("winning_output")
+    text = winning.get("text") if isinstance(winning, dict) else None
+    if not isinstance(text, str):
+        return True  # a sidecar with no readable winning text holds no evidence of one
+    entries = trace_from_dicts(checks) or ()
+    return not independent_page_evidence(entries, text)
+
+
+def _words_compared(sidecar: dict) -> int | None:
+    """The ``compared`` count of the sidecar's ``text_layer_words`` record (#1294), or ``None``."""
+    record = sidecar.get("text_layer_words")
+    compared = record.get("compared") if isinstance(record, dict) else None
+    return compared if isinstance(compared, int) and not isinstance(compared, bool) else None
 
 
 def _missing_links(text: str, doc_dir: Path) -> int:
@@ -149,7 +224,7 @@ def count_document(doc_dir: Path) -> collections.Counter:
     for md_path in (doc_dir / "pages").glob("*.md"):
         if not md_path.with_suffix(".json").exists():
             c["coverage.pages_without_sidecar"] += 1
-    for sc_path in sorted((doc_dir / "pages").glob("*.json")):
+    for sc_path in page_sidecar_paths(doc_dir / "pages"):
         sidecar = _read_json(sc_path)
         if sidecar is None:
             c["coverage.unreadable_sidecars"] += 1
@@ -235,6 +310,19 @@ def count_document(doc_dir: Path) -> collections.Counter:
         # A table-scope pass says nothing about the rest of the page (#1181): counted apart.
         if any(str(e.get("result")) == "PASS" and str(e.get("scope")) == "page" for e in checks):
             c["records.pages_checks_page_scope_pass"] += 1
+        # A PASS names the text it was computed on. One that is not the digest of the sidecar's
+        # OWN winning text (a sidecar edited by a tool that skipped the reconcile) is counted,
+        # not trusted: expected 0.
+        if _pass_digest_mismatch(sidecar, checks):
+            c["records.pages_pass_digest_mismatch"] += 1
+        # #1251: C3's own invariant, counted so a run can be read against it (expected 0), and
+        # the words passes that compared so little they are weak evidence (counted, not acted on).
+        if _model_success_without_evidence(sidecar, checks, status):
+            c["records.model_success_without_verified_evidence"] += 1
+        compared = _words_compared(sidecar)
+        if _words_pass_page_scope(sidecar, checks) and compared is not None:
+            if compared < WEAK_WORDS_PASS_BELOW:
+                c["records.pages_weak_words_pass"] += 1
         for entry in checks:
             result = str(entry.get("result"))
             name = str(entry.get("check"))
@@ -323,7 +411,7 @@ def count_text_layer(args: tuple[Path, Path]) -> collections.Counter:
         c["textlayer.unreadable_pdfs"] += 1
         return c
     with pdf:
-        for sc_path in sorted((doc_dir / "pages").glob("*.json")):
+        for sc_path in page_sidecar_paths(doc_dir / "pages"):
             md_path = sc_path.with_suffix(".md")
             sidecar = _read_json(sc_path)
             if sidecar is None or not md_path.exists():

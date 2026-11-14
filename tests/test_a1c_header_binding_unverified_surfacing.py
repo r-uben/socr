@@ -413,6 +413,7 @@ def test_clean_success_sidecar_is_still_resume_skippable_pin_the_difference(
     refuse to skip ANYTHING would satisfy the test above and silently
     destroy resume. Only the status/audit_passed/failure_mode differ.
     """
+    from c3_support import give_word_evidence  # #1251
     from gh1185_agreement_spy import assert_agreed_on, spy_agreement  # #1185
 
     calls = spy_agreement(monkeypatch)  # #1185: installed before any verdict runs
@@ -428,6 +429,7 @@ def test_clean_success_sidecar_is_still_resume_skippable_pin_the_difference(
     ps.native_text = NATIVE_PROSE
     # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
     ps.own_layer_text = STRICT_MD
+    give_word_evidence(ps, STRICT_MD)  # #1251: the layer's words too, an independent check
 
     clean = PageOutput(
         page_num=1,

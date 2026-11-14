@@ -290,6 +290,15 @@ class FailureMode(str, Enum):
     #: #1306: the page's own text layer holds control bytes, shipped as U+FFFD under a mark.
     #: In ``PERMANENTLY_UNRESOLVABLE_MODES``: the same layer gives the same bytes.
     CONTROL_BYTES_REPLACED = "control_bytes_replaced"
+    #: #1251 (C3): a model reading the page judge accepted and nothing independent confirmed.
+    #: The judge is a model call on the same page, so its acceptance is not a check; the page
+    #: ships under a ``page_judge=UNKNOWN`` mark until a page-scope check of the page's own text
+    #: layer (words, and numbers when owed) passes on the shipped text. In
+    #: ``PERMANENTLY_UNRESOLVABLE_MODES``: re-reading the page cannot produce that evidence
+    #: (the same layer and config give the same absence), so a resume restores the page instead
+    #: of re-reading it on every run. Kept apart from ``MODEL_OUTPUT_UNJUDGED``, whose pages a
+    #: later judge can resolve and must stay reprocessable.
+    READING_UNCORROBORATED = "reading_uncorroborated"
     #: #658: a scanned table page failed the source-evidence gate because this
     #: host has NO classical OCR backend, so the gate never read the pixels and
     #: holds no evidence about the table at all.

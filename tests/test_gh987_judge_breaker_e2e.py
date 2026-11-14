@@ -36,7 +36,11 @@ _DEADLINE = 0.2
 _JUDGE_HANG = 1.0
 _PAGES = 4
 BREAKER_EVENT = "judge_wedged_circuit_open"
-_VOLATILE = {"input_checksum", "timings_s"}
+# #1251: ``judge_calls`` is the sidecar's reference (path, digest, count) to the page's judge
+# replies. A page the breaker short-circuited made NO judge call, so it has no reference, while the
+# same page in the slow run has one (its timeout, recorded). Recording a call that did not happen
+# would be false, so the reference legitimately differs and is volatile here (only that field).
+_VOLATILE = {"input_checksum", "timings_s", "judge_calls"}
 
 
 def _pdf(tmp_path: Path, *, layer_numbers: bool = False) -> Path:
@@ -48,6 +52,10 @@ def _pdf(tmp_path: Path, *, layer_numbers: bool = False) -> Path:
             # The reading repeats "page N" eight times, and agreement counts occurrences,
             # so the layer carries the same eight occurrences.
             page.insert_text((60, 320), f"page {n + 1} " * 8, fontsize=9)
+            # #1251: a judge's acceptance alone is not a check, so the layer also owes words the
+            # reading carries ("text for"). The same word at the same place on every page is
+            # running furniture, which is not owed, so the line sits at a place of its own per page.
+            page.insert_text((60 + 80 * n, 360), "text for", fontsize=9)
         y = 80
         for _ in range(14):
             page.insert_text((60, y), f"Estimated coefficient 0.08{n} significant", fontsize=9)
@@ -191,6 +199,20 @@ def _shape(sidecar: dict) -> dict:
     return shape
 
 
+def _judge_calls(run: dict, n: int) -> list[dict] | None:
+    """The page's judge calls from its ``pages/NNNNN.judge-calls`` file, ``None`` when the
+    sidecar names no such file. The reference the sidecar keeps must match the file."""
+    ref = run["sidecars"][n].get("judge_calls")
+    files = list(run["out"].rglob(f"pages/{n:05d}.judge-calls"))
+    if ref is None:
+        assert not files, f"p{n}: a judge-calls file with no reference"
+        return None
+    (path,) = files
+    calls = json.loads(path.read_text())
+    assert ref["count"] == len(calls) and ref["path"] == path.name
+    return calls
+
+
 def _passed(sidecar: dict) -> bool:
     return sidecar["status"] == "success" and sidecar["audit_passed"] is True
 
@@ -219,6 +241,19 @@ def test_wedged_judge_fails_pages_closed_exactly_like_a_slow_one_but_instantly(
         assert not _passed(wedged["sidecars"][n]), f"p{n} shipped as accepted"
     assert wedged["result"].status == alive["result"].status
     assert wedged["result"].status is not DocumentStatus.SUCCESS
+    # #1251: ``judge_calls`` is kept out of ``_shape`` (a short-circuited page made no judge call,
+    # and a record of a call that did not happen would be false), so what each arm records is
+    # pinned here. The slow judge's pages each have exactly one record: our own deadline, which
+    # the worker's late answer does not add to. Of the wedged run's pages, the one that paid the
+    # deadline has that same record, and every short-circuited page has NO judge-calls reference.
+    for n in alive["sidecars"]:
+        calls = _judge_calls(alive, n)
+        assert calls is not None and [c["outcome"] for c in calls] == ["deadline_exceeded"], n
+    paid = [n for n in wedged["sidecars"] if _judge_calls(wedged, n) is not None]
+    assert len(paid) == wedged["judge_calls"] == 1
+    assert [c["outcome"] for c in _judge_calls(wedged, paid[0])] == ["deadline_exceeded"]
+    for n in set(wedged["sidecars"]) - set(paid):
+        assert "judge_calls" not in wedged["sidecars"][n], f"p{n} was short-circuited"
 
 
 def test_the_breaker_is_surfaced_once_at_document_level(tmp_path, monkeypatch) -> None:

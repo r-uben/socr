@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import pathlib
 
+from c3_support import give_word_evidence
 from socr.core.document import DocumentHandle
 from socr.core.manifest import _select_and_finalize_page
 from socr.core.marks import Check, CheckResult, leading_marks
@@ -64,6 +65,8 @@ def _state(
         # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
         ps.own_layer_text = own_layer
         ps.is_born_digital = True
+        # #1251: a judge's acceptance is not a check; the layer's words are the evidence
+        give_word_evidence(ps, own_layer)
     base = dict(
         page_num=1,
         text=text,

@@ -85,7 +85,8 @@ def _post_generate(host: str, model: str, prompt: str, image_b64: str, timeout: 
     if payload.get("done_reason") == "length":
         raise JudgeReplyTruncatedError(
             f"Ollama judge reply hit the {JUDGE_MAX_REPLY_TOKENS}-token cap "
-            "(done_reason=length); no verdict"
+            "(done_reason=length); no verdict",
+            raw=payload.get("response", "") or "",
         )
     return payload.get("response", "")
 

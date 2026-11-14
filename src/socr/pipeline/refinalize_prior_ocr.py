@@ -35,6 +35,8 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+
+from socr.core.page_files import page_sidecar_paths
 from socr.core.pass_trace import trace_to_dicts
 from socr.core.verdict import published_audit_passed
 
@@ -251,9 +253,9 @@ def _with_readings_judged(
     floor pages), and exactly one reading may match -- a resumed or retried document holds
     several, and another reading of the same page standing in for this one could judge a
     table reading as prose."""
-    from socr.pipeline.orchestrator import ATTEMPT_SUMMARY_REASON_MAX_CHARS
     from socr.core.manifest import reading_holds_a_table
     from socr.core.result import PageOutput
+    from socr.pipeline.orchestrator import ATTEMPT_SUMMARY_REASON_MAX_CHARS
 
     rows = sidecar.get("attempts_summary") or []
     if _judged(sidecar):
@@ -488,7 +490,7 @@ def refinalize_document(
     if len(md_paths) != 1:
         # A document whose every page was floored has no ``.md`` at all; writing one is
         # the assembler's job, not this tool's. Left as it is, and counted.
-        for sidecar_path in pages_dir.glob("*.json"):
+        for sidecar_path in page_sidecar_paths(pages_dir):
             if is_floor_page(_read_json(sidecar_path)):
                 skipped["document has no .md (every page floored)"] += 1
         return []
@@ -510,7 +512,7 @@ def refinalize_document(
     changes: list[PageChange] = []
     fragments: list[tuple[Path, str]] = []
     sidecars: list[tuple[Path, dict]] = []
-    for sidecar_path in sorted(pages_dir.glob("*.json")):
+    for sidecar_path in page_sidecar_paths(pages_dir):
         sidecar = _read_json(sidecar_path)
         if not is_floor_page(sidecar):
             continue

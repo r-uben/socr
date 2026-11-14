@@ -88,7 +88,13 @@ class JudgeReplyTruncatedError(RuntimeError):
     judge defect, and only a timeout may license #713's credentialed stand-in.
     A truncated reply is never parsed -- ``_extract_json``'s first-``{``-to-
     last-``}`` fallback could otherwise read a verdict out of a fragment.
+
+    ``raw`` is the (cut) reply, kept for the audit record of the call (#1251); it is never parsed.
     """
+
+    def __init__(self, message: str, raw: str = "") -> None:
+        super().__init__(message)
+        self.raw = raw
 
 
 #: #713: exception TYPES that mean the PAGE judge never returned a verdict
@@ -172,6 +178,95 @@ class JudgeVerdict:
         return self.faithful
 
 
+#: Longest error text kept in a judge-call record. Derivation: the reply cap
+#: (``JUDGE_MAX_REPLY_TOKENS``) bounds a verdict, but an exception's text is whatever a transport
+#: or a service chose to say; the type name carries the classification, the text is a hint, and a
+#: record that grew with it would grow the page's side file without bound.
+JUDGE_CALL_ERROR_MAX_CHARS = 500
+
+#: #1251: the outcomes of one page-judge call, as the side file records them.
+JUDGE_CALL_VERDICT = "verdict"
+JUDGE_CALL_TIMEOUT = "timeout"
+JUDGE_CALL_ERROR = "error"
+#: The orchestrator's own wall-clock deadline hit before the call returned. The call itself may
+#: still finish later and then record its own ``verdict`` row: both stay, in order.
+JUDGE_CALL_DEADLINE = "deadline_exceeded"
+
+
+def page_judge_prompt_sha256() -> str:
+    """SHA-256 of the page-judge prompt template, read at call time: THE prompt identity, shared by
+    the run manifest (``page_judge_prompt_digest``, which keys the resume ledger) and every
+    judge-call record, so the two can never describe different prompts. An unreadable template
+    yields a unique marker, never a digest, so nothing resumes on a prompt nobody could read."""
+    import hashlib
+
+    try:
+        return hashlib.sha256(load_judge_prompt().encode("utf-8")).hexdigest()
+    except OSError:
+        import uuid
+
+        return f"unreadable-page-judge-prompt:{uuid.uuid4().hex}"
+
+
+def judge_call_record(
+    *,
+    page_num: int,
+    outcome: str,
+    judge: object,
+    reading: str,
+    verdict: JudgeVerdict | None = None,
+    error: BaseException | None = None,
+) -> dict:
+    """One page-judge call, for ``pages/NNNNN.judge-calls`` (#1251).
+
+    Holds what a later reader needs to audit the call without re-running it: the digest of the
+    prompt template and of the reading it was shown, the model and backend, the FULL reply as the
+    backend returned it (uncut) with its length, and the parsed verdict. A call that produced no
+    verdict (a timeout, a crash, a reply that did not parse) says so by ``outcome`` and carries
+    the exception type; it has no reply to keep."""
+    import hashlib
+
+    record: dict = {
+        "page": page_num,
+        "outcome": outcome,
+        "judge_model": str(getattr(judge, "model", "") or ""),
+        "judge_backend": type(judge).__name__,
+        "prompt_sha256": page_judge_prompt_sha256(),
+        "reading_sha256": hashlib.sha256((reading or "").encode("utf-8")).hexdigest(),
+    }
+    if verdict is not None:
+        record["reply"] = verdict.raw
+        record["reply_chars"] = len(verdict.raw or "")
+        record["parsed"] = {
+            "faithful": bool(verdict.faithful),
+            "issues": list(verdict.issues),
+            "confidence": verdict.confidence,
+            "suggested_action": verdict.suggested_action,
+        }
+    if error is not None:
+        record["error"] = {
+            "type": type(error).__name__,
+            "message": str(error)[:JUDGE_CALL_ERROR_MAX_CHARS],
+        }
+        # A reply that did not parse is still a reply: the backend returned it and the parser
+        # refused it, so the full text is kept (the exception's own message is a cut excerpt).
+        raw_reply = getattr(error, "raw", None)
+        if isinstance(raw_reply, str):
+            record["reply"] = raw_reply
+            record["reply_chars"] = len(raw_reply)
+    return record
+
+
+class JudgeReplyUnparseableError(ValueError):
+    """A judge's reply could not be read as a verdict. Carries the FULL reply as ``raw``: the
+    backend did return it, and the audit record of the call keeps it (#1251). A ``ValueError``,
+    as the parse failures always were, so no existing handler changes."""
+
+    def __init__(self, message: str, raw: str) -> None:
+        super().__init__(message)
+        self.raw = raw
+
+
 class Judge(Protocol):
     """Anything that can turn (page image, ocr text) into a verdict."""
 
@@ -202,18 +297,27 @@ def _extract_json(text: str) -> dict:
 
 
 def parse_verdict(text: str) -> JudgeVerdict:
-    """Parse a model response into a JudgeVerdict, coercing/validating fields."""
-    data = _extract_json(text)
-    faithful = bool(data.get("faithful", False))
-    issues = [str(i) for i in data.get("issues", []) or []]
+    """Parse a model response into a JudgeVerdict, coercing/validating fields.
+
+    A reply that cannot be read raises :class:`JudgeReplyUnparseableError` holding the reply."""
     try:
-        confidence = float(data.get("confidence", 0.0))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    confidence = max(0.0, min(1.0, confidence))
-    action = data.get("suggested_action") or ("accept" if faithful else "escalate_engine")
-    if action not in VALID_ACTIONS:
-        action = "accept" if faithful else "escalate_engine"
+        data = _extract_json(text)
+        if not isinstance(data, dict):
+            raise ValueError(f"judge output is not a JSON object: {text[:200]!r}")
+        faithful = bool(data.get("faithful", False))
+        issues = [str(i) for i in data.get("issues", []) or []]
+        try:
+            confidence = float(data.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
+        action = data.get("suggested_action") or ("accept" if faithful else "escalate_engine")
+        if action not in VALID_ACTIONS:
+            action = "accept" if faithful else "escalate_engine"
+    except (TypeError, ValueError) as exc:
+        # Any malformed field (e.g. ``"issues": 7``) is the same unreadable reply as bad JSON:
+        # the raw bytes travel with the error so the call record keeps them.
+        raise JudgeReplyUnparseableError(str(exc), raw=text) from exc
     return JudgeVerdict(
         faithful=faithful,
         issues=issues,

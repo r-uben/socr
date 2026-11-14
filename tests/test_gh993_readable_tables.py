@@ -41,6 +41,9 @@ def _no_words_check(monkeypatch):
     monkeypatch.setattr(verdict, "page_missing_words", lambda output, p: None)
 
 
+_CAPTION = "Grid of reported values for the four columns below."
+
+
 def _ruled_pdf_as_read(tmp_path: Path, name: str = "doc.pdf") -> Path:
     """#1185 round 2 (approved fixture change): ``_ruled_pdf``'s grid printing the table the
     stub reading ships (header ``c0..c3``), plus a caption without digits, so the page is a
@@ -61,7 +64,7 @@ def _ruled_pdf_as_read(tmp_path: Path, name: str = "doc.pdf") -> Path:
         page.draw_line((100, yy), (460, yy))
     for xx in cols + [460]:
         page.draw_line((xx, rows[0]), (xx, rows[-1]))
-    page.insert_text((100, 70), "Grid of reported values for the four columns below.", fontsize=9)
+    page.insert_text((100, 70), _CAPTION, fontsize=9)
     pdf_path = tmp_path / name
     doc.save(pdf_path)
     doc.close()
@@ -80,7 +83,9 @@ def _run(tmp_path: Path, result, *, quiet: bool = True):
     # row-binding check would mark every table UNVERIFIABLE and hide the ladder counts under test.
     pipeline._run_row_binding_check = lambda *args, **kwargs: False
     out = tmp_path / "out"
-    _process(pipeline, pdf, out, [_QueueRung([result])])
+    # #1251: the reading carries the caption, the layer's words: a judge's acceptance is not a
+    # check, so the page is CHECKED by its layer and the table counts are what is under test.
+    _process(pipeline, pdf, out, [_QueueRung([result])], reading=f"{_CAPTION}\n\n{_TABLE_MD}")
     return out / "doc"
 
 

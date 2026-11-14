@@ -183,8 +183,11 @@ def _process(
     rungs: list | None,
     *,
     isolate_mechanical: bool = True,
+    reading: str = _TABLE_MD,
 ):
     """Run ``process()`` with hermetic provider/judge patches.
+
+    ``reading`` is the stub model's whole-page reading (default: the table alone).
 
     ``isolate_mechanical=True`` (default) stubs the GH-273 detector to
     False so rulings 1-4/6-7 cannot be confounded by bind() on the
@@ -193,7 +196,7 @@ def _process(
     patches = [
         patch(
             "socr.pipeline.orchestrator.route_page",
-            side_effect=_route_page_returning(_TABLE_MD),
+            side_effect=_route_page_returning(reading),
         ),
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
         patch.object(pipeline, "_resolve_judge_model", return_value=""),
