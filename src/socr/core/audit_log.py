@@ -41,6 +41,10 @@ _ESCALATION_MODES = {
     # HALLUCINATION until the no-witness ending got its own mode, and dropping
     # them now would quietly shrink the escalation record.
     FailureMode.NO_WITNESS_BACKEND,
+    # #1270: the other two source-evidence endings, split off HALLUCINATION. Same attempts,
+    # same escalation, new recorded cause; dropping them would shrink the record.
+    FailureMode.WITNESS_DISAGREES,
+    FailureMode.TABLE_UNVERIFIED_WITNESS,
 }
 
 

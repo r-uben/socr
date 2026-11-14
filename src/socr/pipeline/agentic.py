@@ -1299,8 +1299,16 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                 output.table_unverifiable = result.reason
             output.audit_passed = False
             output.status = PageStatus.ERROR
+            # #1270: three honest causes, none of them an accusation. Nothing read the pixels;
+            # a second reader read them and DISAGREED (it says nothing about which reader is
+            # wrong); or the second reader could not examine the table at all. Every
+            # control-flow reader of these modes tests ``WITNESS_REJECT_MODES``.
             output.failure_mode = (
-                FailureMode.NO_WITNESS_BACKEND if no_witness else FailureMode.HALLUCINATION
+                FailureMode.NO_WITNESS_BACKEND
+                if no_witness
+                else FailureMode.WITNESS_DISAGREES
+                if result.verifiable
+                else FailureMode.TABLE_UNVERIFIED_WITNESS
             )
             # #658 reviewer item 3: the ``source_evidence_table`` token in this
             # reason is a LOAD-BEARING marker, not a label -- the scanned-table

@@ -71,6 +71,7 @@ from socr.core.result import (
     REJECTION_AMBIGUOUS_DEFERRED,
     REJECTION_JUDGE_ONLY,
     REJECTION_VERIFIER_ERROR,
+    WITNESS_REJECT_MODES,
     FailureMode,
     PageOutput,
     PageStatus,
@@ -796,7 +797,7 @@ def flagged_model_page_output(p) -> PageOutput | None:
     # A positively-rejected reading, not a flagged one: an ERROR output, or one
     # a floor already overwrote with a failure marker, is not evidence of
     # anything and must not displace the native reading.
-    if bo.status is PageStatus.ERROR or bo.failure_mode is FailureMode.HALLUCINATION:
+    if bo.status is PageStatus.ERROR or bo.failure_mode in WITNESS_REJECT_MODES:
         return None
     # The comparison being fixed is between two readings of a TABLE. If the
     # model emitted no grid at all on a table page it did not produce the thing
@@ -922,7 +923,7 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
         text = (out.text or "").strip()
         if not text or is_page_failed_marker(text):
             return False
-        if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
+        if out.status is PageStatus.ERROR or out.failure_mode in WITNESS_REJECT_MODES:
             return False
         return has_strict_table_grid(text)
 
@@ -989,7 +990,7 @@ def _grid_shaped_attempt(out: PageOutput | None) -> bool:
     text = (out.text or "").strip()
     if not text or is_page_failed_marker(text):
         return False
-    if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
+    if out.status is PageStatus.ERROR or out.failure_mode in WITNESS_REJECT_MODES:
         return False
 
     from socr.tables.reconcile import has_strict_table_grid
@@ -1028,7 +1029,7 @@ def _grid_reading_attempt(out: PageOutput | None) -> bool:
     text = (out.text or "").strip()
     if not text or is_page_failed_marker(text):
         return False
-    if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
+    if out.status is PageStatus.ERROR or out.failure_mode in WITNESS_REJECT_MODES:
         return False
 
     from socr.tables.reconcile import has_authored_table_grid
@@ -5183,7 +5184,9 @@ def _select_page_output_tagged(
                 if getattr(p, "scanned_table_no_witness", False)
                 else FailureMode.TABLE_WITHHELD_UNCONFIRMED
                 if getattr(p, "scanned_table_withheld_unconfirmed", False)
-                else FailureMode.HALLUCINATION
+                else FailureMode.TABLE_UNVERIFIED_WITNESS
+                if getattr(p, "scanned_table_witness_unverifiable", False)
+                else FailureMode.WITNESS_DISAGREES
             ),
         ), SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
     if p.is_born_digital and p.native_text:

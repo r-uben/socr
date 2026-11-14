@@ -74,6 +74,7 @@ from socr.core.providers import (
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_TIMEOUT,
+    WITNESS_REJECT_MODES,
     DocumentStatus,
     EngineResult,
     FailureMode,
@@ -6560,11 +6561,26 @@ class UnifiedPipeline:
         survives #1048's settling (that rewrites the mode to NONE while the attempt keeps
         the witness's list of refused cells). Either one alone is blind to a real case.
         """
+        return any(disputed or mode in WITNESS_REJECT_MODES for _reason, disputed, mode in records)
+
+    @staticmethod
+    def _floor_cause_is_witness_unverifiable(records: "list[tuple[str, str, object]]") -> bool:
+        """#1270: the witness could not EXAMINE the table, and nothing else decided the cause.
+
+        A witness that read the table and disagreed (``disputed`` / ``WITNESS_DISAGREES``)
+        wins: that is a positive signal, and "could not check" is the weaker finding. Only
+        an attempt the gate left ``TABLE_UNVERIFIED_WITNESS`` counts here. Control flow is
+        unchanged: both causes are in ``WITNESS_REJECT_MODES`` and so is "contradiction" to
+        every other reader; this only picks which cause the floor RECORDS.
+        """
         from socr.core.result import FailureMode as _FailureMode
 
-        return any(
-            disputed or mode is _FailureMode.HALLUCINATION for _reason, disputed, mode in records
-        )
+        if any(
+            disputed or mode in (_FailureMode.HALLUCINATION, _FailureMode.WITNESS_DISAGREES)
+            for _reason, disputed, mode in records
+        ):
+            return False
+        return any(mode is _FailureMode.TABLE_UNVERIFIED_WITNESS for _r, _d, mode in records)
 
     @staticmethod
     def _floor_cause_is_no_witness(records: "list[tuple[str, str, object]]") -> bool:
@@ -6779,6 +6795,7 @@ class UnifiedPipeline:
             figures_dir,
             no_witness=_no_witness,
             withheld_unconfirmed=_unconfirmed,
+            witness_unverifiable=self._floor_cause_is_witness_unverifiable(_records),
         )
         return True
 
@@ -6791,6 +6808,7 @@ class UnifiedPipeline:
         *,
         no_witness: bool = False,
         withheld_unconfirmed: bool = False,
+        witness_unverifiable: bool = False,
     ) -> None:
         """GH-90: mark a scanned page whose table evidence failed for the D3 floor.
 
@@ -6813,6 +6831,11 @@ class UnifiedPipeline:
         # the ladder floor at the routing site -- that one also fires on ordinary
         # non-suspect scanned pages, which are main's behaviour and outside this rule.
         ps.scanned_table_withheld_unconfirmed = bool(withheld_unconfirmed) and not no_witness
+        # #1270: the fourth cause, recorded only. ``witness_unverifiable`` is the witness
+        # saying "could not examine"; it never outranks the two causes above.
+        ps.scanned_table_witness_unverifiable = (
+            bool(witness_unverifiable) and not no_witness and not withheld_unconfirmed
+        )
         if figures_dir is not None:
             ps.d3_floor_png_ref = self._render_d3_floor_png(
                 pdf_path,
@@ -6831,7 +6854,9 @@ class UnifiedPipeline:
                 if no_witness
                 else FailureMode.TABLE_WITHHELD_UNCONFIRMED
                 if withheld_unconfirmed
-                else FailureMode.HALLUCINATION
+                else FailureMode.TABLE_UNVERIFIED_WITNESS
+                if ps.scanned_table_witness_unverifiable
+                else FailureMode.WITNESS_DISAGREES
             )
 
     # ------------------------------------------------------------------
@@ -8400,6 +8425,7 @@ class UnifiedPipeline:
                 "scanned_table_evidence_failed",
                 "scanned_table_no_witness",  # #658: qualifies the flag above
                 "scanned_table_withheld_unconfirmed",  # #1203: likewise
+                "scanned_table_witness_unverifiable",  # #1270: likewise
             )
             if getattr(ps, name, False)
         ]
@@ -12647,7 +12673,7 @@ class UnifiedPipeline:
                         # neither signal present this falls back to the
                         # pre-ticket reading.
                         _source_ev_contradicted = any(
-                            att.output.failure_mode is FailureMode.HALLUCINATION
+                            att.output.failure_mode in WITNESS_REJECT_MODES
                             for att in _source_ev_attempts
                         )
                         _source_ev_no_witness = not _source_ev_contradicted and any(
@@ -12670,20 +12696,22 @@ class UnifiedPipeline:
                         # ``_withhold_unconfirmed_table``, called just before the page is
                         # finalised. See ``denylist-safety-lanes-leak-every-round``.
                         if _source_ev_rejected and not ps.is_born_digital and not decision.accepted:
+                            _floor_records = [
+                                (
+                                    att.reason or "",
+                                    getattr(att.output, "table_disputed", "") or "",
+                                    att.output.failure_mode,
+                                )
+                                for att in _source_ev_attempts
+                            ]
                             self._apply_scanned_table_floor(
                                 ps,
                                 state.handle.path,
                                 page_num,
                                 _chart_figures_dir,
-                                no_witness=self._floor_cause_is_no_witness(
-                                    [
-                                        (
-                                            att.reason or "",
-                                            getattr(att.output, "table_disputed", "") or "",
-                                            att.output.failure_mode,
-                                        )
-                                        for att in _source_ev_attempts
-                                    ]
+                                no_witness=self._floor_cause_is_no_witness(_floor_records),
+                                witness_unverifiable=self._floor_cause_is_witness_unverifiable(
+                                    _floor_records
                                 ),
                             )
                         if _unchecked_table_attempt is not None and (
@@ -16548,6 +16576,8 @@ class UnifiedPipeline:
             # #1203: same reason. A released page that kept this would report a
             # withheld-pending-confirmation floor it no longer sits under.
             ps.scanned_table_withheld_unconfirmed = False
+            # #1270: and the fourth cause, for the same reason.
+            ps.scanned_table_witness_unverifiable = False
             # #1048: the patched text PASSED the source-evidence check (this judge
             # chain contains it), so the unchecked/disputed claims about the old
             # reading no longer describe what ships: clear them, the disposition
@@ -19246,6 +19276,13 @@ class UnifiedPipeline:
             ps.scanned_table_withheld_unconfirmed = (
                 ps.scanned_table_evidence_failed
                 and page_out.failure_mode is FailureMode.TABLE_WITHHELD_UNCONFIRMED
+            )
+            # #1270: DERIVED again, for the same reason. A sidecar written before this
+            # ticket records HALLUCINATION and restores False for all three flags, which is
+            # what that record meant; it keeps shipping its recorded mode.
+            ps.scanned_table_witness_unverifiable = (
+                ps.scanned_table_evidence_failed
+                and page_out.failure_mode is FailureMode.TABLE_UNVERIFIED_WITNESS
             )
             # #263: restore the shredded-page image ref too, so a resumed run's
             # floor ships marker + image exactly as the first run did instead of

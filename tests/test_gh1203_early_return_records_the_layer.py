@@ -1117,7 +1117,7 @@ def test_a_witness_that_contradicts_the_model_withholds_the_table(
     assert all(c not in live["text"] for c in _MODEL_ONLY_CELLS)
     assert "unverifiable table — see image" in live["text"]
     # The cause is the witness's own finding, not a missing install.
-    assert live["failure_mode"] == "hallucination"
+    assert live["failure_mode"] == "witness_disagrees"
     assert "| Reserves |" in (live["side"].get("withheld_table_text") or "")
 
 
@@ -1176,7 +1176,7 @@ def test_a_transient_witness_error_keeps_the_witnesss_own_cause(
             "nothing refuted this table, so the cause is the reader that never ran"
         )
     else:
-        assert live["failure_mode"] == "hallucination", (
+        assert live["failure_mode"] == "witness_disagrees", (
             "the cause was overwritten with a missing install, although a witness read "
             "the page and refused named cells"
         )
@@ -1802,7 +1802,7 @@ def test_a_corroborated_table_is_not_recorded_as_a_fabrication(tmp_path: Path, m
     assert corroborated["ships_table"] is False and contradicted["ships_table"] is False, (
         "fixture premise: both arms withhold"
     )
-    assert contradicted["failure_mode"] == FailureMode.HALLUCINATION.value, contradicted[
+    assert contradicted["failure_mode"] == FailureMode.WITNESS_DISAGREES.value, contradicted[
         "failure_mode"
     ]
     assert corroborated["failure_mode"] != contradicted["failure_mode"], (
@@ -1833,7 +1833,7 @@ def test_a_corroborated_table_is_not_recorded_as_a_fabrication(tmp_path: Path, m
     assert _cache_modes("p1-agree") == {FailureMode.TABLE_WITHHELD_UNCONFIRMED.value}, (
         f"the replay cache accuses the model: {_cache_modes('p1-agree')}"
     )
-    assert _cache_modes("p1-contra") == {FailureMode.HALLUCINATION.value}, (
+    assert _cache_modes("p1-contra") == {FailureMode.WITNESS_DISAGREES.value}, (
         f"the contradicted arm lost its honest cause: {_cache_modes('p1-contra')}"
     )
 

@@ -458,7 +458,7 @@ def test_gh90_scanned_source_evidence_floor_still_wins(tmp_path: Path) -> None:
 
     winner = _winning_page_output(state, 1)
     assert "failed: unverifiable table" in winner.text, winner.text
-    assert winner.failure_mode is FailureMode.HALLUCINATION, winner.failure_mode
+    assert winner.failure_mode is FailureMode.WITNESS_DISAGREES, winner.failure_mode
 
 
 def test_born_digital_page_carrying_the_scanned_flag_is_not_rescued(tmp_path: Path) -> None:

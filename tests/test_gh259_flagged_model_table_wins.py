@@ -916,7 +916,7 @@ def test_gh90_scanned_evidence_floor_still_wins_over_a_flagged_model_table(
     assert "failed: unverifiable table" in winner.text, winner.text
     assert "$f^{(1\\to2)}$" not in winner.text, winner.text
     assert winner.status is PageStatus.ERROR, winner.status
-    assert winner.failure_mode is FailureMode.HALLUCINATION, winner.failure_mode
+    assert winner.failure_mode is FailureMode.WITNESS_DISAGREES, winner.failure_mode
     # ...and the same is true of what actually reaches the .md.
     body = "\n\n".join(canonical_page_texts(state))
     assert "failed: unverifiable table" in body, body
