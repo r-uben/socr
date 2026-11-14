@@ -282,6 +282,9 @@ class Check(str, Enum):
     #: native and model readings alike. Not run on a failed-marker page, an earlier-OCR
     #: layer or a page where socr withheld a table: see ``verdict.page_missing_words``.
     TEXT_LAYER_WORDS = "text_layer_words"
+    #: #1306: control bytes of the page's own text layer, shipped as U+FFFD. Each stood for a
+    #: glyph the layer could not map (often a minus), so the page's numbers may be wrong.
+    CONTROL_BYTES = "control_bytes"
     UNREADABLE_INPUT = "unreadable_input"
     #: The fail-closed fallback: the page is not CHECKED and nothing more specific named
     #: the reason. Never silence it -- a page with no clause at all ships unmarked, which

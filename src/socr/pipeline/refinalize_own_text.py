@@ -156,6 +156,8 @@ def _page_state(sidecar: dict, pa):
             setattr(p, name, getattr(pa, name, "") or "")
         else:
             setattr(p, name, getattr(pa, name))
+    # #1306: the footnote wrapper strip reads the painted glyphs; None (not read) keeps wrappers.
+    p.painted_layer_text = getattr(pa, "painted_layer_text", None)
     p.prior_ocr_layer_suspect = bool(
         sidecar.get("prior_ocr_layer_suspect")
     ) or _analysis_finds_prior_ocr(pa)

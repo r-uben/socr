@@ -153,6 +153,9 @@ class PageState:
     #: ``PageAssessment.own_layer_word_reference``. Empty = not checked. In memory only.
     own_layer_word_reference: str = ""
     own_layer_figure_words: str = ""
+    #: #1306: the glyphs the page paints, from ``PageAssessment.painted_layer_text``; ``None`` =
+    #: not read. The evidence that a footnote wrapper in the layer is hidden text. In memory.
+    painted_layer_text: str | None = None
     #: #990: control characters before a digit in the native text; see ``PageAssessment``.
     control_byte_digit_hits: int = 0
     control_byte_scan_failed: bool = False
@@ -201,6 +204,17 @@ class PageState:
     #: rather than write an empty list or drop the record.
     persisted_words_missing_events: list[dict] = field(default_factory=list)
     persisted_text_layer_words: dict | None = None
+    #: #1306: what the damaged-layer guard did to this page's shipped text, set at the
+    #: finalisation seam (``manifest._apply_damaged_layer_guard``) and read there by the verdict
+    #: clause and by the audit events. Runtime only: a resumed page takes its mark from the
+    #: published verdict and its events from the replayed sidecar events, so a field that is
+    #: empty in a new process loses nothing.
+    #: ``{"U+0003": 2}``: the control bytes replaced by U+FFFD, by code point.
+    control_bytes_replaced: dict[str, int] = field(default_factory=dict)
+    #: One ``StrippedFootnote.to_dict()`` per hidden footnote wrapper removed, and the words
+    #: those wrappers held (excused from the words check's reference, which holds them too).
+    hidden_footnotes_stripped: list[dict] = field(default_factory=list)
+    hidden_footnote_words: str = ""
     #: #960: the non-zero garbled-math signal counts and whether that scan failed (unknown,
     #: treated as a hit). See ``born_digital.GarbledMathSignals``.
     garbled_math_signals: dict[str, int] = field(default_factory=dict)
@@ -984,6 +998,7 @@ class DocumentState:
                 ps.own_layer_drop_reference = getattr(pa, "own_layer_drop_reference", "") or ""
                 ps.own_layer_word_reference = getattr(pa, "own_layer_word_reference", "") or ""
                 ps.own_layer_figure_words = getattr(pa, "own_layer_figure_words", "") or ""
+                ps.painted_layer_text = getattr(pa, "painted_layer_text", None)
                 # #1156: a failed scan is "unknown", which is not trust. #1027 keeps its own,
                 # narrower key (``invisible_text_over_raster``) and is not widened here.
                 # BOTH detection routes feed suspicion: #961's render-mode route catches
