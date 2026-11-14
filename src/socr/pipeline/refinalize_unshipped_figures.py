@@ -437,6 +437,22 @@ def _presence_pages(answered: list[dict]) -> tuple[list[int], list[int], list[in
     )
 
 
+def answered_document_note(answered: list[dict]) -> str:
+    """The document note a live run writes for these answered sidecars. One derivation: a page
+    that shipped a crop AND lost another chart region carries refs, and the live note words it
+    by its figure-specific clause alone, so it is not also listed as a plain shipped crop."""
+    shipped_pages, marked_pages, skeleton_pages = _lane_pages(answered)
+    chart_shipped, chart_lost, placeholder = _presence_pages(answered)
+    return document_note(
+        [n for n in shipped_pages if n not in chart_shipped and n not in chart_lost],
+        marked_pages,
+        skeleton_pages,
+        chart_shipped=chart_shipped,
+        chart_lost=chart_lost,
+        placeholder=placeholder,
+    )
+
+
 def refinalize_document(
     doc_dir: Path,
     *,
@@ -536,16 +552,8 @@ def refinalize_document(
                     {"logical_path": r.logical_path, "content_hash": r.content_hash} for r in refs
                 ]
         _write_json(manifest_path, manifest)
-    shipped_pages, marked_pages, skeleton_pages = _lane_pages(answered)
-    chart_shipped, chart_lost, placeholder = _presence_pages(answered)
-    note = document_note(
-        [n for n in shipped_pages if n not in chart_shipped],
-        marked_pages,
-        skeleton_pages,
-        chart_shipped=chart_shipped,
-        chart_lost=chart_lost,
-        placeholder=placeholder,
-    )
+    _shipped, marked_pages, _skeleton = _lane_pages(answered)
+    note = answered_document_note(answered)
 
     def _record(record: dict) -> None:
         """The note, and -- when this lane MARKED a page -- the demotion a live run makes.

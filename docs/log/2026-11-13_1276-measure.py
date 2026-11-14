@@ -31,9 +31,29 @@ RUN = "/Volumes/Main/Library/socr-work/fed_rerun_51270eb5_words/unpacked"
 PDFS = "/Volumes/Main/Library/Databases/socr/inputs/fed/pdfs"
 #: Where the measurement writes: crops, one JSON line per firing region, the placeholder table.
 OUT_DIR = Path("/Users/rubenffuertes/repos/tools/socr/scratch/army/phaseA")
-CROPS = OUT_DIR / "a3-crops-v2"
-OUT = str(OUT_DIR / "a3-firings-v2.jsonl")
-PLACEHOLDERS_OUT = str(OUT_DIR / "a3-placeholders-v3.json")
+CROPS = OUT_DIR / "a3-crops-v3"
+OUT = str(OUT_DIR / "a3-firings-v3.jsonl")
+PLACEHOLDERS_OUT = str(OUT_DIR / "a3-placeholders-v4.json")
+#: The 17 pages the auditors found still silent (BRIEF-A3): (document name contains, page).
+AUDITOR_PAGES = [
+    ("2005-07-01-monetary-policy-report", 12),
+    ("2005-07-01-monetary-policy-report", 19),
+    ("2011-07-13-monetary-policy-report", 15),
+    ("2011-07-13-monetary-policy-report", 35),
+    ("2011-07-13-monetary-policy-report", 37),
+    ("2011-07-13-monetary-policy-report", 43),
+    ("2011-03-01-monetary-policy-report", 23),
+    ("2022-06-01-monetary-policy-report", 18),
+    ("2023-03-01-monetary-policy-report", 15),
+    ("2023-03-01-monetary-policy-report", 17),
+    ("2020-05-15-financial-stability-report", 46),
+    ("2019-10-30-tealbook-parta", 76),
+    ("2019-10-30-tealbook-parta", 83),
+    ("2019-01-30-tealbook-parta", 84),
+    ("2008-06-25-projections", 7),
+    ("2008-06-25-projections", 9),
+    ("2008-06-25-projections", 10),
+]
 #: Worker processes.
 WORKERS = 8
 
@@ -123,24 +143,26 @@ def work(doc_dir):
         try:
             has_tables = bool(det._detect_tables(page))
         except Exception:
-            has_tables = False
+            # "could not look" is not "no table": table words could become chart evidence.
+            stats["skip_table_detection_unknown"] += 1
+            continue
         if has_tables:
             stats["skip_has_tables_gh189"] += 1
             continue
         words = list(page.get_text("words") or [])
-        ass = fp.assess_regions(words, boxes, fp.own_region_refs(body, pn), [], False)
+        groups = figure_crop.crop_groups(list(words), [tuple(c) for c, _b in clusters], page.rect)
+        # As production does: a crop is named by its first region and covers every member.
+        covered = figure_crop.expand_covered(fp.own_region_refs(body, pn), groups)
+        ass = fp.assess_regions(words, boxes, covered, [], False)
         stats["checked_pages"] += 1
         fires = [a for a in ass if a.fires]
         body_tick = tick_run(body)
         for a in ass:
-            if a.ticks >= 3 and not a.table_region and a.tick_lines < fp.MIN_TICK_LINES:
-                stats["regions_dropped_by_one_row_rule"] += 1
+            if a.ticks >= 3 and not a.table_region and not a.axis:
+                stats["regions_dropped_by_axis_geometry"] += 1
         if fires:
             stats["firing_pages"] += 1
             stats[f"firing_{status}"] += 1
-            groups = figure_crop.crop_groups(
-                list(words), [tuple(c) for c, _b in clusters], page.rect
-            )
             fired = {a.index for a in fires}
             for g in groups:
                 if not fired & set(g.indices):
@@ -167,7 +189,7 @@ def work(doc_dir):
                         "region": g.index,
                         "regions": list(g.indices),
                         "ticks": a.ticks,
-                        "tick_lines": a.tick_lines,
+                        "axis": a.axis,
                         "box": [round(v, 1) for v in g.rect],
                         "old_box": [
                             round(boxes[g.index - 1].x0, 1),
@@ -221,7 +243,28 @@ def main():
             fh.write(json.dumps(r) + "\n")
     print(json.dumps(dict(stats), indent=1, sort_keys=True))
     print("pass pages whose whole body has a tick run:", json.dumps(extra_pages))
-    print("firing regions", len(rows), "pages", len({(r["doc"], r["page"]) for r in rows}))
+    print(
+        "crops",
+        len(rows),
+        "firing regions",
+        sum(len(r["regions"]) for r in rows),
+        "pages",
+        len({(r["doc"], r["page"]) for r in rows}),
+    )
+    fired_pages = {(r["doc"], r["page"]) for r in rows}
+    missing = [
+        (key, page)
+        for key, page in AUDITOR_PAGES
+        if not any(key in d and p == page for d, p in fired_pages)
+    ]
+    print(
+        "auditor pages firing:",
+        len(AUDITOR_PAGES) - len(missing),
+        "of",
+        len(AUDITOR_PAGES),
+        "| not firing:",
+        missing,
+    )
     marked = [p for p in ph if p["marked_by_rule"]]
     print("placeholder pages", len(ph), "marked by rule", len(marked))
     print(

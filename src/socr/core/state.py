@@ -456,10 +456,6 @@ class PageState:
     #: #1187 round 2: WHICH outcome, so the page's mark says what actually happened to its
     #: figure rather than one hard-coded sentence. Persisted alongside the three lists.
     unshipped_figure_kind: str = ""
-    #: #1276: a model page with a table signal whose placeholders are judged AFTER GH-189's
-    #: assembly crops exist: ``{"placeholders", "images", "regions"}``. Transient, never
-    #: persisted: it is consumed at assembly (``_reconcile_pending_placeholders``).
-    placeholder_pending: dict | None = None
     #: #1027: the per-rung summary a skipped (resumed) page's sidecar carried. A skipped page
     #: ran no rung this run, so re-flushing must keep the original record instead of
     #: replacing it with the single restored winner.

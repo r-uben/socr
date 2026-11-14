@@ -10,10 +10,13 @@ run found 121 partial and 37 carrying the neighbouring column's prose.
 This module cuts from where the chart is DRAWN (the drawing cluster) and grows the rectangle
 only by text the PDF's own layer says belongs to the figure:
 
-* sideways: numeric-only blocks beside the drawing (tick labels), reached without crossing
-  any non-numeric word. Never the page edge, never another column's prose;
+* sideways: numeric-only blocks beside the drawing (tick labels), nearest first; the first
+  block that is not a tick label stops that side. Never the page edge, never another column's
+  prose;
 * upward: the title block directly above in the drawing's own column, then further label
-  blocks, while the gap stays within the page's body line pitch;
+  blocks, while the gap stays within the page's body line pitch. A short block with no
+  ``Figure`` / ``Source`` lead grows the crop only with a signal of its own (a tick row, within
+  or centred on the drawing, spanning a panel beside it, or units / axis-label words);
 * downward: axis labels, then ``NOTE:`` / ``SOURCE:`` blocks, under the same gap rule;
 * never into another chart's drawing, and a block already taken by the region above is not
   taken again by the region below;
@@ -69,14 +72,48 @@ class _Block:
     numeric: bool
 
 
-def _blocks(words: list) -> list[_Block]:
-    by_block: dict[int, list] = {}
+def _blocks(words: list, pitch: float) -> list[_Block]:
+    """The text layer's blocks, cut where they join things that are not one text.
+
+    The extractor's own block numbering is not stable across versions: the same page groups the
+    x-axis labels of one panel with the first tick label of the next panel in one version and not
+    in another. So a block here is built from the layer's LINES, and only from lines that belong
+    together on the page: a line is cut into segments at any horizontal gap wider than one body
+    line *pitch* (two panels' axis labels on one line are two texts), and a segment joins an
+    earlier segment of the same extractor block only if their horizontal extents overlap. Words
+    stay in the layer's own (block, line) order.
+    """
+    lines: dict[tuple[int, int], list] = {}
     for w in words:
-        by_block.setdefault(int(w[5]), []).append(w)
+        lines.setdefault((int(w[5]), int(w[6])), []).append(w)
+    segments: list[tuple[int, int, list]] = []
+    for (block, line), ws in sorted(lines.items()):
+        ws = sorted(ws, key=lambda w: w[0])
+        current = [ws[0]]
+        for w in ws[1:]:
+            if float(w[0]) - max(float(v[2]) for v in current) > pitch:
+                segments.append((block, line, current))
+                current = []
+            current.append(w)
+        segments.append((block, line, current))
+    groups: list[tuple[int, list[tuple[int, list]]]] = []
+    for block, line, seg in segments:
+        sx0, sx1 = min(w[0] for w in seg), max(w[2] for w in seg)
+        for owner, members in groups:
+            if owner == block and _x_overlap(
+                sx0,
+                sx1,
+                min(w[0] for _, ws in members for w in ws),
+                max(w[2] for _, ws in members for w in ws),
+            ):
+                members.append((line, seg))
+                break
+        else:
+            groups.append((block, [(line, seg)]))
     out: list[_Block] = []
-    for ident, ws in by_block.items():
-        ws = sorted(ws, key=lambda w: (int(w[6]), w[0]))
-        tokens = [str(w[4]) for w in ws]
+    for ident, (_owner, members) in enumerate(groups):
+        ws = [w for _, seg in members for w in seg]
+        tokens = [str(w[4]) for _, seg in members for w in seg]
         out.append(
             _Block(
                 ident=ident,
@@ -84,7 +121,7 @@ def _blocks(words: list) -> list[_Block]:
                 y0=min(w[1] for w in ws),
                 x1=max(w[2] for w in ws),
                 y1=max(w[3] for w in ws),
-                lines=len({int(w[6]) for w in ws}),
+                lines=len({line for line, _ in members}),
                 text=" ".join(tokens),
                 numeric=all(_TICK_NUMBER_RE.match(t) for t in tokens),
             )
@@ -112,14 +149,52 @@ def _x_overlap(a0: float, a1: float, b0: float, b1: float) -> bool:
     return a0 < b1 and b0 < a1
 
 
-def _is_label(block: _Block, *, above: bool) -> bool:
+#: A short block that opens with neither a title nor a note lead is the figure's only if the
+#: text itself says so: a UNITS or axis-label word (``Percent``, ``Billions of dollars``,
+#: ``Annual rate``), a currency or percent sign, or a scale word. English, as the corpus is. A
+#: short sentence that merely sits under the drawing in the same column is not matched.
+_FIGURE_LABEL_RE = re.compile(
+    r"%|\$|\b(percent|per\s*cent|percentage|points?|billions?|millions?|thousands?|trillions?|"
+    r"index|dollars?|rate|ratio|basis|scale|level|share|change|growth|year|quarter|month|week|"
+    r"date|axis)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_label(
+    block: _Block,
+    rect: list[float],
+    pitch: float,
+    side_by_side: list[tuple[float, float, float, float]],
+    *,
+    above: bool,
+) -> bool:
     """A block that belongs to the figure on the side of it the walk is on. A title lead below
-    the drawing is the next figure's title; a note lead above it is the previous figure's note."""
+    the drawing is the next figure's title; a note lead above it is the previous figure's note.
+
+    A short block with no lead is the figure's only with a signal of its own. Adjacency and
+    brevity alone do not make a sentence a label, so one of: it is a numeric tick row; it lies
+    within the drawing's own width (a title or axis label over its chart; a sentence of the
+    neighbouring column runs past it); it is centred on the drawing; it spans the width of a
+    panel beside this one (*side_by_side*: a title over several panels); or it reads as units / an
+    axis label (:data:`_FIGURE_LABEL_RE`).
+    """
     lead = _TITLE_LEAD_RE if above else _NOTE_LEAD_RE
     other = _NOTE_LEAD_RE if above else _TITLE_LEAD_RE
     if lead.match(block.text):
         return True
-    return block.lines <= MAX_LABEL_LINES and not other.match(block.text)
+    if block.lines > MAX_LABEL_LINES or other.match(block.text):
+        return False
+    within = block.x0 >= rect[0] - pitch and block.x1 <= rect[2] + pitch
+    centred = abs((block.x0 + block.x1) / 2.0 - (rect[0] + rect[2]) / 2.0) <= pitch
+    spans_panel = any(_x_overlap(block.x0, block.x1, o[0], o[2]) for o in side_by_side)
+    return (
+        block.numeric
+        or within
+        or centred
+        or spans_panel
+        or bool(_FIGURE_LABEL_RE.search(block.text))
+    )
 
 
 def _grow(rect: list[float], block: _Block) -> None:
@@ -146,22 +221,32 @@ def _region_rect(
             for o in others
         )
 
-    # Sideways: numeric tick labels in the drawing's own height band, nearest first, reached
-    # without crossing a non-numeric word (the neighbouring column's prose stops the walk).
-    band = [
-        c for c in blocks if c.numeric and _x_overlap(c.y0, c.y1, rect[1] - pitch, rect[3] + pitch)
-    ]
-    changed = True
-    while changed:
-        changed = False
-        for c in band:
-            if touches_other(c) or _x_overlap(c.x0, c.x1, rect[0], rect[2]):
-                continue
-            gap = rect[0] - c.x1 if c.x1 <= rect[0] else c.x0 - rect[2]
-            if gap > pitch:
-                continue
-            _grow(rect, c)
-            changed = True
+    # Sideways, each side on its own: the nearest block beside the drawing in its height band.
+    # It joins only if it is numeric (a tick label), is within one line pitch of the rectangle
+    # and is not part of another chart; the first block that is not stops that side, so prose
+    # behind a tick label is never reached. Each block is visited once, so the walk ends.
+    for left in (True, False):
+        seen: set[int] = set()
+        while True:
+            cands = [
+                c
+                for c in blocks
+                if c.ident not in seen
+                and _x_overlap(c.y0, c.y1, rect[1] - pitch, rect[3] + pitch)
+                and (c.x1 <= rect[0] if left else c.x0 >= rect[2])
+            ]
+            if not cands:
+                break
+            nxt = (
+                min(cands, key=lambda c: rect[0] - c.x1)
+                if left
+                else min(cands, key=lambda c: c.x0 - rect[2])
+            )
+            seen.add(nxt.ident)
+            gap = rect[0] - nxt.x1 if left else nxt.x0 - rect[2]
+            if not nxt.numeric or touches_other(nxt) or gap > pitch:
+                break
+            _grow(rect, nxt)
     # Tick labels may stick out past the drawing's top and bottom by half a label.
     for c in blocks:
         if (
@@ -172,6 +257,8 @@ def _region_rect(
         ):
             _grow(rect, c)
 
+    # Panels beside this one: another drawing whose rows overlap this drawing's.
+    panels = [o for o in others if _x_overlap(o[1], o[3], rect[1], rect[3])]
     above: set[int] = set()
     below: set[int] = set()
     # Downward.
@@ -188,7 +275,7 @@ def _region_rect(
         if not cands:
             break
         nxt = min(cands, key=lambda c: c.y0)
-        if nxt.y0 - cursor > pitch or not _is_label(nxt, above=False):
+        if nxt.y0 - cursor > pitch or not _is_label(nxt, rect, pitch, panels, above=False):
             break
         below.add(nxt.ident)
         _grow(rect, nxt)
@@ -208,7 +295,7 @@ def _region_rect(
         if not cands:
             break
         nxt = max(cands, key=lambda c: c.y1)
-        if cursor - nxt.y1 > pitch or not _is_label(nxt, above=True):
+        if cursor - nxt.y1 > pitch or not _is_label(nxt, rect, pitch, panels, above=True):
             break
         above.add(nxt.ident)
         _grow(rect, nxt)
@@ -228,7 +315,7 @@ def crop_groups(
     if n == 0:
         return []
     pitch = line_pitch(words)
-    blocks = _blocks(words) if pitch > 0 else []
+    blocks = _blocks(words, pitch) if pitch > 0 else []
     heights = [float(w[3]) - float(w[1]) for w in words if w[3] > w[1]]
     pad = max(0.0, (pitch - statistics.median(heights)) / 2.0) if heights and pitch else 0.0
 

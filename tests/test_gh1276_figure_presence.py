@@ -760,6 +760,123 @@ def test_the_title_just_below_a_figures_notes_is_the_next_figures(tmp_path: Path
     assert reach["4."] < 216 < reach["SOURCE:"]
 
 
+_CORE = (100.0, 100.0, 300.0, 200.0)
+_PAGE = fitz.Rect(0, 0, 612, 792)
+#: A paragraph far from the figure, to give the page its line pitch (12).
+_PARAGRAPH = [_word(100, 500 + 12 * k, 150, 508 + 12 * k, "word", 9, k) for k in range(4)]
+
+
+def _crop_rect(extra: list, core=_CORE):
+    from socr.figures import figure_crop
+
+    (group,) = figure_crop.crop_groups(extra + _PARAGRAPH, [core], _PAGE)
+    return group.rect
+
+
+def _within(seconds: int):
+    """Fail instead of hanging: the walk must end on any input (SIGALRM, POSIX)."""
+    import contextlib
+    import signal
+
+    @contextlib.contextmanager
+    def guard():
+        def _timeout(*_a):
+            raise AssertionError("the crop walk did not terminate")
+
+        previous = signal.signal(signal.SIGALRM, _timeout)
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+
+    return guard()
+
+
+def test_a_zero_width_number_beside_the_drawing_ends_the_walk() -> None:
+    """Carbon, round 4: a numeric word with ``x0 == x1`` just outside the rectangle pulled the
+    edge to itself and was never consumed, so the sideways walk looped forever."""
+    for words in (
+        [_word(305, 150, 305, 158, "40", 1)],
+        [_word(95, 150, 95, 158, "40", 1)],
+        [_word(305, 150, 305, 158, "40", 1), _word(310, 150, 310, 158, "50", 2)],
+    ):
+        with _within(5):
+            rect = _crop_rect(words)
+        assert rect[0] <= 95 or rect[2] >= 305, "the label is inside the crop"
+
+
+def test_the_sideways_walk_stops_at_the_nearest_block_that_is_not_a_tick_label() -> None:
+    """cubic: prose between the drawing and a number is not crossed. One token differs between
+    the arms: the block next to the drawing is a number or a word."""
+    reach = {}
+    for beside in ("5", "of"):
+        reach[beside] = _crop_rect(
+            [_word(302, 150, 310, 158, beside, 1), _word(312, 150, 322, 158, "40", 2)]
+        )[2]
+    assert reach["5"] >= 322, "numbers all the way: both are tick labels"
+    assert reach["of"] < 312, "a word in between: the walk stops before the number behind it"
+
+
+def test_a_short_block_under_the_drawing_needs_a_signal_of_its_own() -> None:
+    """cubic: brevity and adjacency alone do not make a sentence part of the figure. Same size and
+    the same distance under the drawing. The block that runs past the drawing's width (a column
+    of prose) is left out unless its words say units or a note; the same words inside the
+    drawing's width are the figure's own label."""
+    bottoms = {}
+    for tag, x, text in (
+        ("plain", 40, ["Then", "we", "left"]),
+        ("inside", 100, ["Then", "we", "left"]),
+        ("units", 40, ["Billions", "of", "dollars"]),
+        ("lead", 40, ["SOURCE:", "Bureau", "reports"]),
+    ):
+        words = [
+            _word(x + 30 * k, 205, x + 25 + 30 * k, 213, token, 1) for k, token in enumerate(text)
+        ]
+        bottoms[tag] = _crop_rect(words)[3]
+    assert bottoms["plain"] < 205 < bottoms["inside"]
+    assert bottoms["plain"] < 205 < bottoms["units"]
+    assert bottoms["lead"] > 205
+
+
+def test_a_title_over_two_panels_is_taken_by_both_and_makes_them_one_crop() -> None:
+    """A heading wider than either panel and centred on neither: it spans the panels, so it is
+    the figure's title and the panels are one figure. One difference: the heading's words sit
+    over the panels, or far to the side of them."""
+    from socr.figures import figure_crop
+
+    left, right = (100.0, 100.0, 200.0, 200.0), (260.0, 100.0, 360.0, 200.0)
+    groups = {}
+    for tag, x0 in (("over", 120), ("aside", 420)):
+        words = [_word(x0 + 30 * k, 92, x0 + 25 + 30 * k, 100, "Head", 1) for k in range(8)]
+        words += _PARAGRAPH
+        groups[tag] = [g.indices for g in figure_crop.crop_groups(words, [left, right], _PAGE)]
+    assert groups["over"] == [(1, 2)]
+    assert groups["aside"] == [(1,), (2,)]
+
+
+def test_a_block_the_extractor_joined_across_panels_is_cut_where_the_text_is_apart() -> None:
+    """The extractor's own block numbering differs by version: PyMuPDF 1.28 puts panel 1's
+    x-axis labels and panel 2's first tick label in one block, 1.27 does not. A block here is cut
+    at a gap wider than one line pitch and joined only where extents overlap."""
+    from socr.figures import figure_crop
+
+    words = [
+        _word(105, 203, 130, 211, "2018", 7, 0),
+        _word(135, 203, 160, 211, "2019", 7, 0),
+        _word(285, 191, 292, 199, "0", 7, 1),
+        # one line holding both panels' labels, 170 apart
+        _word(105, 230, 130, 238, "2018", 8, 0),
+        _word(300, 230, 325, 238, "2018", 8, 0),
+        _word(100, 500, 150, 508, "word", 9, 0),
+        _word(100, 512, 150, 520, "word", 9, 1),
+    ]
+    blocks = figure_crop._blocks(words, figure_crop.line_pitch(words))
+    spans = sorted((round(b.x0), round(b.x1)) for b in blocks if b.numeric)
+    assert spans == [(105, 130), (105, 160), (285, 292), (300, 325)]
+
+
 def test_tick_labels_outside_the_drawing_on_both_sides_are_inside_the_crop(tmp_path: Path) -> None:
     """(c) Right-hand y-axis labels, which the drawing box clips."""
     pdf, g = _column_page(tmp_path / "c.pdf", right_ticks=True)
@@ -829,7 +946,69 @@ def test_one_row_of_years_beside_prose_is_not_chart_evidence(lines, fires) -> No
     (a,) = fp.assess_regions(words, boxes, set(), [], False)
     assert a.ticks >= MIN_TICK_RUN
     assert a.fires is fires
-    assert (a.tick_lines >= fp.MIN_TICK_LINES) is fires
+    assert bool(a.axis) is fires
+
+
+def _grid(rows: list[list[str]], *, one_line_per_word: bool, x0=20.0, step=60.0, y0=20.0):
+    """Words laid out on a grid, the text layer's line numbering the only thing that varies:
+    one (block, line) per row, or one per word (how many PDFs store a header row)."""
+    words, line = [], 0
+    for r, row in enumerate(rows):
+        for c, token in enumerate(row):
+            if not token:
+                continue
+            x = x0 + c * step
+            words.append((x, y0 + r * 12, x + 24, y0 + r * 12 + 8, token, 0, line, 0))
+            if one_line_per_word:
+                line += 1
+        line += 1
+    return words, [fitz.Rect(0, 0, 400, y0 + len(rows) * 12 + 5)]
+
+
+YEARS = ["2019", "2020", "2021", "2022"]
+
+
+@pytest.mark.parametrize("one_line_per_word", [False, True], ids=["row-per-line", "line-per-year"])
+def test_a_year_header_over_table_rows_is_not_a_scale_however_the_layer_lines_it(
+    one_line_per_word: bool,
+) -> None:
+    """Fable 3. The same header row and the same rows beneath it; only the layer's line
+    numbering differs, and the answer must not. The delimiter-free table is not chart evidence."""
+    rows = [YEARS, ["Output", "Prices", "Hours", "Wages"], ["gains", "rose", "fell", "held"]]
+    words, boxes = _grid(rows, one_line_per_word=one_line_per_word)
+    (a,) = fp.assess_regions(words, boxes, set(), [], False)
+    assert not a.fires and a.axis == ""
+
+
+@pytest.mark.parametrize("one_line_per_word", [False, True], ids=["row-per-line", "line-per-year"])
+def test_a_chart_whose_only_numbers_are_one_x_axis_row_fires(one_line_per_word: bool) -> None:
+    """Fable 3, the other half: nothing sits under the row, so it is a chart's last line, not a
+    table's header. The previous rule lost this chart."""
+    words, boxes = _grid([YEARS], one_line_per_word=one_line_per_word)
+    (a,) = fp.assess_regions(words, boxes, set(), [], False)
+    assert a.fires and a.axis == "x"
+
+
+def test_a_note_line_under_an_x_axis_row_does_not_make_it_a_table_header() -> None:
+    """A figure's own NOTE line runs the figure's width and sits under its x-axis row. One
+    difference: the line under the years opens with ``NOTE:`` or with a plain word."""
+    verdict = {}
+    for lead in ("NOTE:", "Output"):
+        rows = [YEARS, [lead, "prices", "rose", "in", "2012"]]
+        words, boxes = _grid(rows, one_line_per_word=False)
+        (a,) = fp.assess_regions(words, boxes, set(), [], False)
+        verdict[lead] = a.fires
+    assert verdict == {"NOTE:": True, "Output": False}
+
+
+def test_numbers_that_share_no_column_and_no_baseline_are_not_a_scale() -> None:
+    """Three numbers in a run, one per line, each in a different column AND row."""
+    words = [
+        (20.0 + 90 * i, 20.0 + 40 * i, 44.0 + 90 * i, 28.0 + 40 * i, str(10 * i), 0, i, 0)
+        for i in range(4)
+    ]
+    (a,) = fp.assess_regions(words, [fitz.Rect(0, 0, 400, 200)], set(), [], False)
+    assert a.ticks >= MIN_TICK_RUN and not a.fires and a.axis == ""
 
 
 # ---------------------------------------------------------------------------
@@ -837,29 +1016,7 @@ def test_one_row_of_years_beside_prose_is_not_chart_evidence(lines, fires) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_a_bare_box_does_not_excuse_a_placeholder_on_a_table_page(tmp_path: Path) -> None:
-    """Same page, same placeholder, same table signal; only the box's tick numbers differ."""
-    outcome = {}
-    for ticks in (True, False):
-        root = tmp_path / str(ticks)
-        root.mkdir()
-        pdf = _chart_pdf(root / "c.pdf", ticks=ticks)
-        from socr.core.document import DocumentHandle
-        from socr.core.state import DocumentState
-
-        state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
-        ps = PageState(page_num=1)
-        ps.has_tables = True
-        state.pages[1] = ps
-        out = PageOutput(
-            page_num=1,
-            text="<!-- Image (1, 2, 3, 4) -->\n\nA table follows.",
-            status=PageStatus.SUCCESS,
-            engine="qwen",
-        )
-        _pipe()._agentic_figure_presence_page(state, 1, ps, out, root / "figures")
-        outcome[ticks] = ps.unshipped_figure_kind
-    assert outcome == {True: "", False: fp.PLACEHOLDER_KIND}
+# (the table-page placeholder tests drive _phase_assemble; see section (c) below)
 
 
 # ---------------------------------------------------------------------------
@@ -957,58 +1114,230 @@ def test_a_shipped_record_is_not_decided_again_on_the_same_page(tmp_path: Path) 
     assert [e.kind for e in st.events] == before
 
 
-# -- (c) table-signal pages: only crops GH-189 preserved are credited -------------------------
+# -- (c) table-signal pages: judged at assembly from the bytes that ship ---------------------
 
 
-def _table_page_state(tmp_path: Path, ticks: bool):
+def _gh189():
+    """The GH-189 fixtures: a real mixed chart+table page, a real detector and crop renderer."""
+    import test_gh189_mixed_chart_preservation as g
+
+    return g
+
+
+_PLACEHOLDER_WINNER = "<!-- Image (10, 20, 300, 200) -->\n\n" + _gh189().WINNER_TEXT
+_TWO_PLACEHOLDERS_WINNER = "<!-- Image (10, 20, 300, 200) -->\n" + _PLACEHOLDER_WINNER
+
+
+def _mixed_pdf(path: Path, *, ticks: bool, pages: int = 1) -> Path:
+    """The GH-189 page (chart, table, chart) with, when *ticks*, a column of axis numbers beside
+    the first chart. The only difference between the arms. Extra pages are chart-free text."""
+    g = _gh189()
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    g._write_page_text(page)
+    g._draw_bars(page, 90, 200)
+    g._draw_bars(page, 490, 600)
+    if ticks:
+        for k, value in enumerate((0, 10, 20, 30, 40)):
+            page.insert_text((60, 200 - k * 25), str(value), fontname="helv", fontsize=9)
+    for _ in range(pages - 1):
+        extra = doc.new_page(width=612, height=792)
+        g._write_page_text(extra)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def _table_pipeline_state(pdf: Path, pages: int = 1):
+    from socr.core.born_digital import DocumentAssessment, PageAssessment
     from socr.core.document import DocumentHandle
     from socr.core.state import DocumentState
 
-    pdf = _chart_pdf(tmp_path / "c.pdf", ticks=ticks)
-    state = DocumentState(handle=DocumentHandle(path=pdf, page_count=1))
-    ps = PageState(page_num=1)
-    ps.has_tables = True
-    state.pages[1] = ps
-    out = PageOutput(
-        page_num=1,
-        text="<!-- Image (1, 2, 3, 4) -->\n\nA table follows.",
-        status=PageStatus.SUCCESS,
-        engine="qwen",
-    )
-    _pipe()._agentic_figure_presence_page(state, 1, ps, out, tmp_path / "figures")
-    return state, ps
+    g = _gh189()
+    pipeline = g._make_pipeline()
+    state = DocumentState(handle=DocumentHandle(path=pdf, page_count=pages))
+    assessed = []
+    for n in range(1, pages + 1):
+        state.pages[n] = PageState(
+            page_num=n,
+            is_born_digital=True,
+            native_text="Figure preamble sentence unique alpha",
+            needs_ocr_enhancement=False,
+            has_tables=True,
+        )
+        assessed.append(
+            PageAssessment(
+                page_num=n,
+                is_born_digital=True,
+                native_text="Figure preamble sentence unique alpha",
+                confidence=0.9,
+                needs_ocr_enhancement=False,
+                has_tables=True,
+            )
+        )
+    state._last_assessment = DocumentAssessment(path=pdf, pages=assessed)
+    pipeline._last_assessment = state._last_assessment
+    return pipeline, state
 
 
-@pytest.mark.parametrize("preserved", [{1}, set()], ids=["crop-preserved", "crop-failed"])
-def test_a_table_pages_placeholder_is_excused_only_by_a_crop_gh189_preserved(
-    tmp_path: Path, preserved: set[int]
+def _table_page_run(tmp_path: Path, tag: str, *, ticks: bool, providers: bool, crop_fails=False):
+    """Page loop then assembly, as the GH-189 tests drive them. One arm per call."""
+    from unittest.mock import patch
+
+    from socr.core.providers import PROFILE_QWEN_LOCAL
+
+    g = _gh189()
+    pdf = _mixed_pdf(tmp_path / f"{tag}.pdf", ticks=ticks)
+    out_dir = tmp_path / f"out-{tag}"
+    pipeline, state = _table_pipeline_state(pdf)
+    real_save = fitz.Pixmap.save
+
+    def _save(self, target, *args, **kwargs):
+        if crop_fails and str(target).endswith("chart_region_p1_1.png"):
+            raise RuntimeError("pixmap save died")
+        return real_save(self, target, *args, **kwargs)
+
+    with (
+        patch(
+            "socr.pipeline.orchestrator.route_page",
+            return_value=g._accepted_decision(_PLACEHOLDER_WINNER),
+        ),
+        patch.object(
+            UnifiedPipeline,
+            "_available_engines_for_agentic",
+            return_value=[PROFILE_QWEN_LOCAL] if providers else [],
+        ),
+        patch.object(UnifiedPipeline, "_resolve_judge_model", return_value=""),
+        patch.object(fitz.Pixmap, "save", _save),
+    ):
+        pipeline._phase_agentic(state, out_dir)
+        before = state.pages[1].unshipped_figure_kind
+        result = pipeline._phase_assemble(state, out_dir)
+    ps = state.pages[1]
+    return ps, before, result, g._final_page_status(out_dir), state
+
+
+@pytest.mark.parametrize("providers", [True, False], ids=["provider", "no-provider"])
+def test_a_table_pages_placeholder_is_excused_only_by_a_crop_of_a_box_with_ticks(
+    tmp_path: Path, providers: bool
 ) -> None:
-    """Same page, same box, same placeholder; only whether GH-189's crop landed differs."""
-    state, ps = _table_page_state(tmp_path, ticks=True)
-    assert ps.placeholder_pending and not ps.unshipped_figure_kind, "judged after assembly"
-    assert not state.events
-    state._chart_region_preserved = {1: set(preserved)}
-    _pipe()._reconcile_pending_placeholders(state)
-    assert ps.placeholder_pending is None
-    assert ps.unshipped_figure_kind == (fp.PLACEHOLDER_KIND if not preserved else "")
-    assert bool(state.events) == (not preserved)
+    """Through the page loop and ``_phase_assemble``. Same page, same placeholder, same
+    GH-189 crops; the arms differ only in whether the first box carries axis numbers."""
+    arms = {}
+    for ticks in (True, False):
+        ps, before, result, status, state = _table_page_run(
+            tmp_path, f"t{ticks}-{providers}", ticks=ticks, providers=providers
+        )
+        arms[ticks] = (ps.unshipped_figure_kind, before, status, state.pages[1].best_output)
+    if providers:
+        assert arms[True][3] is not None and arms[True][3].engine == "deepseek", "a MODEL page"
+        assert arms[True][1] == arms[False][1] == "", "nothing is decided before the crops exist"
+        assert arms[True][0] == ""
+        assert arms[False][0] == fp.PLACEHOLDER_KIND
+        assert arms[False][2] != "success"
+    else:
+        assert arms[True][0] == arms[False][0] != fp.PLACEHOLDER_KIND, "no model read the page"
 
 
-def test_a_table_page_gh189_skipped_credits_nothing(tmp_path: Path) -> None:
-    """GH-189 never ran its crop for the page (no ``_chart_region_preserved`` entry)."""
-    state, ps = _table_page_state(tmp_path, ticks=True)
-    _pipe()._reconcile_pending_placeholders(state)
+def test_a_table_page_whose_crop_failed_is_marked(tmp_path: Path) -> None:
+    ps, _before, _result, status, _state = _table_page_run(
+        tmp_path, "failed", ticks=True, providers=True, crop_fails=True
+    )
     assert ps.unshipped_figure_kind == fp.PLACEHOLDER_KIND
+    assert status != "success"
 
 
-def test_assembly_reconciles_the_pending_placeholders_after_the_chart_region_pass() -> None:
-    """The call site: a reverted call leaves a table page's placeholder judged by nobody."""
-    import inspect
+def test_an_already_linked_crop_does_not_excuse_a_second_placeholder(tmp_path: Path) -> None:
+    """Carbon 2: one crop file, linked once by the model and once by GH-189, is one picture."""
+    out = tmp_path / "doc"
+    (out / "figures").mkdir(parents=True)
+    (out / "figures" / "chart_region_p1_1.png").write_bytes(b"png")
+    body = (
+        "<!-- Image (1, 2, 3, 4) -->\n<!-- Image (5, 6, 7, 8) -->\n"
+        "![a](figures/chart_region_p1_1.png)\n\n![b](figures/chart_region_p1_1.png)\n"
+    )
+    assert fp.placeholder_count(body) == 2
+    assert fp.shipped_image_count(body, out) == 1
+    assert fp.shipped_image_count(body) == 1, "the same on link text alone"
 
+
+@pytest.mark.parametrize("providers", [True, False], ids=["provider", "no-provider"])
+def test_a_terminal_table_page_never_judged_is_judged_on_resume(
+    tmp_path: Path, providers: bool
+) -> None:
+    """Carbon, round 4. A model page ends a run terminal and unmarked with its placeholders never
+    judged (an older run, or an assembly that stopped before the judgement). The resume skips it
+    through ``_load_terminal_page`` and must still mark it at assembly, from the bytes. Two
+    placeholders and one crop of a box with ticks: one placeholder is unmatched. One difference
+    between the arms: whether the first run's judgement was switched off."""
+    import shutil
+    from unittest.mock import patch
+
+    from socr.core.providers import PROFILE_QWEN_LOCAL
     from socr.pipeline.orchestrator import UnifiedPipeline as U
 
-    src = inspect.getsource(U._phase_assemble)
-    assert src.index("_preserve_chart_regions(") < src.index("_reconcile_pending_placeholders(")
+    g = _gh189()
+    outcomes = {}
+    for legacy in (False, True):
+        tag = f"{legacy}-{providers}"
+        pdf = _mixed_pdf(tmp_path / f"{tag}.pdf", ticks=True, pages=2)
+        out_dir = tmp_path / f"out-{tag}"
+        routed: list[int] = []
+
+        def _route(*args, _routed=routed, **kwargs):
+            _routed.append(kwargs.get("page_num") or next(a for a in args if isinstance(a, int)))
+            return g._accepted_decision(_TWO_PLACEHOLDERS_WINNER)
+
+        skipped: list[int] = []
+        real_load = U._load_terminal_page
+
+        def _spy(self, state, page_num, out, _skipped=skipped, _real=real_load):
+            resumed = _real(self, state, page_num, out)
+            if resumed is not None:
+                _skipped.append(page_num)
+            return resumed
+
+        with (
+            patch("socr.pipeline.orchestrator.route_page", side_effect=_route),
+            patch.object(
+                U,
+                "_available_engines_for_agentic",
+                return_value=[PROFILE_QWEN_LOCAL] if providers else [],
+            ),
+            patch.object(U, "_resolve_judge_model", return_value=""),
+        ):
+            if legacy:
+                pipeline, state = _table_pipeline_state(pdf, pages=2)
+                with patch.object(U, "_reconcile_model_placeholders", lambda *a, **k: None):
+                    pipeline._phase_agentic(state, out_dir)
+                    pipeline._phase_assemble(state, out_dir)
+                first = json.loads(next(iter(out_dir.rglob("pages/00001.json"))).read_text())
+                assert (
+                    first["terminal"] and first["unshipped_figure_kind"] != fp.PLACEHOLDER_KIND
+                ), "page 1 ended terminal and unmarked: its placeholders were never judged"
+                for md in out_dir.rglob("*.md"):
+                    if "pages" not in md.parts:
+                        md.unlink()
+                routed.clear()
+            pipeline, state = _table_pipeline_state(pdf, pages=2)
+            with patch.object(U, "_load_terminal_page", _spy):
+                pipeline._phase_agentic(state, out_dir)
+            pipeline._phase_assemble(state, out_dir)
+        sidecar = json.loads(next(iter(out_dir.rglob("pages/00001.json"))).read_text())
+        outcomes[legacy] = (
+            state.pages[1].unshipped_figure_kind,
+            sidecar["unshipped_figure_kind"],
+            list(skipped),
+            list(routed),
+        )
+        shutil.rmtree(out_dir, ignore_errors=True)
+    if providers:
+        assert outcomes[True][2] == [1, 2], "the resume skipped page 1 through the ledger"
+        assert outcomes[True][3] == [], "no page was routed again"
+        assert outcomes[False][2] == []
+        assert outcomes[True][:2] == outcomes[False][:2] == (fp.PLACEHOLDER_KIND,) * 2
+    else:
+        assert outcomes[True][0] == outcomes[False][0] != fp.PLACEHOLDER_KIND
 
 
 # -- (d) a #1187-answered page keeps exactly its #1187 record ---------------------------------
@@ -1074,11 +1403,43 @@ def test_the_live_note_and_the_cli_line_read_the_same_events() -> None:
     assert "could not locate" not in note
 
 
+def test_refinalize_words_a_partly_lost_chart_page_as_the_live_note_does() -> None:
+    """cubic. A page that saved one crop and lost another carries refs AND the lost kind. The
+    live note names it by its figure-specific clause only; the tool must say the same."""
+    from socr.core.audit_log import AuditEvent
+    from socr.core.document import DocumentHandle
+    from socr.core.state import DocumentState
+    from socr.pipeline.refinalize_unshipped_figures import answered_document_note
+
+    state = DocumentState(handle=DocumentHandle(path=Path("x.pdf"), page_count=4))
+    sidecars = []
+    for page, kind, refs in (
+        (2, fp.PRESENCE_SHIPPED_KIND, ["figures/a.png"]),
+        (3, fp.PRESENCE_RENDER_FAILED_KIND, ["figures/b.png"]),
+    ):
+        state.events.append(AuditEvent(page_num=page, kind=kind, engine="", detail="d"))
+        sidecars.append(
+            {
+                "page_num": page,
+                "unshipped_figure_kind": kind,
+                "unshipped_figure_refs": refs,
+                "unshipped_figure_unlocated": (
+                    ["chart region 2"] if kind == fp.PRESENCE_RENDER_FAILED_KIND else []
+                ),
+            }
+        )
+    live = UnifiedPipeline._unshipped_figure_note(state)
+    assert live and "ships as an image" in live
+    assert answered_document_note(sidecars) == live
+
+
 # -- (g) literal context ----------------------------------------------------------------------
 
 
 def test_placeholders_in_table_cells_and_inline_code_are_not_counted() -> None:
-    assert fp.placeholder_count("| a | <!-- Image (1) --> |\n| b | c |") == 0
+    assert fp.placeholder_count("| a | b |\n| --- | --- |\n| x | <!-- Image (1) --> |") == 0
+    assert fp.placeholder_count("a | b | c <!-- Image (1) -->") == 1, "pipes in prose: no table"
+    assert fp.placeholder_count("x | y\n\n<!-- Image (1) -->\n\n| a | b |\n| - | - |") == 1
     assert fp.placeholder_count("a `<!-- Image (x) -->` quoted") == 0
     assert fp.placeholder_count("a ``<!-- Image (x) -->`` quoted") == 0
     assert fp.placeholder_count("<!-- Image (1, 2, 3, 4) -->") == 1

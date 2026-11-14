@@ -14259,23 +14259,40 @@ class UnifiedPipeline:
     ) -> None:
         """A model reading's ``<!-- Image`` placeholders, matched one-to-one by shipped images.
 
-        Images counted: figure images already in the body that resolve to a file on disk under
-        *doc_dir* (a link to a file nobody saved ships nothing). A placeholder beyond that count
-        is a figure nothing ships: the page gets a figure-specific mark.
+        Decided here for a page with NO table signal, so the terminal sidecar the loop flushes
+        already carries the mark. A page with a table signal is GH-189's: its chart boxes are
+        cropped at assembly, so a placeholder there may be matched by a crop that does not exist
+        yet, and nothing is decided here. EVERY model page, this one included, is judged again by
+        ``_reconcile_model_placeholders`` at assembly from the bytes that ship, which is the only
+        decision a RESUMED page ever gets (it skips this loop) and needs no state carried between
+        the two (Carbon, PR #1309 round 4: a transient ``placeholder_pending`` was lost on an
+        interrupted run and the page shipped SUCCESS with its placeholders unmatched).
+        """
+        if self._page_has_tables(page_num, ps):
+            return
+        self._judge_placeholders(state, page_num, ps, body, doc_dir)
 
-        A page with a table signal is different: GH-189's ``_preserve_chart_regions`` crops its
-        chart boxes at assembly, so a placeholder there may be matched by a crop that does not
-        exist yet. Nothing is credited for it here. The page records which of its boxes carry the
-        regional tick evidence (``placeholder_pending``) and
-        ``_reconcile_pending_placeholders`` credits only the crops GH-189 actually preserved,
-        after it ran (cubic, PR #1309: a crop that fails at assembly never excuses a placeholder).
+    def _judge_placeholders(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        body: str,
+        doc_dir: Path | None,
+    ) -> None:
+        """Count the placeholders of *body* against the figure images it ships; mark the rest.
+
+        Images counted: figure images in the body that resolve to a file on disk under *doc_dir*
+        (a link to a file nobody saved ships nothing), each file once. On a page with a table
+        signal a GH-189 chart-region crop counts only for a box with the regional tick evidence
+        (a decorative box's crop is not the figure the model marked).
 
         A page #1187 already answered (a figure it located, one it could not, one it could not
         save, a chart skeleton) is not decided twice, and it is not left without a record: the
         #1187 event IS its record, that kind is a MARKED one (the page is demoted, the document
         note and the CLI name it), and a second placeholder count would only restate the same
         loss under a second kind. ``NOT_FOUND`` marked nothing, so it is decided here and its
-        event replaced.
+        event replaced. Deciding the same page twice with the same bytes is idempotent.
         """
         from socr.figures import figure_presence as fp
 
@@ -14283,12 +14300,9 @@ class UnifiedPipeline:
         if not placeholders:
             return
         recorded = getattr(ps, _UNSHIPPED_FIGURE_KIND_FIELD, "")
-        if recorded and recorded != _unshipped_figures.NOT_FOUND_KIND:
+        if recorded and recorded not in (_unshipped_figures.NOT_FOUND_KIND, fp.PLACEHOLDER_KIND):
             return
-        shipped = fp.shipped_image_count(body, doc_dir)
-        if shipped >= placeholders:
-            return
-        regions: list[int] = []
+        credited: set[int] | None = None
         if self._page_has_tables(page_num, ps):
             from socr.core.pdf import open_pdf
             from socr.tables.reconstruct import chart_region_bboxes
@@ -14296,7 +14310,7 @@ class UnifiedPipeline:
             try:
                 with open_pdf(str(state.handle.path)) as _doc:
                     _page = _doc[page_num - 1]
-                    regions = [
+                    credited = {
                         a.index
                         for a in fp.assess_regions(
                             list(_page.get_text("words") or []),
@@ -14306,17 +14320,45 @@ class UnifiedPipeline:
                             page_shipped=False,
                         )
                         if a.has_evidence
-                    ]
-            except Exception:  # noqa: BLE001 -- unreadable: credit nothing, mark
-                regions = []
-        if regions:
-            ps.placeholder_pending = {
-                "placeholders": placeholders,
-                "images": shipped,
-                "regions": regions,
-            }
-            return
+                    }
+            except Exception:  # noqa: BLE001 -- unreadable: no crop is credited, mark
+                credited = set()
+        shipped = fp.shipped_image_count(
+            body, doc_dir, page_num=page_num, credited_chart_regions=credited
+        )
         self._mark_unmatched_placeholders(state, page_num, ps, placeholders, shipped)
+
+    def _reconcile_model_placeholders(
+        self,
+        state: DocumentState,
+        page_texts: list[str],
+        records: list,
+        output_dir: Path,
+    ) -> None:
+        """After GH-189 ran: judge EVERY model page's placeholders against the bytes that ship.
+
+        No state is carried from the page loop. The page's text is the final one (crops GH-189
+        linked are in it), the lane is the finalised record's engine, and a page a resumed run
+        skipped is judged exactly like a fresh one, so an interrupted run cannot ship a model
+        page's unmatched placeholders as a silent SUCCESS. A page that ships its own page
+        image, a floor, a failed marker or a native body has nothing to judge.
+        """
+        from socr.core.manifest import is_page_failed_marker, page_ships_its_own_page_image
+
+        doc_dir, _figures_dir = self._doc_and_figures_dir(state.handle.path, output_dir)
+        for page_num in sorted(state.pages):
+            if page_num < 1 or page_num > len(page_texts) or page_num > len(records):
+                continue
+            ps = state.pages[page_num]
+            body = page_texts[page_num - 1] or ""
+            engine = str(getattr(records[page_num - 1].output, "engine", "") or "").strip().lower()
+            if not body.strip() or is_page_failed_marker(body) or not engine:
+                continue
+            if not _unshipped_figures.page_was_read_by_a_model(engine):
+                continue
+            if getattr(ps, "chart_floor_body", False) or page_ships_its_own_page_image(ps, body):
+                continue
+            self._judge_placeholders(state, page_num, ps, body, doc_dir)
 
     def _mark_unmatched_placeholders(
         self, state: DocumentState, page_num: int, ps, placeholders: int, shipped: int
@@ -14351,26 +14393,6 @@ class UnifiedPipeline:
                 data={"placeholders": placeholders, "images": shipped, "unmatched": unmatched},
             )
         )
-
-    def _reconcile_pending_placeholders(self, state: DocumentState) -> None:
-        """After GH-189 ran: credit a table page's placeholders with the crops it PRESERVED.
-
-        Only a chart box that has the regional tick evidence AND whose crop
-        ``_preserve_chart_regions`` rendered and linked counts. A page it skipped (a floor, a
-        #1187 crop), one whose crop failed, and one it could not read credit nothing.
-        """
-        preserved_by_page = getattr(state, "_chart_region_preserved", {}) or {}
-        for page_num in sorted(state.pages):
-            ps = state.pages[page_num]
-            pending = getattr(ps, "placeholder_pending", None)
-            if not pending:
-                continue
-            ps.placeholder_pending = None
-            preserved = set(preserved_by_page.get(page_num, ()))
-            credited = len(preserved & set(pending["regions"]))
-            self._mark_unmatched_placeholders(
-                state, page_num, ps, pending["placeholders"], pending["images"] + credited
-            )
 
     def _agentic_scanned_figure_page(
         self,
@@ -19939,9 +19961,9 @@ class UnifiedPipeline:
         # flush, the status aggregation, the initial save and the metadata --
         # so every terminal writer serializes the same reconciled text.
         page_texts = self._preserve_chart_regions(state, page_texts, output_dir)
-        # #1276: a model page with a table signal had its placeholders judged only now, against
-        # the crops GH-189 actually preserved.
-        self._reconcile_pending_placeholders(state)
+        # #1276: every model page's placeholders are judged against the bytes that ship, the
+        # crops GH-189 just linked included, resumed pages included.
+        self._reconcile_model_placeholders(state, page_texts, pre_records, output_dir)
 
         # #635 Stage 0, CLI surface. Counted from the document's own events so a
         # resumed run reports what THIS run's body actually contains rather than
