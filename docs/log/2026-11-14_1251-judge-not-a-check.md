@@ -143,7 +143,7 @@ uncapped anchor count == 1 asserted before editing, all KILLED by the new tests)
 
 ## Existing tests this change fails (NOT edited; coordinator ruling needed)
 
-Full suite on the commit: 14 fail, 10,636 pass.
+Full suite: 9 fail after the side-file rename (was 14).
 
 Group 1, the rule's own effect. Each builds a model-read page, accepted by a fixed judge, on a
 rotated or otherwise layer-less fixture where no words are owed, and asserts it is clean SUCCESS.
@@ -163,11 +163,26 @@ Two of these are a real design question: the offline tools (`socr-refinalize-own
 apply this clause, so "refinalize an old run equals a run of this code" no longer holds for a
 judge-only page. Either the tools apply it too, or the equality tests exempt it.
 
-Group 2, the side-file name. `test_gh987_judge_breaker_e2e.py` (6 tests: wedged judge, breaker
-surfaced once, raising probe, vLLM probe, short-circuited resume, breaker event on resume) reads
-`out_dir.rglob("pages/*.json")` and does `int(path.stem)`, which fails on `00001.judge-calls`. The
-brief fixes the name; moving the file out of `pages/` (for example `judge/NNNNN.json`) or
-filtering the helper are the two ways out.
+Group 2, the side-file name (fixed). The side file was first `NNNNN.judge.json`, which every
+`pages/*.json` glob (the gh987 helper `_sidecars`) parsed as a sidecar (`int('00001.judge')`). It is
+now `NNNNN.judge-calls` (no `.json` suffix), so no existing glob sees it. Six gh987 tests failed on
+that alone; three now pass. Two gh987 tests still fail for a different reason, a real design
+question:
+
+* `test_gh987_judge_breaker_e2e.py::test_wedged_judge_fails_pages_closed_exactly_like_a_slow_one_but_instantly`
+* `test_gh987_judge_breaker_e2e.py::test_a_vllm_judge_is_probed_with_a_generation_not_its_listing`
+
+They require every sidecar of a breaker run to equal the slow-judge run. A page short-circuited by
+the breaker never reached the judge, so it has no judge call and no `judge_calls` reference; the
+slow run's page has one. Recording a call that did not happen would be false, so the sidecar
+differs by exactly the `judge_calls` key. The test's `_shape` needs to treat `judge_calls` as
+volatile, or the breaker must record a synthetic `circuit_open` call (coordinator ruling).
+
+The third, `test_short_circuited_pages_are_reprocessed_on_resume_when_the_judge_is_healthy`,
+asserts a judge-accepted control page is `_passed`; it is Group 1 (control page has no own layer).
+
+Totals now: 9 existing tests fail (Group 1: 8 listed above plus the gh987 control; Group 2: 2),
+counted by file in the list above.
 
 ## Not done
 
