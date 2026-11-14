@@ -259,10 +259,34 @@ def test_an_attached_number_stays_a_separate_token() -> None:
 def test_a_wrapper_before_punctuation_leaves_no_space() -> None:
     w = f"[Footnote 1. {NOTE} End footnote 1.]"
     assert _strip(f"the rate{w}.\n1 {NOTE}").text == f"the rate.\n1 {NOTE}"
-    assert _strip(f"the rate {w}.\n1 {NOTE}").text == f"the rate.\n1 {NOTE}"
+    assert _strip(f"the rate {w}.\n1 {NOTE}").text == f"the rate .\n1 {NOTE}", "space existed"
     assert _strip(f"Growth{w} slowed\n1 {NOTE}").text == f"Growth slowed\n1 {NOTE}"
     assert _strip(f"1{w} 2\n1 {NOTE}").text == f"1 2\n1 {NOTE}"
     assert _strip(f"x {w} (y)\n1 {NOTE}").text == f"x (y)\n1 {NOTE}"
+
+
+@pytest.mark.parametrize(
+    "src, want",
+    [
+        ("1{w} .2", "1 .2"),  # Astra: whitespace after; must not become 1.2
+        ("1{w}.2", "1 .2"),  # no whitespace at all, but removal would form 1.2
+        ("1 {w}.2", "1 .2"),
+        ("a -{w}5", "a - 5"),  # sign must not attach to the next number
+        ("a - {w}5", "a - 5"),
+        ("+{w}.5", "+ .5"),
+        ("x.{w}5", "x. 5"),  # a point on the left must not become a decimal point
+        ("2020{w}.", "2020."),  # sentence end: no number formed, no space
+        ("rate{w}.", "rate."),
+        ("rate{w},", "rate,"),
+        ("Growth{w} slowed", "Growth slowed"),
+        ("1{w}2", "1 2"),
+        ("Growth{w}slowed", "Growth slowed"),
+    ],
+)
+def test_removal_never_forms_a_number_the_page_did_not_have(src: str, want: str) -> None:
+    w = f"[Footnote 1. {NOTE} End footnote 1.]"
+    got = _strip(src.replace("{w}", w) + f"\n1 {NOTE}").text
+    assert got == want + f"\n1 {NOTE}"
 
 
 def test_edge_and_adjacent_wrappers_keep_one_space_or_none() -> None:
@@ -667,9 +691,13 @@ def test_the_inline_strip_keeps_the_token_boundary_through_the_pipeline(
 def test_a_leading_zero_wrapper_the_pdf_paints_is_kept_through_the_pipeline(
     tmp_path: Path, monkeypatch, provider: bool
 ) -> None:
-    w = f"[Footnote 01. {NOTE} End footnote 01.]"
-    lines = [f"policy rates.1 {w} On the other hand.", "more body text.", "", "", f"01 {NOTE}"]
+    short = "Short note."  # the visible wrapper must fit the page, or the layer holds a stub
+    w = f"[Footnote 01. {short} End footnote 01.]"
+    lines = [f"rates.1 {w} On the other hand.", "more body.", "", "", f"01 {short}"]
     _run(tmp_path, "off", monkeypatch, lines, provider=provider, guard=False)
+    with fitz.open(tmp_path / "off.pdf") as doc:
+        layer = " ".join(doc[0].get_text().split())
+    assert w in layer, "setup: the layer holds the complete wrapper"
     _run(tmp_path, "on", monkeypatch, lines, provider=provider)
     on = _page_text(tmp_path, "on")
     assert "[Footnote 01." in on, "setup: the painted wrapper is in the shipped layer"

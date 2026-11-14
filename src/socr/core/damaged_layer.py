@@ -151,6 +151,16 @@ def _printed_number_re(note: int) -> re.Pattern:
     return re.compile(rf"(?m)^[ \t]*0*{note}[.)]?[ \t]+\S")
 
 
+_NUMBER_LEFT_EDGE = frozenset("+-\u2212.,")
+
+
+def _would_join_number(left: str, right: str) -> bool:
+    """Would ``left`` + ``right`` touching form or extend a numeric token (sign, digit, point)?"""
+    if not (left.isdigit() or left in _NUMBER_LEFT_EDGE):
+        return False
+    return right[:1].isdigit() or (right[:1] == "." and right[1:2].isdigit())
+
+
 def strip_hidden_footnotes(text: str, painted: str | None = None) -> FootnoteResult:
     """*text* without the hidden wrappers that are shown hidden and whose printed copy is there.
 
@@ -159,7 +169,8 @@ def strip_hidden_footnotes(text: str, painted: str | None = None) -> FootnoteRes
     opening and closing numbers agree; the page carries, OUTSIDE every wrapper, a complete
     printed note line with that number and exactly its text; and *painted* is known and does
     not draw the wrapper's frame. Removal keeps the token boundary: the neighbours of an
-    inline wrapper are joined by one space, never concatenated. One record per wrapper
+    inline wrapper keep one space where whitespace stood beside the wrapper, or where removal would
+    concatenate two words or form a new number. One record per wrapper
     stripped. Everything else is kept and reported with its reason.
     """
     text = text or ""
@@ -207,17 +218,20 @@ def strip_hidden_footnotes(text: str, painted: str | None = None) -> FootnoteRes
             stop += 1
         space_after = stop > end
         end = stop
-        # A separator is kept only where the wrapper stood between two tokens: both neighbours
-        # are word characters (``Growth[..] slowed``, ``1[..] 2``, ``rate[..].`` stays ``rate.``),
-        # or it had space on both sides. A wrapper at either edge of its line leaves none to keep.
-        if (
-            res
-            and not res.endswith("\n")
-            and end < len(text)
-            and text[end] != "\n"
-            and ((res[-1].isalnum() and text[end].isalnum()) or (space_before and space_after))
-        ):
-            res += " "
+        # One space replaces the wrapper iff the text had whitespace right before or after it,
+        # or both neighbours are word characters (``Growth[..] slowed``, ``1[..]2``); otherwise
+        # nothing (``rate[..].`` stays ``rate.``). A wrapper at either edge of its line leaves
+        # no separator. Removal must never form a numeric token the page did not have, so a
+        # space is also kept where a digit, sign or point on the left would touch a digit or
+        # a point-and-digit on the right (``-[..]5``, ``1[..].2``).
+        if res and not res.endswith("\n") and end < len(text) and text[end] != "\n":
+            if (
+                space_before
+                or space_after
+                or (res[-1].isalnum() and text[end].isalnum())
+                or _would_join_number(res[-1], text[end : end + 2])
+            ):
+                res += " "
         space_before = space_before or space_after
         pos = end
     res += text[pos:]
