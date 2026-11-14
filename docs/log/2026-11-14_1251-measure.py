@@ -2,7 +2,8 @@
 under the judge-is-not-a-check rule, and what the demotions cost on the auditors' gold pages.
 No OCR, no model, no write.
 
-    PYTHONPATH=src ~/venvs/socr/bin/python docs/log/2026-11-14_1251-measure.py out.json
+    PYTHONPATH=src ~/venvs/socr/bin/python docs/log/2026-11-14_1251-measure.py run out.json [--words]
+    PYTHONPATH=src ~/venvs/socr/bin/python docs/log/2026-11-14_1251-measure.py report out.json
 
 Limitation, stated once: the cached sidecars carry no pass trace and no own-layer text. The
 predicate is therefore recomputed the way ``socr-refinalize-own-text`` does it: socr's page
@@ -14,6 +15,7 @@ output separates pages those older checks already demote from pages only this ti
 
 from __future__ import annotations
 
+import argparse
 import collections
 import hashlib
 import json
@@ -45,7 +47,7 @@ def _job(args):
     doc, doc_dir = args
     from socr.core.born_digital import BornDigitalDetector
     from socr.core.result import PageOutput
-    from socr.core.verdict import JUDGE_ONLY_REASON, silent_success_clauses
+    from socr.core.verdict import JUDGE_ONLY_REASON, page_word_check_record, silent_success_clauses
     from socr.pipeline.refinalize_own_text import _page_state
 
     gold = _gold()
@@ -103,6 +105,9 @@ def _job(args):
                     if isinstance(e, dict)
                 )
                 clauses = silent_success_clauses(out, p, kinds)
+                words = page_word_check_record(out, p)
+                if words is not None:
+                    r["words_compared"] = words["compared"]
                 if not clauses:
                     r["after"] = "success"
                 elif all(c.reason == JUDGE_ONLY_REASON for c in clauses):
@@ -115,10 +120,10 @@ def _job(args):
     return doc, meta.get("status"), res
 
 
-def main(out_path: str, workers: int = 6) -> None:
+def main(out_path: str, words_run: bool = False, workers: int = 6) -> None:
     from concurrent.futures import ProcessPoolExecutor
 
-    docs = sb.find_documents(RUN_WORDS if "--words" in sys.argv else RUN)
+    docs = sb.find_documents(RUN_WORDS if words_run else RUN)
     rows, doc_status = [], {}
     with ProcessPoolExecutor(workers) as pool:
         for doc, status, res in pool.map(_job, sorted(docs.items())):
@@ -192,10 +197,37 @@ def report(out_path: str) -> None:
     )
     nonfaithful = [r for r in qsucc if not r["judge_reason_faithful"]]
     print("qwen SUCCESS with a reason other than 'faithful':", len(nonfaithful))
+    compared = sorted(r["words_compared"] for r in qsucc if "words_compared" in r)
+    if compared:
+        deciles = [compared[min(len(compared) - 1, len(compared) * k // 10)] for k in range(11)]
+        print("words compared per qwen SUCCESS page (n, deciles 0..10):", len(compared), deciles)
+        weak = sb.WEAK_WORDS_PASS_BELOW
+        print(
+            f"  below WEAK_WORDS_PASS_BELOW={weak}:",
+            sum(1 for n in compared if n < weak),
+            "; gold-defective among them:",
+            sum(
+                1
+                for r in qsucc
+                if "defective" in r["gold"] and r.get("words_compared", weak) < weak
+            ),
+        )
+
+
+def _cli(argv: list[str]) -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    run = sub.add_parser("run", help="measure the cached run and write the rows to OUT")
+    run.add_argument("out")
+    run.add_argument("--words", action="store_true", help="the words-refinalized run")
+    rep = sub.add_parser("report", help="print the report of rows written by `run`")
+    rep.add_argument("out")
+    args = parser.parse_args(argv)
+    if args.command == "report":
+        report(args.out)
+    else:
+        main(args.out, words_run=args.words)
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "report":
-        report(sys.argv[2])
-    else:
-        main(sys.argv[1])
+    _cli(sys.argv[1:])
