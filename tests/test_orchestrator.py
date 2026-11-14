@@ -1532,7 +1532,10 @@ class TestAgenticIntegration:
         assert r"P(A \text{ or } B) = P(A) + P(B)" in on_result.markdown
         assert "syntax only, non-authoritative" in on_result.markdown
         assert "rejected whole-page candidate" not in on_result.markdown
-        assert "¼" not in on_result.markdown and "ð" not in on_result.markdown
+        # #1305: the native line is never deleted; the candidate sits after it.
+        assert on_result.markdown.index("PðA or BÞ ¼ PðAÞ þ PðBÞ") < on_result.markdown.index(
+            "equation candidate, unverified"
+        )
 
         import json
 

@@ -19,6 +19,7 @@ import logging
 import math
 import re
 import statistics
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -162,22 +163,216 @@ def math_font_char_count(page) -> int:
 
 # Math typeset with a broken font/ToUnicode map decodes operators and delimiters
 # as Latin-1 letters and fraction glyphs: '=' -> '¼', '(' -> 'ð', ')' -> 'Þ',
-# '+' -> 'þ', '-' -> a C0 control char. These glyphs do not occur in clean
-# English or math prose, so even a few per line are a near-perfect signal of
-# corrupted math — which the prose-oriented `_encoding_corruption_ratio`
+# '+' -> 'þ', '-' -> a C0 control char. The delimiter letters and C0 controls do
+# not occur in clean English or math prose, so even a few per line are a near-perfect
+# signal of corrupted math — which the prose-oriented `_encoding_corruption_ratio`
 # (mid-caps / slash-digits / run-on words) misses entirely. Greek (σ, ρ) and real
 # typography (en-dash, U+2212 minus, ﬁ ligature, curly quotes) are deliberately
 # NOT in this set: they are legitimate and must never trip math-corruption.
-_MATH_MOJIBAKE_CHARS = frozenset("ðÞþÐ¼½¾")
+#
+# #1305: the VULGAR FRACTION glyphs are different. English prose prints them for real
+# ("growth is 2¾ percent", "a ¼ point cut"), so the glyph alone is not evidence. A
+# fraction glyph counts as the '=' mojibake only when it stands in OPERATOR position
+# (``_is_printed_fraction`` says when it does not).
+_MATH_DELIMITER_MOJIBAKE_CHARS = frozenset("ðÞþÐ")
+_VULGAR_FRACTION_CHARS = frozenset("¼½¾")
+_MATH_MOJIBAKE_CHARS = _MATH_DELIMITER_MOJIBAKE_CHARS | _VULGAR_FRACTION_CHARS
 # C0 control characters (excluding tab/newline/CR) — '-' and other operators
 # decode to these on this font class.
 _C0_CONTROL_CHARS = frozenset(chr(c) for c in range(0x20) if c not in (0x09, 0x0A, 0x0D))
 _MATH_CORRUPTION_GLYPHS = _MATH_MOJIBAKE_CHARS | _C0_CONTROL_CHARS
+#: Glyphs that count wherever they appear (everything except the fraction glyphs).
+_ALWAYS_CORRUPT_GLYPHS = _MATH_DELIMITER_MOJIBAKE_CHARS | _C0_CONTROL_CHARS
+
+#: Letters a token needs to count as a plain word (one letter is a variable). Fixed, not
+#: corpus-tuned: one letter is the smallest token that can be a variable name, and the only
+#: one-letter English word ("a") is handled by name below.
+_PLAIN_WORD_MIN_LETTERS = 2
+#: A compact variable has at most this many letters ("yy", "ax", "xy") or no vowel
+#: ("xyz", "ps"). Fixed, not corpus-tuned: two letters is a product of single-letter
+#: variables; longer tokens with a vowel are words. Counts only when BOTH sides are
+#: compact and one of them is vowel-free.
+_VARIABLE_MAX_LETTERS = 2
+_VOWELS = frozenset("aeiouAEIOU")
+#: Signs that may precede a number ("-2 ½ percent", "−2 ½ percent").
+_NUMBER_SIGNS = "+-−"
+_WORD_EDGE_PUNCT = ".,;:!?()[]{}\"'‘’“”"
+#: Hyphens and dashes. They join words ("state-of-the-art", "percent—is") and sit against a
+#: fraction as punctuation ("quarter—½ point"), never as an operand.
+_HYPHENS = "-‐‑–—"
+_OPENERS = "[{("
+_CLOSERS = "]})%.,;:"
+#: Punctuation that may touch a fraction glyph without being its neighbour: brackets, a
+#: trailing '%', a dash, and a leading sign ("-¼ percent", "−¼ percent").
+_GLUE_PUNCT = _OPENERS + _CLOSERS + _HYPHENS + "−"
+#: The one-letter English article. It is the only single letter that is a word, so it is
+#: the only one ``_is_printed_fraction`` has to tell apart from a variable.
+_ARTICLE = "a"
+
+
+def _is_plain_word(token: str) -> bool:
+    """A word of prose: letters only, hyphen compounds allowed, at least two letters.
+
+    ``state-of-the-art`` and ``GDP`` are words; ``x``, ``-x``, ``αx`` and ``f(x)`` are not.
+    An upper-case name like ``NP`` is a word too: ``P ¼ NP`` is caught by its one-letter
+    left side, not by the shape of the right.
+    """
+    word = token.strip(_WORD_EDGE_PUNCT)
+    if not word or any(ch in _MATH_CORRUPTION_GLYPHS for ch in word):
+        return False
+    parts = word.translate({ord(h): " " for h in _HYPHENS}).split(" ")
+    return all(_is_latin_word(part) for part in parts) and any(
+        len(part) >= _PLAIN_WORD_MIN_LETTERS for part in parts
+    )
+
+
+def _is_latin_word(part: str) -> bool:
+    """Letters only, all Latin script: Greek (``αx``) is a math symbol, not prose."""
+    return part.isalpha() and all("LATIN" in unicodedata.name(ch, "") for ch in part)
+
+
+def _is_compact_variable(token: str) -> bool:
+    """A compact Latin token that can be a variable name: <= two letters, or no vowel."""
+    word = token.strip(_WORD_EDGE_PUNCT)
+    if not _is_latin_word(word):
+        return False
+    return len(word) <= _VARIABLE_MAX_LETTERS or _is_vowel_free(word)
+
+
+def _is_vowel_free(word: str) -> bool:
+    return not any(ch in _VOWELS for ch in word)
+
+
+def _is_operator_shape(left_tok: str, right_tok: str) -> bool:
+    """Both sides compact variables, at least one of them vowel-free (``yy ¼ ax``).
+
+    Two short English words ("at ½] to", "up ¼ of") each carry a vowel, so they stay
+    prose. A vowel-free side ("yy", "xy", "x") is not a word.
+    """
+    return (
+        _is_compact_variable(left_tok)
+        and _is_compact_variable(right_tok)
+        and (
+            _is_vowel_free(left_tok.strip(_WORD_EDGE_PUNCT))
+            or _is_vowel_free(right_tok.strip(_WORD_EDGE_PUNCT))
+        )
+    )
+
+
+def _is_number(token: str) -> bool:
+    word = token.strip(_WORD_EDGE_PUNCT).lstrip(_NUMBER_SIGNS)
+    return bool(word) and all(ch.isdigit() or ch in ".," for ch in word)
+
+
+def _edge_piece(token: str, *, last: bool) -> str:
+    """The last (or first) dash-separated piece of ``token``; the token if that is empty."""
+    pieces = token.translate({ord(h): " " for h in _HYPHENS}).split()
+    return (pieces[-1] if last else pieces[0]) if pieces else token
+
+
+def _operand_tokens(text: str) -> list[str]:
+    """Tokens of ``text`` without bare fraction glyphs and brackets.
+
+    "[¼ to] ½{ to ¾}" is one range printed as a series of fractions: a neighbouring
+    fraction is the same quantity again, so the word beside it is the real neighbour.
+    """
+    return [
+        tok
+        for tok in text.split()
+        if tok.strip(_OPENERS + _CLOSERS)
+        and not set(tok.strip(_OPENERS + _CLOSERS)) <= _VULGAR_FRACTION_CHARS
+    ]
+
+
+def _is_printed_fraction(line: str, i: int) -> bool:
+    """True if the fraction glyph at ``line[i]`` is a real printed fraction.
+
+    The rule, by neighbours (L = token before, R = token after, brackets and a ``%``
+    skipped, a neighbouring fraction of the same series skipped):
+
+    * glued after a digit: the digit is L, and the glyph must not touch an operand on its
+      right (``2¾``, ``2¾%``, ``2¾ percent`` are printed; ``10¼5``, ``10¼x`` and
+      ``10¼ 5+5`` are operator).
+    * glued before a hyphenated word after a space or line start (``¼-point``): printed.
+      ``x¼-y`` is the '=' of ``x = -y``.
+    * R is a number: operator (``x ¼ 0``, ``2 ¼ 4``, ``log likelihood ¼ 0``): a
+      fraction is never followed by a bare number in prose.
+    * L is a number: printed iff a ``%``, a word or the end of the line follows
+      (``1 ¼ percent``, ``8 ½%``, ``is 2 ½`` + wrapped ``percent``). A line never ends on
+      the '=' of ``2 ¼``: mojibake '=' sits between two operands.
+    * L is the article "a": printed iff a word follows and the word after that is a word
+      or absent (``a ¼ point cut``). ``a ¼ sin x`` ends on a variable: operator.
+    * L and R are both compact (at most two letters, or no vowel) and one is vowel-free
+      (``yy ¼ ax``, ``xy ¼ z``): operator. ``at ½] to`` has a vowel on each side: prose.
+    * L and R are each a plain word or missing: printed (``the ½ share``, ``raised it
+      ¼ point``).
+    * anything else is operator: a variable, a closing bracket or a math glyph on either
+      side (``x ¼ y``, ``y ¼ αx``, ``P ¼ NP``, ``f(x) ¼ 1``).
+
+    Ties go to "operator": a false operator costs a crop, a false fraction ships '='
+    as '¼' silently.
+    """
+    before = line[i - 1] if i else ""
+    after = line[i + 1] if i + 1 < len(line) else ""
+    glued_digit = before.isdigit()
+    if (
+        after
+        and after in _HYPHENS
+        and i + 2 < len(line)
+        and line[i + 2].isalpha()
+        and (not before or before.isspace())
+    ):
+        return True  # "¼-point"; "x¼-y" is the '=' of x = -y
+    # Neighbouring brackets, dashes, a sign and a trailing '%' are punctuation around the
+    # glyph, not operands: "[at ½] to 3/4", "an 8 ½% rate", "quarter—½ point", "-¼ percent".
+    if (before and not glued_digit and not before.isspace() and before not in _GLUE_PUNCT) or (
+        after and not after.isspace() and after not in _GLUE_PUNCT
+    ):
+        return False
+    left = _operand_tokens(line[:i].rstrip(_GLUE_PUNCT + " \t"))
+    tail = line[i + 1 :]
+    right_text = tail.lstrip(_GLUE_PUNCT + " \t")
+    percent = "%" in tail[: len(tail) - len(right_text)]
+    right = _operand_tokens(right_text)
+    # The neighbour is the piece against the glyph: "mid-2018—about ½" -> "about".
+    left_tok = _edge_piece(left[-1], last=True) if left else ""
+    right_tok = _edge_piece(right[0], last=False) if right else ""
+    if not (left_tok or right_tok) or _is_number(right_tok):
+        return False
+    if _is_number(left_tok):
+        return percent or not right_tok or _is_plain_word(right_tok)
+    if left_tok.lower() == _ARTICLE:
+        return _is_plain_word(right_tok) and (len(right) < 2 or _is_plain_word(right[1]))
+    if _is_operator_shape(left_tok, right_tok):
+        return False  # "yy ¼ ax": compact variables on both sides are an equation
+    return (not left_tok or _is_plain_word(left_tok)) and (
+        not right_tok or _is_plain_word(right_tok)
+    )
+
+
+def _line_glyph_count(line: str) -> int:
+    return sum(
+        1
+        for i, ch in enumerate(line)
+        if ch in _ALWAYS_CORRUPT_GLYPHS
+        or (ch in _VULGAR_FRACTION_CHARS and not _is_printed_fraction(line, i))
+    )
+
+
+def corrupt_math_glyph_count(text: str) -> int:
+    """Font-map mojibake glyphs in ``text`` that stand in for math symbols.
+
+    THE shared predicate: the page detector (``_assess_page``), the recovery line
+    selector and the numbered-equation selector in ``math.recover`` all count with it,
+    so a page cannot be flagged with no region to recover (an orphan banner) or the
+    reverse. Judged line by line: a fraction glyph's context never crosses a line.
+    """
+    return sum(_line_glyph_count(line) for line in text.split("\n"))
 
 
 def line_has_corrupt_math(line: str) -> bool:
     """True if a line contains font-map mojibake standing in for math symbols."""
-    return any(ch in _MATH_CORRUPTION_GLYPHS for ch in line)
+    return corrupt_math_glyph_count(line) > 0
 
 
 #: Left-to-right text. Exempt from relegation on every page — see
@@ -4465,7 +4660,7 @@ class BornDigitalDetector:
     @staticmethod
     def _count_math_corruption(text: str) -> int:
         """Count font-map mojibake glyphs standing in for math symbols."""
-        return sum(1 for ch in text if ch in _MATH_CORRUPTION_GLYPHS)
+        return corrupt_math_glyph_count(text)
 
     def _detect_corrupt_math(self, text: str) -> bool:
         """True if the page's math is font-map corrupted (operators/delimiters

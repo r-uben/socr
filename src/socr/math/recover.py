@@ -58,6 +58,12 @@ _CORRUPT_CANDIDATE_HEADER = (
     "(syntax only, non-authoritative — crop is ground truth) -->"
 )
 _CORRUPT_UNRESOLVED_PREFIX = "[corrupt equation unresolved"
+# #1305: a candidate always sits BESIDE the retained native line and is labelled where a
+# reader sees it (the header above is an HTML comment), because the native line may print
+# a mixed number (2¾) next to a reader output that parsed it as an exponent.
+_CORRUPT_CANDIDATE_BESIDE_NATIVE = (
+    "[equation candidate, unverified: the line above is the native text, the crop is ground truth]"
+)
 
 
 def _candidate_with_source_label(region: CorruptMathRegion) -> str:
@@ -558,7 +564,7 @@ def _region_replacement(region: CorruptMathRegion) -> str:
     )
     if region.resolved:
         candidate = _candidate_with_source_label(region)
-        return f"{crop}\n{_CORRUPT_CANDIDATE_HEADER}\n$$\n{candidate}\n$$"
+        return f"{crop}\n{_CORRUPT_CANDIDATE_BESIDE_NATIVE}\n{_CORRUPT_CANDIDATE_HEADER}\n$$\n{candidate}\n$$"
     evidence = "; see retained crop" if region.crop_path else "; no crop was retained"
     return f"{crop}\n{_CORRUPT_UNRESOLVED_PREFIX}: {region.validation_reason}{evidence}]"
 
@@ -566,13 +572,13 @@ def _region_replacement(region: CorruptMathRegion) -> str:
 def splice_math(page, native_text: str, regions: list[CorruptMathRegion]) -> str:
     """Patch exact corrupt substrings in ``native_text`` and preserve all other bytes.
 
-    The function updates each record's ``source_aligned`` field.  Only a
-    RESOLVED region -- crop retained, LaTeX present, structurally valid, and
-    source-aligned -- replaces its native slice.  An aligned region with a
-    retained crop that is NOT resolved keeps the native slice exactly as-is
-    and inserts the crop reference plus an explicit unresolved marker
-    immediately after it, so the evidence sits next to the (still corrupt)
-    glyphs rather than replacing them.  Per the GH-271 design record
+    The function updates each record's ``source_aligned`` field.  No region
+    replaces its native slice (#1305).  An aligned region with a retained crop
+    keeps the native slice exactly as-is and inserts, immediately after it, the
+    crop reference plus either the labelled candidate (RESOLVED: crop retained,
+    LaTeX present, structurally valid, source-aligned) or an explicit unresolved
+    marker, so the evidence sits next to the (still corrupt) glyphs rather than
+    replacing them.  Per the GH-271 design record
     (docs/log/2026-08-22_corrupt-equation-region-guardrail.md): "Failure at
     any boundary keeps the native source text and appends explicit evidence
     instead of silently deleting content."
@@ -608,13 +614,11 @@ def splice_math(page, native_text: str, regions: list[CorruptMathRegion]) -> str
         source_available = idx != -1
         region.source_aligned = source_in_native and source_available
         replacement = _region_replacement(region)
-        if region.source_aligned and region.resolved:
-            text = text[:idx] + replacement + text[idx + len(source) :]
-            cursor = idx + len(replacement)
-        elif region.source_aligned and region.crop_path:
-            # Aligned but unresolved: keep the native slice untouched and
-            # attach the evidence adjacent to it, rather than deleting the
-            # (still corrupt) glyphs the reader may need to see or grep for.
+        if region.source_aligned and region.crop_path:
+            # Resolved or not, keep the native slice untouched and attach the evidence
+            # adjacent to it. #1305 (owner rule: never delete source text): a candidate is
+            # unverified model output, and a mixed line can print a number (2¾) the
+            # reader parsed as an exponent, so the native text is never replaced.
             insertion = f"{source}\n{replacement}"
             text = text[:idx] + insertion + text[idx + len(source) :]
             cursor = idx + len(insertion)
