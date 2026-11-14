@@ -213,3 +213,19 @@ HEAD on a superset".
 
 References recall on the final rule: 209,519 pages, 1751 old-flagged, 1750 still flagged (same
 single page leaves: the Spanish "EL ARCO IRIS INVISIBLE" p68, "7½ Hz").
+
+## Follow-up: cubic P1 on PR #1322 (`2 ½% a year`)
+
+- `2 ½% a year` read as an operator: the one-letter article `a` after the `%` counted as a
+  variable operand (`_is_math_operand`), which ran before the percent test. Fix: a fraction
+  whose left neighbour is a number and which is followed by `%`, `percent` or `pct`
+  (`_PERCENT_WORDS`) is a printed rate whatever follows (article, word, number, punctuation).
+  The check runs first, so `2 ½% a year`, `2 ½% by 2027`, `2½% in 2026`, `8 ½%, then`,
+  `2 ½ percent a year`, `2 ½ pct 2027` are all printed. Pinned in `_VERDICTS`.
+- Mutant (copies of src and tests outside the repo, `socr.__file__` inside the copy, anchor
+  count 1, the new early return disabled): 2 failed (`2 ½% a year`, `2 ½ pct 2027`). The
+  other four rows already passed before the guard through other branches; they pin the
+  behaviour, they do not discriminate this guard.
+- Fed lane on the original event-page set (408 pages, 81 docs, page JSONs of
+  `51270eb5_words`, text layer re-read from `inputs/fed/pdfs`): 403 leave, 5 stay, the same
+  5 (2020-07-29 transcript-presentation-materials p23, p26-p29). Unchanged.

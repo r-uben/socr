@@ -212,6 +212,9 @@ _GLUE_PUNCT = _OPENERS + _CLOSERS + _HYPHENS + "−"
 #: The one-letter English article. It is the only single letter that is a word, so it is
 #: the only one ``_is_printed_fraction`` has to tell apart from a variable.
 _ARTICLE = "a"
+#: Words that unit a number as "%" does: a fraction glued to a number and followed by one
+#: is a printed rate whatever comes next.
+_PERCENT_WORDS = frozenset({"percent", "pct"})
 #: Names that start a math operand in an equation. After a number they are the right-hand
 #: side of '=' ("2 = sin x"), never prose: "2 ¼ sin x" must not read as a printed fraction.
 #: A fixed list of standard function names, not corpus-tuned.
@@ -355,6 +358,11 @@ def _operand_tokens(text: str) -> list[str]:
     ]
 
 
+def _is_percent_word(token: str) -> bool:
+    """True for the words that unit a number like '%' does ("2 ½ percent", "2 ½ pct")."""
+    return token.strip(_WORD_EDGE_PUNCT).lower() in _PERCENT_WORDS
+
+
 def _is_printed_fraction(line: str, i: int) -> bool:
     """True if the fraction glyph at ``line[i]`` is a real printed fraction.
 
@@ -410,6 +418,8 @@ def _is_printed_fraction(line: str, i: int) -> bool:
     # The neighbour is the piece against the glyph: "mid-2018—about ½" -> "about".
     left_tok = _edge_piece(left[-1], last=True) if left else ""
     right_tok = _edge_piece(right[0], last=False) if right else ""
+    if _is_number(left_tok) and (percent or _is_percent_word(right_tok)):
+        return True  # "2 ½% a year", "2 ½% by 2027", "8 ½%, then": a rate, whatever follows
     if not (left_tok or right_tok) or _is_number(right_tok):
         return False
     if _is_number(left_tok):
