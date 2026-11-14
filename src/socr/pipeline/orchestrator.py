@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import functools
 import logging
 import math
@@ -110,7 +111,15 @@ from socr.figures.chart_reconcile import (
     GRID_RECONCILED,
 )
 from socr.tables.ditto import DITTO_UNRESOLVED_KIND
-from socr.tables.native_first import ROTATED_QUARANTINE_KIND
+from socr.tables.native_first import (
+    CELL_MISMATCH_REASON,
+    MODEL_RETRY_KIND,
+    MODEL_RETRY_REFUSAL_REASONS,
+    REFUSE,
+    ROTATED_QUARANTINE_KIND,
+    NativeTableFirstWork,
+    NativeTablePlan,
+)
 from socr.tables.ship_gate import SHIP_GATE_KIND
 from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND, NO_WITNESS_BACKEND_KIND
 from socr.judge.table_rung_gemini import gemini_rung_reachable as table_judge_gemini_rung_reachable
@@ -619,6 +628,11 @@ _RESUME_REPLAYED: dict[str, str] = {
     ROTATED_QUARANTINE_KIND: (
         "GH-917: emitted by _plan_native_table_first, which runs only over pages not "
         "resumed; the quarantine is a standing property of the page's source grid"
+    ),
+    MODEL_RETRY_KIND: (
+        "#1253 B3: emitted at the end of the page loop for a refused native grid handed to the "
+        "model; a terminal resumed page skips that step, and the record of the attempt and "
+        "its outcome lives only on this event"
     ),
     SHIP_GATE_KIND: (
         "GH-916: emitted by _plan_native_table_first (upright and rotated); the fault is "
@@ -12313,6 +12327,11 @@ class UnifiedPipeline:
         _routed_pages: set[int] = set()
         _before_page: dict[int, tuple[PageState, int]] = {}
         _retried_pages: list[int] = []
+        # #1253 B3: per page handed to the model retry, the plan that was dropped and the
+        # flags the refusal overwrote. Kept here, not on PageState: a --retry-failed-pages
+        # reset restores the page to before its first attempt and would lose both.
+        _retry_plans_kept: dict[int, NativeTableFirstWork] = {}
+        _retry_prior_flags: dict[int, dict] = {}
 
         def _pages_in_order():
             nonlocal ladder
@@ -12456,6 +12475,24 @@ class UnifiedPipeline:
                         )
                     if _cell_md is not None:
                         native_cell_repairs[page_num] = _cell_md
+                    elif (
+                        ladder
+                        and (_replan is None or _replan.action == "refuse")
+                        and (_replan.reason if _replan is not None else CELL_MISMATCH_REASON)
+                        in MODEL_RETRY_REFUSAL_REASONS
+                    ):
+                        # #1253 B3: the repair could not confirm the cells, or the spliced
+                        # grid re-plans to a REFUSE the allowlist names: the page is a
+                        # refusal like any other, so the retry below takes it. The plan is
+                        # replaced only when a provider exists; without one the page keeps
+                        # the plan it had and ends as it did before.
+                        _cells_work = native_table_plans[page_num]
+                        native_table_plans[page_num] = dataclasses.replace(
+                            _cells_work,
+                            plan=_replan
+                            if _replan is not None
+                            else NativeTablePlan(REFUSE, reason=CELL_MISMATCH_REASON),
+                        )
                     elif _replan is not None and _replan.action == "defer":
                         self._record_native_ship_gate(state, page_num, _replan)
                         del native_table_plans[page_num]
@@ -12478,6 +12515,58 @@ class UnifiedPipeline:
                                 )
                                 ps.attempts.append(_fallback)
                                 ps.best_output = _fallback
+                # #1253 B3: a REFUSED native grid whose refusal reason is on the retry
+                # allowlist gets one model attempt instead of going straight to the
+                # failed-table marker. The refusal bookkeeping runs FIRST and unchanged
+                # (``_refuse_native_table_first``: ``native_table_structure_failed`` /
+                # ``native_table_unverifiable``, the floor PNG, the native attempt, the
+                # ``native_table_cell_unresolved`` event). Those flags are what keep a model
+                # attempt that is not accepted from routing to NATIVE_FALLBACK and shipping
+                # the refused grid. The plan is then dropped so the page takes the
+                # whole-page route below, like a DEFER, with every downstream table check.
+                # An empty ladder never gets here: with no provider nothing changes.
+                if (
+                    page_num in _retried_pages
+                    and page_num not in native_table_plans
+                    and page_num in _retry_plans_kept
+                ):
+                    # --retry-failed-pages: the reset restored the page to before its first
+                    # attempt, and that attempt had dropped the plan. The second pass is the
+                    # same page under the same refusal, so it gets the same plan and the same
+                    # bookkeeping; without them a rejected grid ships through #262.
+                    native_table_plans[page_num] = _retry_plans_kept[page_num]
+                _retry_work = native_table_plans.get(page_num)
+                if (
+                    _retry_work is not None
+                    and _retry_work.plan.action == "refuse"
+                    and _retry_work.plan.reason in MODEL_RETRY_REFUSAL_REASONS
+                    and ladder
+                    and not is_native
+                    and page_num not in blank_pages
+                    and page_num not in math_recovery_pages
+                    and page_num not in chart_winner_pages
+                    and page_num not in equation_lane_pages
+                    and page_num not in no_ocr_provider_pages
+                ):
+                    # What the refusal is about to set, so an ACCEPTED model reading can put
+                    # the page back where a page that was never refused stands (as
+                    # ``_crop_repair`` does): the refusal is the floor for a reading that is
+                    # NOT accepted, not a verdict on one that is.
+                    _retry_prior_flags[page_num] = {
+                        "native_table_structure_failed": ps.native_table_structure_failed,
+                        "native_table_unverifiable": ps.native_table_unverifiable,
+                        "native_table_unverifiable_ordinals": list(
+                            getattr(ps, "native_table_unverifiable_ordinals", []) or []
+                        ),
+                        "d3_floor_png_ref": getattr(ps, "d3_floor_png_ref", ""),
+                    }
+                    with clock.span("tables"):
+                        self._refuse_native_table_first(
+                            state, page_num, ps, _retry_work.plan, _chart_figures_dir
+                        )
+                    ps.native_table_model_retry = _retry_work.plan.reason
+                    _retry_plans_kept[page_num] = _retry_work
+                    del native_table_plans[page_num]
                 # #1100: no text and no ink — ship the note, never a model.
                 if page_num in blank_pages:
                     with clock.span("extract"):
@@ -12633,6 +12722,10 @@ class UnifiedPipeline:
 
                             ps.attempts.append(att.output)
                         ps.best_output = decision.final_output
+                        if ps.native_table_model_retry and decision.accepted:
+                            self._lift_native_table_refusal(
+                                ps, page_num, _retry_prior_flags.get(page_num), _chart_figures_dir
+                            )
 
                         # GH-90: scanned-table source-evidence fail-closed floor.
                         _source_ev_attempts = [
@@ -13383,6 +13476,11 @@ class UnifiedPipeline:
                                 state, page_num, _whole_doc_page_texts(state)
                             )
                         _repairs_committed = True
+                        # #1253 B3: recorded last, on the record that ships after the
+                        # row-binding withhold and the point repairs; assemble updates it once
+                        # more against the final-body guard.
+                        if ps.native_table_model_retry:
+                            self._record_native_table_model_retry(state, page_num, ps, _record)
 
                         # Strip any leading ## Page N marker so the provisional fragment
                         # body matches what assemble would produce (modulo
@@ -15812,6 +15910,137 @@ class UnifiedPipeline:
         )
         self._agentic_native_page(state, page_num, ps)
 
+    @staticmethod
+    def _lift_native_table_refusal(
+        ps: PageState, page_num: int, prior: dict | None, figures_dir: Path | None
+    ) -> None:
+        """#1253 B3: an ACCEPTED model reading retires the refusal that handed the page to it.
+
+        ``_refuse_native_table_first`` set the floor flags so that a reading that is not
+        accepted ends as the failed-table marker. An accepted reading is a normal model page:
+        left set, those flags put it in ``d3_floor_pages`` (a false ``table_region_unverifiable``
+        event, a red CLI line, a distrusted table, a document error) and the floor picture
+        suppresses the scanned-figure lane. The flags go back to what they were before the
+        refusal; a page the refusal did not touch keeps what it had.
+        """
+        if prior is None:
+            return
+        ps.native_table_structure_failed = prior["native_table_structure_failed"]
+        ps.native_table_unverifiable = prior["native_table_unverifiable"]
+        ps.native_table_unverifiable_ordinals = list(prior["native_table_unverifiable_ordinals"])
+        if not prior["d3_floor_png_ref"] and getattr(ps, "d3_floor_png_ref", ""):
+            ps.d3_floor_png_ref = ""
+            if figures_dir is not None:
+                try:
+                    (figures_dir / f"failed_table_p{page_num}.png").unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.debug("p%d: floor picture not removed (%s)", page_num, exc)
+
+    @staticmethod
+    def _restate_native_table_model_retry(state: DocumentState, record) -> None:
+        """#1253 B3: bring the page's retry event in line with the final bodies.
+
+        The loop records the outcome before assemble's final-body table guard, which can turn
+        an accepted reading into a failure marker. The event is edited, not rebuilt: a page
+        restored from a terminal sidecar has no attempts to rebuild it from, and its event is
+        already the record of what was done.
+        """
+        page_num = record.output.page_num
+        for ev in state.events:
+            if getattr(ev, "page_num", None) != page_num or ev.kind != MODEL_RETRY_KIND:
+                continue
+            data = ev.data
+            data["ending"] = record.disposition.ending.value
+            data["primary_reason"] = record.disposition.primary_reason.value
+            data["selection_provenance"] = record.selection_provenance.value
+            if data.get("accepted") and record.output.status is PageStatus.ERROR:
+                data["accepted"] = False
+                data["why_not_accepted"] = (
+                    f"the reading shipped as a failure marker ({record.output.failure_mode.value})"
+                )
+                ev.detail = (
+                    f"refused native table ({data.get('reason', '')}) was handed to the model "
+                    f"ladder: reading not accepted ({data['why_not_accepted']}); "
+                    "the failed-table floor ships"
+                )
+
+    @staticmethod
+    def _record_native_table_model_retry(
+        state: DocumentState, page_num: int, ps: PageState, record
+    ) -> None:
+        """#1253 B3: one record per retried page: the attempt, whether it was accepted, why not.
+
+        ``accepted`` is true only when the page ships a non-native reading the ladder
+        accepted (selection took ``PASSING_BEST_OUTPUT``). Anything else, including a
+        rejected model reading, ships the failed-table floor. ``shipped_refused_native_grid``
+        is the P0-1 tripwire: it is true only if selection fell to a native ending, which the
+        refusal flags are there to prevent.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.core.manifest import SelectionProvenance
+
+        # One record per page: a later call (assemble, with the final bodies) replaces the
+        # loop-time one rather than adding a second.
+        state.events[:] = [
+            ev
+            for ev in state.events
+            if not (getattr(ev, "page_num", None) == page_num and ev.kind == MODEL_RETRY_KIND)
+        ]
+        model_attempts = [
+            a
+            for a in ps.attempts
+            if (a.engine or "") and not (a.engine or "").startswith(("native", "chart_asset"))
+        ]
+        winner = ps.best_output
+        provenance = record.selection_provenance
+        # What SHIPS decides it: a reading the ladder accepted that a later gate withheld
+        # (row binding, the final-body table guard) ships a failure marker, an ERROR page.
+        accepted = (
+            provenance is SelectionProvenance.PASSING_BEST_OUTPUT
+            and record.output.status is not PageStatus.ERROR
+            and winner is not None
+            and not (winner.engine or "").startswith(("native", "chart_asset"))
+            and bool(winner.audit_passed)
+        )
+        shipped_native = provenance in (
+            SelectionProvenance.NATIVE_FALLBACK,
+            SelectionProvenance.NATIVE_CLEAN,
+        )
+        why = ""
+        if not accepted:
+            why = (
+                (getattr(winner, "judge_reason", "") or "")
+                or (getattr(winner, "rejection_class", "") or "")
+                or ("no model reading was produced" if not model_attempts else "not accepted")
+            )
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=MODEL_RETRY_KIND,
+                engine=(model_attempts[-1].engine if model_attempts else "") or "",
+                detail=(
+                    f"refused native table ({ps.native_table_model_retry}) was handed to the "
+                    "model ladder: "
+                    + (
+                        "reading accepted"
+                        if accepted
+                        else f"reading not accepted ({why}); the failed-table floor ships"
+                    )
+                ),
+                data={
+                    "reason": ps.native_table_model_retry,
+                    "attempted": bool(model_attempts),
+                    "accepted": accepted,
+                    "why_not_accepted": why,
+                    "model_attempts": len(model_attempts),
+                    "selection_provenance": provenance.value,
+                    "ending": record.disposition.ending.value,
+                    "primary_reason": record.disposition.primary_reason.value,
+                    "shipped_refused_native_grid": shipped_native,
+                },
+            )
+        )
+
     def _available_engines_for_agentic(self) -> list:
         """Probe which known providers are actually usable right now.
 
@@ -17699,6 +17928,11 @@ class UnifiedPipeline:
             "native_table_unverifiable": (
                 bool(getattr(ps, "native_table_unverifiable", False)) if ps else False
             ),
+            # #1253 B3: the refusal reason a model retry ran on ("" = none). Persisted so a
+            # resumed page keeps the #262 exemption and the restored record agrees.
+            "native_table_model_retry": (
+                str(getattr(ps, "native_table_model_retry", "") or "") if ps else ""
+            ),
             # GH-371: native failed-region identity and the expected number of
             # regions, used to preserve surrounding prose on D3 resume.
             "native_table_unverifiable_ordinals": (
@@ -19143,6 +19377,8 @@ class UnifiedPipeline:
             )
             # TR-3: restore per-region verifier flag and D3 PNG ref.
             ps.native_table_unverifiable = bool(meta.get("native_table_unverifiable", False))
+            _retry_reason = meta.get("native_table_model_retry", "")
+            ps.native_table_model_retry = _retry_reason if isinstance(_retry_reason, str) else ""
             # #1156 (Argon, stack review): without this a resumed page comes back with
             # no suspicion, so the assemble re-flush drops the flag and its mark, and the
             # page reads as checked on evidence nothing can see.
@@ -22618,6 +22854,10 @@ class UnifiedPipeline:
                 # #1282: the page loop committed its repairs against the page's loop-time
                 # record; this one is authoritative.
                 self._reconcile_point_repairs(state, final_records)
+                for _final in final_records:
+                    _final_ps = state.pages.get(_final.output.page_num)
+                    if _final_ps is not None and _final_ps.native_table_model_retry:
+                        self._restate_native_table_model_retry(state, _final)
                 final_page_outputs = [record.output for record in final_records]
                 self._record_table_counts(state, final_records)
                 emission_failures = [

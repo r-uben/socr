@@ -843,6 +843,13 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
     authored a grid, shipping the failed-table marker would discard the page's
     model reading, prose, and equations along with the native table.
 
+    #1253 B3: returns ``None`` on a page whose refused native grid was handed to the
+    model (``native_table_model_retry``). The retry's contract is that an accepted reading
+    replaces the marker and a reading that is NOT accepted leaves the marker. Without this
+    exemption a judge-only refusal on a retried page (REJECTION_JUDGE_ONLY /
+    AMBIGUOUS_DEFERRED) would ship the refused model grid here as UNACCEPTED_OUTPUT_KEPT:
+    on the chart-like row_count pages that is a grid built from axis ticks.
+
     Returns the output to keep, or ``None`` to leave the floor firing. The
     caller demotes a COPY; this predicate never mutates anything, and in
     particular never touches ``audit_passed``, which is the winner-SELECTION
@@ -895,6 +902,8 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
         )
         and bool(p.attempts)
     ):
+        return None
+    if getattr(p, "native_table_model_retry", ""):
         return None
     # GH-90's scanned floor is a different lane and is not reachable from here
     # (it requires ``not is_born_digital``), but a page carrying its flag must
