@@ -214,7 +214,7 @@ PR text now says `Refs #1251`, not `Closes`: the 9 gold-defective pages are not 
    one resume that differ only in the sidecar's words PASS, in both provider states).
 2. **The predicate keys on absence of evidence.** `_judge_accepted` is gone: every model reading
    that would ship SUCCESS needs `independent_page_evidence`, else the clause. Applies to the live
-   seam, `with_judge_only_clause` and the resume helper. **This turns 55 existing tests red** (stub
+   seam, `with_judge_only_clause` and the resume helper. **This turns 50 existing tests red** (28 files, measured by the full suite; all 50 pass again with the clause function returning no clause, so the clause is their only cause) (stub
    model readings with no layer evidence and no completed judge outcome); they were left as they
    were and are listed in the PR report for the coordinator.
 3. **Evidence is visible.** The words PASS entry now reads "... (compared N word(s); the page ships
