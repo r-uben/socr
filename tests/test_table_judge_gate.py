@@ -45,6 +45,7 @@ from socr.judge.table_verdict import (
 from _adjudicator_doubles import mismatching_adjudicator
 from socr.pipeline.orchestrator import UnifiedPipeline
 from socr.tables.binding import BindingEvidence
+from c1_support import assert_clean_or_only_unchecked
 
 # ---------------------------------------------------------------------------
 # Fixtures: minimal PDFs with a known table-locator shape (mirrors B0's own
@@ -1064,7 +1065,7 @@ class TestProcessFlagDifference:
         ):
             result_off = pipeline_off.process(pdf_path, tmp_path / "off_out")
 
-        assert result_off.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result_off)  # #1244 C1: see c1_support
         assert result_off.pages[0].failure_mode == FailureMode.NONE
         assert "table_rejected" not in (result_off.error or "")
 
@@ -1168,4 +1169,4 @@ class TestProcessFlagDifference:
         ):
             result = pipeline.process(pdf_path, tmp_path / "sentinel_out")
 
-        assert result.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support

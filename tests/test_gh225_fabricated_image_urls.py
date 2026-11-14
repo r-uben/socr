@@ -397,7 +397,10 @@ def test_clean_phase_major_document_still_succeeds(tmp_path: Path) -> None:
 
     pipeline = _make_pipeline()
     pipeline._scan_root = pdf_path.parent
-    state, _out = _state_for(pdf_path, "Real prose with no image references at all.\n")
+    state, _out = _state_for(pdf_path, "Real prose with no image references at all, 4.2.\n")
+    # #1244 C1: CHECKED needs a born-digital layer of the page's own sharing a number.
+    state.pages[1].own_layer_text = "Real prose with no image references at all, 4.2."
+    state.pages[1].is_born_digital = True
 
     result = pipeline._phase_assemble(state, out_dir)
 

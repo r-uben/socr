@@ -50,6 +50,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
+from socr.core.verdict import published_audit_passed
 
 #: The per-document record of what this tool changed and what the run had shipped.
 LOG_NAME = "refinalized_own_text.json"
@@ -455,7 +456,9 @@ def _updated_sidecar(
     out = dict(sidecar)
     out["status"] = winning.get("status", "missing")
     out["failure_mode"] = winning.get("failure_mode", "none")
-    out["audit_passed"] = winning.get("audit_passed", False)
+    out["audit_passed"] = published_audit_passed(
+        out["status"], winning.get("audit_passed", False), verdict
+    )
     out["verdict"] = verdict.to_dict()
     out["winning_output"] = winning
     out["page_fingerprint"] = (

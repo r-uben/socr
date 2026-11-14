@@ -28,6 +28,7 @@ from socr.core.providers import (
 from socr.core.result import DocumentStatus, EngineResult, PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
+from c1_support import assert_clean_or_only_unchecked
 
 
 def _real_pdf(path: Path, n_pages: int = 2) -> Path:
@@ -120,7 +121,7 @@ class TestOrchestratorAgenticLane:
             assert call_count == 1, (
                 f"_phase_agentic call count mismatch for agentic={agentic_setting}: {call_count}"
             )
-            assert result.status == DocumentStatus.SUCCESS
+            assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support
             assert result.pages_processed == 2
 
     def test_fingerprint_excludes_dead_legacy_keys(self):

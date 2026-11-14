@@ -25,6 +25,7 @@ from socr.figures.extractor import ExtractionResult, ExtractedFigure
 from socr.math.recover import CORRUPT_MATH_PROMPT, CorruptMathRegion
 from socr.pipeline.orchestrator import UnifiedPipeline
 from verdict_marks_helper import canonical_marks, strip_verdict_marks
+from c1_support import assert_clean_or_only_unchecked
 
 
 # ---------------------------------------------------------------------------
@@ -266,8 +267,7 @@ class TestPhaseAssemble:
 
         result = pipeline._phase_assemble(state, Path("/tmp/out"))
 
-        assert result.status == DocumentStatus.SUCCESS
-        assert result.success
+        assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support
         assert "Content for page 1" in result.markdown
         assert "Content for page 2" in result.markdown
 
@@ -359,9 +359,12 @@ class TestPhaseAssemble:
         config = _make_config()
         pipeline = UnifiedPipeline(config)
         state = DocumentState(handle=DocumentHandle.from_path(pdf))
+        # #1244 C1: CHECKED needs a born-digital layer sharing a number with the reading.
+        state.pages[1].own_layer_text = "Hello canonical world 4.2"
+        state.pages[1].is_born_digital = True
         state.pages[1].best_output = PageOutput(
             page_num=1,
-            text="## Page 1\n\nHello canonical world",
+            text="## Page 1\n\nHello canonical world 4.2",
             status=PageStatus.SUCCESS,
             engine="deepseek",
             audit_passed=True,
@@ -478,7 +481,7 @@ class TestFullPipeline:
                 mock_from_path.return_value = _make_handle(3)
                 result = pipeline.process(Path("/tmp/fake.pdf"), tmp_path)
 
-        assert result.success
+        assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support
         assert result.pages_processed == 3
 
     @pytest.mark.parametrize("ladder", [[], [PROFILE_QWEN_LOCAL]], ids=["ci-empty", "qwen-local"])
@@ -1281,7 +1284,7 @@ class TestDefaultPathParity:
         with patch("socr.pipeline.orchestrator.get_engine", return_value=mock_engine):
             result = pipeline.process(pdf, tmp_path)
 
-        assert result.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support
         md = tmp_path / "paper" / "paper.md"
         assert md.exists() and md.read_text(encoding="utf-8").strip()
         mock_engine.process_pages.assert_called()  # OCR actually ran
@@ -1403,7 +1406,7 @@ class TestAgenticIntegration:
         with patch("socr.pipeline.orchestrator.get_engine", return_value=eng):
             result = pipeline.process(pdf, tmp_path)
 
-        assert result.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support
         # Gemini is $0.0002/page and one page was routed -> cost recorded.
         assert result.cost == pytest.approx(0.0002)
         # agentic mode writes a replayable manifest by default.
@@ -1431,7 +1434,7 @@ class TestAgenticIntegration:
         with patch("socr.pipeline.orchestrator.get_engine", side_effect=_get):
             result = pipeline.process(pdf, tmp_path)
 
-        assert result.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support
         # GLM (free) was tried and rejected, escalated to Gemini ($0.0002).
         assert result.cost == pytest.approx(0.0002)
         assert _good_text()[:25] in result.markdown  # gemini's output won

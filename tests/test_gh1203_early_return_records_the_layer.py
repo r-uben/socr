@@ -625,11 +625,11 @@ def test_the_flag_the_retention_and_the_mark_appear_only_with_the_route(
     from socr.core.result import DocumentStatus
 
     assert live["status"] is not DocumentStatus.SUCCESS
+    # #1244 C1: main's own page is an unchecked model reading (WARNING, ``text_layer_numbers``
+    # UNKNOWN), so its document is no longer SUCCESS either and the status cannot discriminate
+    # the arms. The difference is the retained-layer event pinned above, which only the flag adds.
     if accept:
-        assert main["status"] is DocumentStatus.SUCCESS, (
-            "main did not report SUCCESS over an unflagged accepted reading, so the "
-            "document-status pin shows nothing"
-        )
+        assert main["status"] in (DocumentStatus.SUCCESS, DocumentStatus.AUDIT_FAILED)
 
 
 # ---------------------------------------------------------------------------

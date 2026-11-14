@@ -524,8 +524,12 @@ def test_covered_vs_uncovered_is_the_pinned_difference(tmp_path: Path) -> None:
 
     assert _math_font_events(covered_state) == []
     assert len(_math_font_events(uncovered_state)) == 1
-    assert covered_state.status is DocumentStatus.SUCCESS
+    # #1244 C1: the MATH-FONT signal still never moves the document (the uncovered arm stays
+    # SUCCESS). The covered arm's page is WARNING for a different reason, equation_fidelity
+    # (see ``test_a_fully_covered_page_is_not_held_to_the_math_font_signal`` above), and a
+    # document holding a non-SUCCESS page is no longer completed.
     assert uncovered_state.status is DocumentStatus.SUCCESS
+    assert covered_state.status is DocumentStatus.AUDIT_FAILED
 
 
 def test_a_pua_page_never_also_raises_the_math_font_event(tmp_path: Path) -> None:

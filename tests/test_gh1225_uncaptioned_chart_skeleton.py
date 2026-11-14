@@ -521,10 +521,16 @@ def test_process_marks_a_skeleton_page_and_the_same_page_without_ticks_is_clean(
 
     assert not plain.get("unshipped_figure_kind")
     assert CHART_SKELETON_LABEL not in plain_text
-    assert skel_meta.get("status") != plain_meta.get("status"), (
-        "a document whose only defect is the dropped chart must not be clean"
+    # #1244 C1: the control's page is an unchecked model reading too (its text ships no number),
+    # so both documents are partial now and the status cannot discriminate. What the lane adds
+    # is its named reason, which the control must not carry.
+    plain_error = plain_meta.get("error") or ""
+    assert "carry a chart's axis ticks" not in plain_error, (
+        "a document whose only defect is the dropped chart must be named for it"
     )
-    assert not plain_meta.get("error"), "the control document is clean"
+    assert not plain_error or "did not finish with status success" in plain_error, (
+        "the control document carries a note of its own"
+    )
 
 
 def test_the_cli_reports_a_skeleton_page(tmp_path: Path, monkeypatch, capsys) -> None:

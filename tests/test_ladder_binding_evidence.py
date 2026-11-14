@@ -38,6 +38,7 @@ from socr.judge.table_verdict import (
     TableJudgeVerdict,
 )
 from socr.pipeline.orchestrator import UnifiedPipeline
+from c1_support import assert_clean_or_only_unchecked
 
 # ---------------------------------------------------------------------------
 # Fixtures: a ruled table whose native text is FIXED (OLS/IV header, RowA ->
@@ -419,7 +420,7 @@ class TestProcessFlagDifference:
         ):
             result_off = pipeline_off.process(pdf_off, tmp_path / "off_out")
 
-        assert result_off.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result_off)  # #1244 C1: see c1_support
         assert "table_rejected" not in (result_off.error or "")
 
         # -- flag on, no CLI rungs available: mechanical check alone -------
@@ -473,7 +474,7 @@ class TestProcessFlagDifference:
         ):
             result = pipeline.process(pdf_path, tmp_path / "no_words_out")
 
-        assert result.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result)  # #1244 C1: see c1_support
         assert "table_rejected" not in (result.error or "")
 
 
