@@ -1,7 +1,7 @@
 # #1261 / #1208 (plan B2): withhold the table, not the page
 
 Status: partial. The prose of 127 pages comes back; the done bar (words missing on ERROR pages
-<= 94,011) is NOT met: 154,351 -> 142,708. Reaching it needs a protective gate relaxed, which this
+<= 94,011) is NOT met: 154,351 -> 143,963. Reaching it needs a protective gate relaxed, which this
 ticket's binding conditions forbid. Evidence and the numbers that would decide it are below.
 
 ## What was measured first (before any gate moved)
@@ -15,7 +15,10 @@ optional `refusals` list: each whole-page return records its reason. Production 
 
 Fidelity: of the 1,359 born-digital pages replayed, 1,175 reproduce the run's floor bytes exactly.
 The other 184 differ only by what is added after the floor (a chart-region image on 20 no-detection
-pages, a chart-region link on the recovered complete-box pages; checked on a diff).
+pages, a chart-region link on the recovered complete-box pages; checked on a diff). Those 184 are
+excluded from every old-versus-new total below (their old arm is not the run's), counted
+separately by the script; none of them changed between arms. The refusal table below counts all
+1,359 replayed pages.
 
 Why each page refused, old arm, with the text-layer words the page owes
 (scoreboard definition, `textlayer.words_missing`):
@@ -44,8 +47,9 @@ Two findings that change the brief:
    to build (and the owner approved in DECISIONS) would fire on zero pages here, so it was
    built, found to touch zero pages and removed rather than shipped as dead loosening of a fail-closed
    gate. If a later corpus has such pages, the replay hook tells which gate refuses them.
-2. **The 215 complete-box refusals are not one population.** The refusing gate is `box_unsane`
-   (267), `order_gate` (136), `structure_outside` (116), rotation (153). The sidecar never
+2. **The 682 complete-box refusals are not one population.** The refusing gate is `box_unsane`
+   (267), `order_gate` (136), `structure_outside` (116), rotation (153), no recoverable prose (9),
+   prior OCR (1). The sidecar never
    recorded this; the `refusals` hook plus this replay is the record.
 
 ## What changed
@@ -58,34 +62,78 @@ y-banding, the layer's own order keeps them apart).
   still the whole-page marker. Every detected box stays withheld (all table regions, trusted or
   not: no ordinal-to-box pairing is used anywhere).
 * It takes the partition the floor already took (`_page_prose_partition`, keep-sentences) and
-  changes only the ORDER the surviving words are emitted in: layer line order (block, line).
-  It admits no word the bands body would not ship.
-* A layer line is narrower than a band, so each line is additionally held to the keep-sentences
-  rule on its own words: a line that is mostly numerals ("+-0.3", "2008", "1|") is withheld even
-  when its band is not. The first measurement without this shipped 143 lines at least half numerals
-  (dates and page numbers among them; also MPR 2008-07 p45 "+-0.3 +-0.7 +-1.0", p27 the year axis); with it, zero.
+  re-emits the surviving words in layer line order (block, line). It admits no word the bands
+  body would not ship, and it withholds more (below).
+* **Per line and per column.** A layer line is narrower than a band, so each line is held to the
+  keep-sentences rule on its own words: a line that is mostly numerals ("+-0.3", "2008", "1|") is
+  withheld even when its band is not. A numerals-withheld line also takes down every line on its
+  side of the band's widest gap between layer lines (its column): `Real GDP 2.3` beside `2.5`
+  withhold together, and the stub labels and legend entries of a table whose values were withheld
+  go with them (Fable 1 and 2). Applying the rule to the side's pooled words adds nothing beyond
+  that (a pool is mostly numerals only when one of its lines is), so it is not a separate check.
+* **Table continuations (Astra's blocker).** A detected box can be clipped: the ruled final row
+  `Total pension obligation` / `12 million dollars` sat just outside it, with one numeral against
+  two alphabetic tokens, so neither the per-line rule nor the structure gate (no recurring numeric
+  lanes) withheld it, and the old order gate, which used to refuse the page, no longer does. Now
+  the walk goes away from each box, above and below, band by band: the lines of a band that
+  overlap the box's horizontal span are withheld, all of them, while any of them carries a
+  numeral; the walk stops at the first band whose lines in that span carry none. A box whose
+  geometry cannot be read (fewer than four numbers, non-finite, inverted) makes the body abstain:
+  the whole-page marker. Not covered: a continuation that is numeral-free (a row of Yes/No or of
+  labels) and a continuation outside the box's horizontal span; those keep shipping, as before.
+* A line with no word of two or more letters (shredded inline math: `t`, `y`, `+`) is withheld
+  (Fable 3). Six replayed pages shipped such lines on the earlier revision: bluebook 2006-03-28
+  p22, 2007-01-31 p29, 2007-10-31 p35, 2008-04-30 p40, 2009-09-23 p69, 2009-11-04 p73. None
+  ships one now.
 * A line holding both shipped and withheld words (a baseline shared by prose and a table) is
   withheld whole; a line that parses as markdown table syntax is withheld; the shipped text must
   pass `text_layer_trusted`, and the result must pass the same `_prose_follows_native_order`.
+* **Marks (Fable 4).** The table marker plus image appears once per run of withheld lines that
+  holds a line inside or continuing a detected box. Any other run gets a neutral `[line withheld]`
+  or `[N lines withheld]` (not a page mark; the order check treats it as furniture). The page keeps
+  the table marker at least once. The earlier revision printed it per run: median 6 per changed
+  page, 26 at most, most standing for a page number or an axis tick. Now: median 2, at most 3.
+* A paragraph breaks where the layer block (`w[5]`) changes (Fable 5).
 * Unchanged: scans, prior-OCR pages, rotation (both flags), native-only prose (the words are the
   PDF's), the ERROR status and failure mode, the floor credential digest (the writers hash the
   returned bytes as before), sibling tables (still withheld; second PR).
 
+### Limits stated, not fixed
+
+* **The order gate is close to a tautology here.** The fallback emits `get_text("words")` order
+  and is checked against `get_text()` order, the same source. It still refused 9 pages, but order
+  is only as good as the PDF's block order: on greenbook-part1 2010-03-16 p27 and bluebook
+  2006-03-28 p22 the page header ships last. This body is not "held to the same order gate" in any
+  stronger sense than that.
+* **"Paragraphs" in the banner includes chart titles, legend entries and stub labels** of charts
+  and unboxed tables that print no numeral (greenbook-part1 2010-03-16 p27 ships chart titles and
+  legend entries as paragraphs). They carry no number; they are not prose either.
+* **Hand read.** Fable read the shipped bodies of all 127 changed pages of the earlier revision
+  (no table row and no loose value found); the rest of the leak evidence is the rule-based listing
+  below. This revision's bodies were not read page by page; they differ from the read ones only
+  by withholding more and by the marks.
+
 ## Result on the cached run
 
-* Pages changed: 127 (order gate refusals 136 -> 9). Words recovered: 11,643. `textlayer.words_missing.error`:
-  154,351 -> 142,708. No page gained missing words.
-* Leak diff, row level. On every changed page the old arm shipped only the marker, so any value
-  line the new arm ships is new. All 565 new lines carrying a digit were listed
-  (`b2-replay.jsonl`, `new_value_lines`). Lines whose tokens are at least half numerals: 0. Lines
-  with two or more numerals and at most six tokens: 6, all running heads ("MONETARY POLICY REPORT:
-  JUNE 2022 49") or a dated sentence ("June 14-15, 2022, meeting participants"). The rest are
-  sentences, footnote text and running heads whose words outnumber their numerals: the
-  keep-sentences class the floor already ships on the 201 pages it recovered before. No table row
-  and no loose column value ships. No box content ships by construction (the shipped set excludes
-  every band meeting a box). The 1,232 other pages are byte-identical between arms.
-* Not measured: whether any of the 565 lines is a table footnote that a reader would want
-  withheld; they are not table rows.
+* Pages changed: 127 (order gate refusals 136 -> 9), all of them among the 1,175 pages whose old
+  arm reproduces the run. Words recovered: 10,388 (11,643 on the earlier revision; the difference
+  is what the new withholding rules cost). `textlayer.words_missing.error`: 154,351 -> 143,963.
+  No page gained missing words.
+* Leak diff, row level (multiset: a line the new arm ships once more than the old arm counts).
+  On every changed page the old arm refused with `order_gate`, i.e. shipped only the marker, so
+  every value line the new arm ships is new. All 450 new lines carrying a digit (73 pages;
+  565 on the earlier revision) are in the replay output (`new_value_lines`, written by
+  `2026-11-14_1261-measure.py`; the output is not committed, rerun the script). Lines whose
+  tokens are at least half numerals: 0. Lines with two or more numerals and at most six tokens:
+  6, all running heads ("MONETARY POLICY REPORT: JUNE 2022 49") or a dated sentence ("June 14-15,
+  2022, meeting participants"). The rest are sentences, footnote text and running heads whose
+  words outnumber their numerals: the keep-sentences class the floor already ships on the
+  pages it recovered before. Lines without a two-letter word on the changed pages: 0.
+  No box content ships by construction (the shipped set excludes every band meeting a box), and
+  a numeral-bearing line directly above or below a box in its span is withheld by the walk.
+* Not measured: whether any of the 450 lines is a table footnote that a reader would want
+  withheld; they are not table rows. Whether the clipped-box walk fires on the corpus is not
+  separated from the other rules: the replay shows only the result.
 
 ## What the done bar needs (owner decision)
 
@@ -107,7 +155,7 @@ record gap, left for its ticket (a new durable event must restore on resume).
 
 ## Tests and mutants
 
-`tests/test_gh1261_native_order_floor.py` (11 tests): fallback on/off difference with exact
+`tests/test_gh1261_native_order_floor.py` (18 tests): fallback on/off difference with exact
 recovered prose and order; same-words subset check against the bands body; structure-outside and
 box-sanity gates (recorded reasons); order gate on the fallback; rotation, prior OCR, scan;
 shared-baseline line, loose value line, table-syntax line; floor credential and repeat selection;
@@ -120,3 +168,11 @@ the fallback, rotation gate, table-syntax filter. All eight killed.
 The prior-OCR gate in `structure_class_floor_text` is shadowed by an identical check inside
 `native_prose_floor_text`, so removing either alone is an equivalent mutant; the test asserts the
 outcome, not the branch.
+
+Review round (PR #1324): the same file gained the clipped-box case at the shipping boundary
+(`table_floor_text_for_source`, with and without the ruled rows; the prose after them ships), the
+abstention, the column withholding, the two-letter rule, the marks and the block break. Mutants,
+same method (src and tests copied outside the repo, `socr.__file__` asserted inside the copy,
+anchor count asserted 1): remove the continuation walk (2 tests fail), remove the same-column
+withholding (2 fail), mark every run as a table run (1 fails), drop the block break (1 fails),
+drop the two-letter rule (1 fails), drop the abstention (1 fails). All six killed.

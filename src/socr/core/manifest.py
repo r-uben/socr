@@ -3370,6 +3370,35 @@ def _native_text_line_body(p, page_num: int, *, marker_line: str, png_ref: str) 
     return "\n\n".join(blocks)
 
 
+#: #1261 review: the mark a withheld run of layer lines gets when no detected box is in it
+#: (a page number, a subscript, an axis tick, a legend). The table marker is not true of such a
+#: line, and printing it six times a page cut sentences with a false "unverifiable table".
+_LINE_WITHHELD_MARK = "[line withheld]"
+_LINES_WITHHELD_MARK = "[{n} lines withheld]"
+
+
+def _native_order_boxes(p) -> list[tuple[float, float, float, float]] | None:
+    """The page's detected boxes as float rectangles, or ``None`` when one cannot be read.
+
+    ``None`` is the abstention: a box whose geometry cannot be read cannot be used to exclude
+    the lines that continue it, so the caller ships no prose.
+    """
+    import math
+
+    boxes = []
+    for box in getattr(p, "detected_table_bboxes", None) or []:
+        try:
+            x0, y0, x1, y1 = (float(v) for v in tuple(box)[:4])
+        except (TypeError, ValueError):
+            return None
+        if len(tuple(box)) < 4 or not all(math.isfinite(v) for v in (x0, y0, x1, y1)):
+            return None
+        if not (x0 <= x1 and y0 <= y1):
+            return None
+        boxes.append((x0, y0, x1, y1))
+    return boxes
+
+
 def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str) -> str | None:
     """#1261: the words the geometry floor would ship, in the text layer's OWN line order.
 
@@ -3377,24 +3406,44 @@ def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str
     drawn column-major the bands weld two columns and the order gate refuses the page. The
     layer's own order (PyMuPDF block, line, word) keeps the columns apart. This takes the
     partition the floor already took (every box withheld, keep-sentences rule, categorical
-    rows withheld: ``_page_prose_partition``) and changes ONLY the order the surviving words
-    are emitted in. It admits no word the bands body would not ship. Because a layer line is
-    narrower than a baseline band (a table row's label, its values and a prose sentence on the
-    same baseline are separate layer lines), each line is also held to the keep-sentences
-    rule on its own words: a line that is mostly numerals ("±0.3", "2008", "1|") is withheld
-    even when its band is not, so no loose value ships as a line of its own. A layer line that
-    holds both shipped and withheld words (a baseline shared by prose and a table) is withheld
-    whole, a run of withheld lines becomes one marker, and a line that parses as markdown
-    table syntax is withheld like the bands body does. Returns None when nothing ships or the
-    shipped text is not a trusted layer.
+    rows withheld: ``_page_prose_partition``) and changes the ORDER the surviving words are
+    emitted in. It admits no word the bands body would not ship, and it withholds more:
+
+    * A layer line is narrower than a baseline band, so the keep-sentences numerals rule is
+      applied to each layer line, and then a numerals-withheld line takes down every line on its
+      side of the band's widest gap between layer lines (its column). A table row beside prose
+      in the other column is not diluted by that prose: ``Real GDP 2.3`` / ``2.5`` withhold
+      together, and so do the stub labels and legend entries of a table whose values were
+      withheld. (Applying the rule to the side's pooled words adds nothing: a pool is mostly
+      numerals only when one of its lines is.)
+    * TABLE CONTINUATIONS. A detected box can be clipped (a ruled final row left outside it),
+      so a line that sits directly below or above a box, in its horizontal span, and carries a
+      numeral is withheld with its whole band, and so on band by band while each carries a
+      numeral. A box whose geometry cannot be read makes the body abstain (``None``).
+    * A line with no word of two or more letters (shredded inline math: ``t``, ``y``, ``+``) is
+      withheld.
+    * A layer line that holds both shipped and withheld words is withheld whole, and a line that
+      parses as markdown table syntax is withheld.
+
+    A run of withheld lines gets the table marker (plus page-image link) when it holds a line in
+    or continuing a detected box, otherwise a neutral line-withheld mark; the page carries the
+    table marker at least once. A paragraph breaks where the layer block changes. Returns None
+    when nothing ships or the shipped text is not a trusted layer.
     """
     from socr.core.born_digital import text_layer_trusted
     from socr.tables.reconcile import table_syntax_line_indices
-    from socr.tables.row_corroboration import band_is_mostly_numerals
+    from socr.tables.row_corroboration import (
+        band_is_mostly_numerals,
+        bears_printed_numeral,
+        cluster_band_words,
+    )
 
     words = getattr(p, "native_words", None) or []
     bands = _page_prose_partition(p, keep_sentences=True)
     if not words or not bands:
+        return None
+    boxes = _native_order_boxes(p)
+    if boxes is None:
         return None
     shipped = {tuple(w[:8]) for is_prose, band in bands if is_prose for w in band}
     lines: list[list[tuple]] = []
@@ -3407,35 +3456,139 @@ def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str
         lines[index[key]].append(w)
     texts = [" ".join(str(w[4]) for w in line).strip() for line in lines]
     table_syntax = table_syntax_line_indices(texts)
+
+    # Band sides: a band's layer lines split at their widest gap, so the column a line is in
+    # is a group of its own. ``side_of[(band, line)]`` -> 0 / 1.
+    band_of: dict[tuple, int] = {}
+    band_lines: list[dict[int, list[float]]] = []
+    for b, band in enumerate(cluster_band_words(words)):
+        extents: dict[int, list[float]] = {}
+        for w in band:
+            band_of[tuple(w[:8])] = b
+            ext = extents.setdefault(index[(w[5], w[6])], [w[0], w[2]])
+            ext[0], ext[1] = min(ext[0], w[0]), max(ext[1], w[2])
+        band_lines.append(extents)
+    side_of: dict[tuple[int, int], int] = {}
+    for b, extents in enumerate(band_lines):
+        order = sorted(extents, key=lambda i: extents[i][0])
+        cut = len(order)
+        if len(order) > 1:
+            gaps = [extents[order[k + 1]][0] - extents[order[k]][1] for k in range(len(order) - 1)]
+            cut = max(range(len(gaps)), key=gaps.__getitem__) + 1
+        for k, i in enumerate(order):
+            side_of[(b, i)] = 0 if k < cut else 1
+    line_groups: list[set[tuple[int, int]]] = [set() for _ in lines]
+    for i, line in enumerate(lines):
+        for w in line:
+            b = band_of[tuple(w[:8])]
+            g = (b, side_of[(b, i)])
+            line_groups[i].add(g)
+
+    def _centroid_in(w, box) -> bool:
+        cx, cy = (w[0] + w[2]) / 2.0, (w[1] + w[3]) / 2.0
+        return box[0] <= cx <= box[2] and box[1] <= cy <= box[3]
+
+    def _carries_numeral(b: int, i: int) -> bool:
+        """Whether line *i*'s words IN BAND *b* carry a numeral."""
+        return any(bears_printed_numeral(str(w[4])) for w in lines[i] if band_of[tuple(w[:8])] == b)
+
+    numerals = [band_is_mostly_numerals(line) for line in lines]
+
+    # Table continuations: walk away from each box, band by band, while the lines that overlap
+    # the box's horizontal span carry a numeral.
+    continuation: set[int] = set()
+    band_centres = [
+        sum((w[1] + w[3]) / 2.0 for w in band) / len(band) for band in cluster_band_words(words)
+    ]
+    meets_box = [
+        any(_centroid_in(w, box) for box in boxes for w in band)
+        for band in cluster_band_words(words)
+    ]
+    for box in boxes:
+        below = [
+            b for b in range(len(band_centres)) if band_centres[b] > box[3] and not meets_box[b]
+        ]
+        above = [
+            b for b in range(len(band_centres)) if band_centres[b] < box[1] and not meets_box[b]
+        ]
+        for walk in (below, list(reversed(above))):
+            for b in walk:
+                overlapping = [
+                    i for i, (x0, x1) in band_lines[b].items() if x0 <= box[2] and x1 >= box[0]
+                ]
+                if not overlapping:
+                    continue
+                if not any(_carries_numeral(b, i) for i in overlapping):
+                    break
+                continuation.update(overlapping)
+
+    numeric_groups = {
+        g for i in range(len(lines)) if numerals[i] or i in continuation for g in line_groups[i]
+    }
     ships = [
         bool(texts[i])
         and i not in table_syntax
         and all(tuple(w[:8]) in shipped for w in line)
-        and not band_is_mostly_numerals(line)
+        and not numerals[i]
+        and i not in continuation
+        and not (line_groups[i] & numeric_groups)
+        and any(sum(c.isalpha() for c in str(w[4])) >= 2 for w in line)
         for i, line in enumerate(lines)
     ]
     if not any(ships) or not text_layer_trusted("\n".join(t for t, ok in zip(texts, ships) if ok)):
         return None
+    box_related = [
+        i in continuation or any(_centroid_in(w, box) for box in boxes for w in line)
+        for i, line in enumerate(lines)
+    ]
+
     blocks = [prose_recovered_flag(page_num, born_digital=True, keep_sentences=True)]
     if png_ref:
         blocks.append(png_ref)
     page_image = page_image_link(png_ref)
     marker_block = f"{marker_line}\n\n{page_image}" if page_image else marker_line
+    # (position in ``blocks``, lines in the run, whether the run holds a box line)
+    runs: list[list] = []
     paragraph: list[str] = []
-    in_withheld_run = False
-    for text, ok in zip(texts, ships):
-        if ok:
-            in_withheld_run = False
-            paragraph.append(text)
-            continue
+    paragraph_block = None
+    in_run = False
+
+    def _flush() -> None:
         if paragraph:
             blocks.append("\n".join(_escaped_native_line(line) for line in paragraph))
             paragraph.clear()
-        if text and not in_withheld_run:
-            blocks.append(marker_block)
-            in_withheld_run = True
-    if paragraph:
-        blocks.append("\n".join(_escaped_native_line(line) for line in paragraph))
+
+    for i, text in enumerate(texts):
+        if ships[i]:
+            in_run = False
+            block = lines[i][0][5]
+            if paragraph and block != paragraph_block:
+                _flush()
+            paragraph_block = block
+            paragraph.append(text)
+            continue
+        _flush()
+        if not text:
+            continue
+        if not in_run:
+            runs.append([len(blocks), 0, False])
+            blocks.append("")
+            in_run = True
+        runs[-1][1] += 1
+        runs[-1][2] = runs[-1][2] or box_related[i]
+    _flush()
+    if runs and not any(box_bearing for _pos, _n, box_bearing in runs):
+        runs[0][2] = True  # the page's table notice must appear somewhere
+    for pos, n, box_bearing in runs:
+        blocks[pos] = (
+            marker_block
+            if box_bearing
+            else _LINE_WITHHELD_MARK
+            if n == 1
+            else _LINES_WITHHELD_MARK.format(n=n)
+        )
+    if not runs:
+        blocks.append(marker_block)
     return "\n\n".join(blocks)
 
 
@@ -3936,7 +4089,9 @@ def native_region_text(words: list) -> str:
 #: #1144 round 5: socr's own furniture in a recovered body -- the banner, the
 #: withheld-table marker, an image embed, a page-image link. Never the page's
 #: own words, so never part of the order check.
-_RECOVERED_FURNITURE_RE = re.compile(r"^\s*(?:\[page \b|!\[|\[page image\])")
+_RECOVERED_FURNITURE_RE = re.compile(
+    r"^\s*(?:\[page \b|!\[|\[page image\]|\[(?:\d+ lines|line) withheld\]$)"
+)
 
 
 def _order_tokens(text: str) -> list[str]:

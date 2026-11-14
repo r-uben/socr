@@ -326,12 +326,13 @@ def test_process_in_both_provider_states_and_a_real_restore(tmp_path: Path, monk
     assert [p for p in out.rglob("*.md") if p.parent.name != "pages"][0].read_text() == final_text
 
 
-def test_a_loose_value_line_in_a_prose_band_is_withheld(tmp_path: Path) -> None:
+def test_a_loose_value_line_and_its_column_are_withheld(tmp_path: Path) -> None:
     """A layer line is narrower than its band: the band "Rate label  +-0.3  +-0.7" has words
     outnumbering numerals and ships under the bands rule, but its values are separate layer
     lines. Each line is held to the keep-sentences rule on its own words, so a lone value does
-    not ship as a line (MPR 2008-07 p45 on the Fed run). DIFFERENCE: the same lone value inside
-    a sentence ships."""
+    not ship as a line (MPR 2008-07 p45 on the Fed run), and the label on the value's side of the
+    band goes with it (the stub of a table whose values were withheld). DIFFERENCE: the sentence
+    carrying a number, on its own band, ships."""
     _s, ps = _build(tmp_path, _columns, [GRID_BOX])
     ps.native_words = [
         (72.0, 60.0, 130.0, 70.0, "Unemployment", 0, 0, 0),
@@ -345,10 +346,11 @@ def test_a_loose_value_line_in_a_prose_band_is_withheld(tmp_path: Path) -> None:
         (142.0, 80.0, 190.0, 90.0, "stayed", 3, 0, 3),
         (192.0, 80.0, 230.0, 90.0, "firm", 3, 0, 4),
     ]
+    ps.detected_table_bboxes = [(500.0, 500.0, 520.0, 520.0)]
     body = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
     assert body is not None
     assert "\u00b10.3" not in body and "\u00b10.7" not in body
-    assert "Unemployment rate overall" in body
+    assert "Unemployment" not in body
     assert "Growth in 2003 stayed firm" in body
 
 
@@ -368,3 +370,153 @@ def test_a_layer_line_that_parses_as_table_syntax_is_withheld(tmp_path: Path) ->
     assert body is not None
     assert "|" not in body
     assert "Intro sentence" in body
+
+
+# ---------------------------------------------------------------------------
+# review round on PR #1324
+# ---------------------------------------------------------------------------
+
+#: A box taller than the grid, and the two ruled rows the detector left OUTSIDE it.
+CLIPPED_BOX = (70.0, 118.0, 320.0, 170.0)
+CLIPPED_LABELS = ("Total pension obligation", "Funded ratio")
+CLIPPED_VALUES = ("12 million dollars", "80 percent")
+
+
+def _clipped_rows(page) -> None:
+    for i, (label, value) in enumerate(zip(CLIPPED_LABELS, CLIPPED_VALUES)):
+        y = 190 + i * 16
+        page.insert_text((76, y), label, fontsize=9)
+        page.insert_text((230, y), value, fontsize=9)
+
+
+def test_table_rows_clipped_out_of_the_box_do_not_ship_as_prose(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Astra's blocker: ruled final rows with loose numeric cells and units (one numeral, two
+    alphabetic tokens) sit just below a clipped box, in a column-major page. The structure gate
+    does not see them (no recurring numeric lanes) and the bands body was refused by the order
+    gate, so nothing used to withhold them. DIFFERENCE: the same page without the rows; and the
+    prose after the rows still ships."""
+    _clip, clipped = _build(
+        tmp_path, lambda pg: _columns(pg, extra=_clipped_rows), [CLIPPED_BOX], name="k.pdf"
+    )
+    _base, base = _build(tmp_path, _columns, [CLIPPED_BOX], name="b.pdf")
+    reasons: list[str] = []
+    body = table_floor_text_for_source(
+        clipped,
+        1,
+        clipped.native_text,
+        prose_recovery=True,
+        geometry_floor=True,
+        chart_floor_offered=False,
+        refusals=reasons,
+    )
+    assert reasons == [], reasons
+    assert not _whole_page(body)
+    for cell in (*CLIPPED_LABELS, *CLIPPED_VALUES, "12", "80"):
+        assert cell not in body, f"clipped table row shipped: {cell!r}"
+    ref = structure_class_floor_text(base, 1)
+    assert _own_lines(body) == _own_lines(ref) == [*LEFT, LEFT_TAIL, *RIGHT, RIGHT_TAIL]
+
+
+def test_a_line_that_continues_a_box_is_withheld_but_the_prose_after_it_ships(
+    tmp_path: Path,
+) -> None:
+    """The walk away from a box stops at the first band whose lines in the box's span carry no
+    numeral: a numeral-free sentence under the clipped rows is prose."""
+    _s, ps = _build(tmp_path, lambda pg: _columns(pg, extra=_clipped_rows), [CLIPPED_BOX])
+    body = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
+    assert body is not None
+    assert LEFT_TAIL in body and "pension" not in body
+
+
+def test_a_box_whose_geometry_cannot_be_read_makes_the_body_abstain(tmp_path: Path) -> None:
+    """Exclusion cannot be established without the box: no prose, not unexcluded prose."""
+    _s, ps = _build(tmp_path, _columns, [GRID_BOX])
+    assert M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG) is not None
+    ps.detected_table_bboxes = [(70.0, 118.0, 230.0)]
+    assert M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG) is None
+
+
+def _words_line(texts, y, x0, block, line=0):
+    out, x = [], x0
+    for k, t in enumerate(texts):
+        out.append((x, y, x + 7.0 * len(t), y + 10.0, t, block, line, k))
+        x += 7.0 * len(t) + 3.0
+    return out
+
+
+def test_a_table_row_beside_prose_is_not_diluted_by_the_prose(tmp_path: Path) -> None:
+    """Fable 1 and 2: ``Real GDP 2.3`` and ``2.5`` on one baseline beside a left-column sentence.
+    The band reads as prose (words outnumber numerals), the line ``Real GDP 2.3`` alone does too,
+    but ``2.5`` is a loose value, so the row's column is withheld together: nothing ships
+    partly. DIFFERENCE: the left-column sentence on the same baseline ships."""
+    _s, ps = _build(tmp_path, _columns, [GRID_BOX])
+    ps.native_words = [
+        *_words_line(["Left", "column", "sentence", "here"], 300.0, 72.0, 0),
+        *_words_line(["Real", "GDP", "2.3"], 300.0, 330.0, 1),
+        *_words_line(["2.5"], 300.0, 450.0, 2),
+        *_words_line(["Other", "words", "stay", "put"], 320.0, 72.0, 3),
+    ]
+    ps.detected_table_bboxes = [(500.0, 500.0, 520.0, 520.0)]
+    body = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
+    assert body is not None
+    assert "Real" not in body and "2.3" not in body and "2.5" not in body
+    assert "Left column sentence here" in body and "Other words stay put" in body
+
+
+def test_a_line_with_no_word_of_two_letters_is_withheld(tmp_path: Path) -> None:
+    """Fable 3: shredded inline math (``t``, ``y``, ``+``) is symbols out of position, not a
+    sentence. DIFFERENCE: the sentence around them ships."""
+    _s, ps = _build(tmp_path, _columns, [GRID_BOX])
+    ps.native_words = [
+        *_words_line(["The", "rate", "follows", "the", "path"], 60.0, 72.0, 0),
+        *_words_line(["t"], 80.0, 72.0, 1),
+        *_words_line(["y", "+"], 100.0, 72.0, 2),
+        *_words_line(["Policy", "stays", "steady", "today"], 120.0 + 200.0, 72.0, 3),
+    ]
+    ps.detected_table_bboxes = [(500.0, 500.0, 520.0, 520.0)]
+    body = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
+    assert body is not None
+    assert "The rate follows the path" in body and "Policy stays steady today" in body
+    assert "\nt\n" not in body and "y +" not in body
+
+
+def test_one_table_marker_per_box_run_and_a_neutral_mark_elsewhere(tmp_path: Path) -> None:
+    """Fable 4: the table marker stands for a run that holds a box line. A page number or a
+    baseline-sharing line is not an unverifiable table and gets a neutral mark. DIFFERENCE: the
+    same run of withheld lines with and without a box in it."""
+    _s, ps = _build(tmp_path, _columns, [GRID_BOX])
+    body = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
+    assert body is not None
+    assert body.count(MARKER) == 1
+    assert M._LINE_WITHHELD_MARK in body
+    # A page number is a numeral-only line, in no box: a neutral mark, and the page still
+    # carries the table notice once (the box run).
+    ps.native_words = [
+        *_words_line(["Opening", "sentence", "of", "the", "page"], 60.0, 72.0, 0),
+        *_words_line(["49"], 80.0, 72.0, 1),
+        *_words_line(["Closing", "sentence", "of", "the", "page"], 100.0, 72.0, 2),
+        *_words_line(["1.5"], 120.0, 72.0, 3),
+    ]
+    ps.detected_table_bboxes = [(500.0, 500.0, 520.0, 520.0)]
+    boxless_run = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
+    assert boxless_run is not None
+    assert boxless_run.count(MARKER) == 1, "the page must carry the table notice at least once"
+    assert M._LINE_WITHHELD_MARK in boxless_run
+
+
+def test_a_paragraph_breaks_where_the_layer_block_changes(tmp_path: Path) -> None:
+    """Fable 5: consecutive shipped lines of different layer blocks are not one paragraph (a
+    heading or the next column's first line welded onto a sentence). DIFFERENCE: two lines of
+    one block stay together."""
+    _s, ps = _build(tmp_path, _columns, [GRID_BOX])
+    ps.native_words = [
+        *_words_line(["First", "line", "of", "block", "zero"], 60.0, 72.0, 0, line=0),
+        *_words_line(["Second", "line", "of", "block", "zero"], 76.0, 72.0, 0, line=1),
+        *_words_line(["Heading", "of", "block", "one"], 92.0, 72.0, 1, line=0),
+    ]
+    ps.detected_table_bboxes = [(500.0, 500.0, 520.0, 520.0)]
+    body = M._native_order_prose_body(ps, 1, marker_line=MARKER, png_ref=PNG)
+    assert body is not None
+    assert "First line of block zero\nSecond line of block zero\n\nHeading of block one" in body

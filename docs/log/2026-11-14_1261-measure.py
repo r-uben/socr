@@ -6,7 +6,7 @@ the detector count and boxes of the run's own sidecar, ``native_words`` from the
 born-digital geometry floor TWICE in one process, changing only whether the native-order fallback
 runs after the reading-order gate refuses (``_native_order_prose_body`` patched to None for the "old" arm). That is
 the pinned DIFFERENCE, not a value measured on one machine. Each arm records the reason the floor
-refused, so the 215 complete-box refusals are traced before any gate is relaxed.
+refused, so the 682 complete-box refusals are traced before any gate is relaxed.
 
 Outputs (JSON lines, one per replayed page) and a summary:
   * refusal reasons of the old arm, split by the sidecar's box-inventory class;
@@ -94,9 +94,28 @@ def _line_geometry(words, boxes, line):
     return {"tokens": len(toks), "found": found, "inside_box": inside}
 
 
+def _canonical_dirs():
+    """One document directory per stem. A retried document leaves a second folder with the
+    same stem (``w3/<stem>`` and ``w7/<stem>``); both replayed would double the page and
+    recovered-word totals and give indistinguishable ``(doc, page)`` rows. The folder with the
+    most page sidecars wins (ties: the last by path); the rest are counted, not replayed."""
+    by_stem: dict[str, list[str]] = {}
+    for sc in _sidecars():
+        d = os.path.dirname(os.path.dirname(sc))
+        if d not in by_stem.setdefault(os.path.basename(d), []):
+            by_stem[os.path.basename(d)].append(d)
+    chosen, duplicates = [], 0
+    for _stem, dirs in sorted(by_stem.items()):
+        dirs.sort(key=lambda d: (len(glob.glob(os.path.join(d, "pages", "*.json"))), d))
+        chosen.append(dirs[-1])
+        duplicates += len(dirs) - 1
+    return chosen, duplicates
+
+
 def work(doc_dir):
     import fitz
 
+    from socr.core.pdf import open_pdf
     from socr.benchmark.scoreboard import _shipped_for_comparison, _words
     from socr.core import manifest
     from socr.core.born_digital import BornDigitalDetector
@@ -106,7 +125,17 @@ def work(doc_dir):
     pdf = os.path.join(PDFS, stem + ".pdf")
     rows, stats = [], Counter()
     det = BornDigitalDetector()
-    doc = fitz.open(pdf) if os.path.exists(pdf) else None
+    doc = None
+    native_doc = None
+    if os.path.exists(pdf):
+        # ``doc`` (raw) is the scoreboard's text-layer count; ``native_doc`` is what
+        # production reads ``native_words`` from (``open_pdf``: symbol-font glyph recovery).
+        try:
+            doc = fitz.open(pdf)
+            native_doc = open_pdf(pdf)
+        except Exception:  # noqa: BLE001 - a corrupt PDF costs its pages, not the run
+            doc = native_doc = None
+            stats["pdf_open_error"] += 1
     for sc in sorted(glob.glob(os.path.join(doc_dir, "pages", "*.json"))):
         j = json.load(open(sc))
         if j.get("status") != "error":
@@ -114,7 +143,13 @@ def work(doc_dir):
         pn = int(j["page_num"])
         md_path = sc[:-5] + ".md"
         md = Path(md_path).read_text(errors="replace") if os.path.exists(md_path) else ""
-        layer_words = _words(doc[pn - 1].get_text()) if doc is not None else Counter()
+        try:
+            layer_words = _words(doc[pn - 1].get_text()) if doc is not None else Counter()
+        except Exception as exc:  # noqa: BLE001 - recorded per page below
+            stats["error_pages_unreadable"] += 1
+            if (j.get("disposition") or {}).get("ending") == "fail_closed_marker":
+                rows.append({"doc": stem, "page": pn, "replay_error": f"layer read: {exc!r}"})
+            continue
         shipped_missing = sum((layer_words - _words(_shipped_for_comparison(md))).values())
         stats["error_pages"] += 1
         stats["error_words_missing_shipped"] += shipped_missing
@@ -123,6 +158,7 @@ def work(doc_dir):
         stats["floor_pages"] += 1
         if doc is None:
             stats["no_pdf"] += 1
+            rows.append({"doc": stem, "page": pn, "replay_error": "no readable PDF"})
             continue
         try:
             pa = det.detect_page(pdf, pn)
@@ -142,7 +178,12 @@ def work(doc_dir):
         p.detected_table_count = int(j.get("detected_table_count") or 0)
         p.detected_table_bboxes = [tuple(b) for b in (j.get("detected_table_bboxes") or [])]
         p.d3_floor_png_ref = j.get("d3_floor_png_ref") or ""
-        words = doc[pn - 1].get_text("words")
+        try:
+            words = native_doc[pn - 1].get_text("words")
+        except Exception as exc:  # noqa: BLE001 - a measurement records, never hides
+            stats["replay_error"] += 1
+            rows.append({"doc": stem, "page": pn, "replay_error": f"native words: {exc!r}"})
+            continue
         p.native_words = words
         stats["replayed"] += 1
 
@@ -179,8 +220,15 @@ def work(doc_dir):
         cls = _inventory_class(j)
         miss_old = sum((layer_words - _words(_shipped_for_comparison(old_text))).values())
         miss_new = sum((layer_words - _words(_shipped_for_comparison(new_text))).values())
-        old_vals = set(_value_lines(old_text))
-        new_vals = [ln for ln in _value_lines(new_text) if ln not in old_vals]
+        # Multiset, not set: a value line the new arm ships twice (or once more than the old
+        # arm) is a new line each time.
+        old_vals = Counter(_value_lines(old_text))
+        new_vals = []
+        for ln in _value_lines(new_text):
+            if old_vals[ln]:
+                old_vals[ln] -= 1
+            else:
+                new_vals.append(ln)
         boxes = [tuple(b) for b in (j.get("detected_table_bboxes") or [])]
         rows.append(
             {
@@ -201,14 +249,17 @@ def work(doc_dir):
                 "new_text": new_text if old_text != new_text else "",
             }
         )
+    if doc is not None:
+        doc.close()
+    if native_doc is not None:
+        native_doc.close()
     return rows, stats
 
 
 def main():
-    docs = sorted(
-        {os.path.dirname(os.path.dirname(sc)) for sc in _sidecars()},
-    )
+    docs, duplicates = _canonical_dirs()
     rows, stats = [], Counter()
+    stats["duplicate_doc_dirs_skipped"] = duplicates
     with Pool(WORKERS) as pool:
         for r, s in pool.imap_unordered(work, docs):
             rows.extend(r)
@@ -217,7 +268,12 @@ def main():
     with open(OUT, "w") as fh:
         for r in sorted(rows, key=lambda r: (r["doc"], r["page"])):
             fh.write(json.dumps(r) + "\n")
-    ok = [r for r in rows if "replay_error" not in r]
+    replayed = [r for r in rows if "replay_error" not in r]
+    # Totals are over pages whose OLD arm reproduces the run's own floor bytes: a page whose old
+    # arm differs from the cached run is not the pinned old-versus-new change. They are counted
+    # and reported separately, never added in.
+    ok = [r for r in replayed if r["reproduces_run"]]
+    unreproduced = [r for r in replayed if not r["reproduces_run"]]
     by_class = Counter(r["class"] for r in ok)
     old_reasons = Counter((r["class"], r["old_reason"] or "RECOVERED") for r in ok)
     new_reasons = Counter((r["class"], r["new_reason"] or "RECOVERED") for r in ok)
@@ -234,8 +290,11 @@ def main():
         # numerals: the candidate loose table values. Listed in full for hand review.
         "new_lines_half_numeric": half,
         "stats": dict(stats),
-        "replay_reproduces_run": sum(r["reproduces_run"] for r in ok),
-        "replayed": len(ok),
+        "replayed": len(replayed),
+        "replay_reproduces_run": len(ok),
+        "replay_errors": len(rows) - len(replayed),
+        "non_reproducing_rows_excluded": len(unreproduced),
+        "non_reproducing_pages_changed": sum(r["changed"] for r in unreproduced),
         "by_class": dict(by_class),
         "old_reasons": {f"{k[0]}:{k[1]}": v for k, v in sorted(old_reasons.items())},
         "new_reasons": {f"{k[0]}:{k[1]}": v for k, v in sorted(new_reasons.items())},
