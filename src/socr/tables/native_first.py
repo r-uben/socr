@@ -50,6 +50,26 @@ ROTATED_SHIP_QUARANTINED = "rotated_ship_quarantined"
 #: emitter and the resume replay (``resume_restore_kinds``) import this one name.
 ROTATED_QUARANTINE_KIND = "rotated_native_table_quarantined"
 
+#: #1253 B3: audit-event kind written once per page whose refused native grid was
+#: handed to the model ladder. The emitter and the resume replay import this one name.
+MODEL_RETRY_KIND = "native_table_model_retry"
+
+#: #1253 B3: the refusal reasons on which a model gets one attempt at the page.
+#: ALLOWLIST by name, never "every REFUSE": a new refusal reason added to
+#: ``plan_native_table`` stays refused until someone decides here that a model read is
+#: wanted for it. ``header_unattributed`` and ``label_binding`` are deliberately absent
+#: (owner decision 2026-11-13: they stay refused; zero occurrences in the 156-document
+#: run), and so is ``"text layer unreadable"`` (no words to check any reading against).
+MODEL_RETRY_REFUSAL_REASONS: frozenset[str] = frozenset(
+    {
+        "row_count",
+        "structure_defective",
+        "unlocalizable_cells",
+        "region_unverifiable",
+        "numeric_orphan",
+    }
+)
+
 
 @dataclass(frozen=True)
 class FailingCell:
