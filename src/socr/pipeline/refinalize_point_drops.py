@@ -48,7 +48,12 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
-from socr.core.verdict import published_audit_passed
+from socr.core.verdict import (
+    published_audit_passed,
+    rerun_text_dependent_checks,
+    table_block_digest,
+    write_reconciled_trace,
+)
 
 #: The per-document record of what this tool changed.
 LOG_NAME = "refinalized_point_drops.json"
@@ -227,6 +232,7 @@ def repair_page(
                 idx,
                 effective_outcome(result.outcome.value, bool(rows_data)),
                 row_evidence_dicts(result),
+                table_sha=table_block_digest(new_text, idx),
             )
             if "withheld_markdown" in records[table_id]:
                 payload["withheld_markdown"] = records[table_id]["withheld_markdown"]
@@ -235,6 +241,18 @@ def repair_page(
             payloads[table_id] = payload
     if payloads:
         new_sidecar["row_binding"] = {**records, **payloads}
+    # #1183: keep the pass trace consistent with the verdict and the row-binding records this tool
+    # wrote (no invention): the check ran here, so its table entries are the records' own.
+    # It also ran every text-dependent check again on the repaired text (it holds the page state),
+    # so their outcomes are its own; any other kept PASS is NOT_RUN on a text this tool changed.
+    write_reconciled_trace(
+        new_sidecar,
+        sidecar.get("checks"),
+        verdict,
+        row_binding_records=new_sidecar.get("row_binding") if payloads else None,
+        recomputed=rerun_text_dependent_checks(final, p, sidecar.get("checks")),
+        text=final.text or "",
+    )
 
     # The page's events: text-layer events kept, shrunk or removed; row-binding events rewritten;
     # the repair events added where a run records them (after the page's other events).

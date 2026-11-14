@@ -50,7 +50,13 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
-from socr.core.verdict import published_audit_passed
+from socr.core.verdict import (
+    PageVerdict,
+    published_audit_passed,
+    rerun_text_dependent_checks,
+    text_layer_words_outcome,
+    write_reconciled_trace,
+)
 
 #: The per-document record of what this tool changed and what the run had shipped.
 LOG_NAME = "refinalized_own_text.json"
@@ -450,6 +456,7 @@ def _updated_sidecar(
     why_sink=None,
     missing_words=None,
     words_record=None,
+    page_state=None,
 ) -> dict:
     from socr.core.manifest import is_page_failed_marker
     from socr.pipeline.orchestrator import _page_blob_key, _socr_source_digest, _socr_version
@@ -462,6 +469,21 @@ def _updated_sidecar(
         out["status"], winning.get("audit_passed", False), verdict
     )
     out["verdict"] = verdict.to_dict()
+    # #1183: keep the pass trace consistent with the verdict this tool wrote (no invention).
+    # The tool holds the page state, so it runs every text-dependent check again on the text it
+    # wrote and those entries are its own; any other kept PASS is not run on text that changed.
+    _words = (
+        rerun_text_dependent_checks(output, page_state, sidecar.get("checks"))
+        if page_state is not None
+        else ()
+    )
+    write_reconciled_trace(
+        out,
+        sidecar.get("checks"),
+        verdict,
+        recomputed=_words,
+        text=winning.get("text") or "",
+    )
     out["winning_output"] = winning
     out["page_fingerprint"] = (
         _page_blob_key(winning) if not is_page_failed_marker(winning.get("text", "")) else ""
@@ -872,6 +894,15 @@ def refinalize_document(
             record = page_word_check_record(shipped, state)
             if record is not None and "text_layer_words" not in sidecar:
                 whole = {**(whole if whole is not None else sidecar), "text_layer_words": record}
+                # #1183: the words check ran here on the shipped text, so the trace states it
+                # (the text is unchanged: every other entry stays as it was).
+                write_reconciled_trace(
+                    whole,
+                    whole.get("checks"),
+                    PageVerdict.from_dict(whole.get("verdict") or {}),
+                    recomputed=(text_layer_words_outcome(shipped, state).entry,),
+                    text=shipped.text or "",
+                )
             # #1244 C1: re-derive the PUBLISHED audit_passed here too. A page an earlier pass
             # (or a run from before the derivation) demoted keeps a stale ``true`` otherwise,
             # because this path never goes through ``_updated_sidecar``.
@@ -905,6 +936,7 @@ def refinalize_document(
             why_by_page,
             missing_words=page_missing_words(output, state),
             words_record=page_word_check_record(output, state),
+            page_state=state,
         )
         writes.append((fragment_path, output.text, path, new_sidecar))
         changes.append(

@@ -36,7 +36,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from socr.core.verdict import in_fresh_run_order, published_audit_passed
+from socr.core.verdict import in_fresh_run_order, published_audit_passed, write_reconciled_trace
 from socr.figures.unshipped_figures import (
     CHART_SKELETON_KIND,
     EVENT_KINDS,
@@ -345,6 +345,13 @@ def _updated_sidecar(sidecar: dict, output, verdict, decision) -> dict:
         out["status"], winning.get("audit_passed", False), verdict
     )
     out["verdict"] = verdict.to_dict()
+    # #1183: keep the pass trace consistent with the verdict this tool wrote (no invention).
+    write_reconciled_trace(
+        out,
+        sidecar.get("checks"),
+        verdict,
+        text=winning.get("text") or "",
+    )
     out["winning_output"] = winning
     out["page_fingerprint"] = (
         _page_blob_key(winning) if not is_page_failed_marker(winning.get("text", "")) else ""

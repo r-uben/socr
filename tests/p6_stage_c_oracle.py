@@ -98,6 +98,7 @@ __all__ = [
     "CHART_FLOOR_ABSTENTION_SIDECAR_1269_DIFFERENCES",
     "TABLE_FLOOR_BODY_1266_DIFFERENCES",
     "NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES",
+    "PASS_TRACE_SIDECAR_1183_DIFFERENCES",
 ]
 
 #: #1269: sidecar keys that are SPARSE by design and so must not join the every-page
@@ -173,6 +174,10 @@ ADDITIVE_SIDECAR_KEYS: frozenset[str] = frozenset(
         # Pinned per page by ``NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES``; empty on
         # this corpus because ``capture()`` exercises assemble only.
         "native_cell_binding",
+        # #1183: the per-page pass trace. Pinned per page by
+        # ``PASS_TRACE_SIDECAR_1183_DIFFERENCES`` (every page gains the key, with the exact list
+        # this corpus's pages produce) and by tests/test_gh1183_pass_trace.py.
+        "checks",
     }
 )
 
@@ -1602,6 +1607,354 @@ NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES: list[ExpectedDiff] = [
 ]
 
 
+_PASS_TRACE_TEXT_SHA_1183: dict[int, str] = {
+    1: "sha256:73b3775e5a93748c02a7f4e87d5297afda0af2925614dbc0538177a360a4ffc0",
+    2: "sha256:3e790875859f78f22383f41d7b4e9d76feb233e06dd9b2f7c05f13af8b7d2c69",
+    3: "sha256:dc7f9869d6c234611468306849db53b0996983599bb7445a6ebb7f50161cc3ac",
+    4: "sha256:f53afb515c19b86183da507056134a31146c9502e4036b7f6382219d57e583fe",
+    5: "sha256:7ff046b5bd4b7a5718c91730559bb7df5fac42a377ab16155ecfbd0df8c37599",
+    7: "sha256:6b2b60fbc77bd067bb0a4430986e73df0491a9a90a69d02d9a497c115cfcb973",
+    8: "sha256:136f647f1e6ca917a24f313b97c45fcbb58137d99f42eb63ee91c77f313a5275",
+    9: "sha256:dea206055e5212e2977bc7db3bde16382a3b16644c71ac0256c32b7743a323f4",
+    10: "sha256:3d002892f8596fdf9c830cde54adcec02bbc76551481b71016027caa99ea075d",
+    11: "sha256:f633ba59b5b886802661b3875d43ff8ac78e7e1916e631cbfce0639688c72280",
+    12: "sha256:63fbef504a2c3db7669c068ea9d2c7b0cebced8b83dc4d20f36fb8bb3d8c4f81",
+}
+
+
+def _pass_trace_1183_pages() -> dict[int, list[dict]]:
+    """The exact pass trace each page of this corpus gets from ``capture()``.
+
+    ``capture()`` exercises assemble only: no provider ladder is in the state and no per-table or
+    per-layer check ran, so the model-dependent checks are NOT_RUN and the layer checks that need
+    the in-memory word reference are NOT_RUN too. Reasons are the named constants of
+    ``core.verdict`` where one exists, so a reworded reason moves this pin and the code together
+    but a changed RESULT moves only the code.
+    """
+    from socr.core import verdict as V
+
+    def e(check, result, scope, reason):
+        return {"check": check, "result": result, "scope": scope, "reason": reason}
+
+    pages = {
+        1: [
+            e("control_bytes", "PASS", "page", V.CONTROL_BYTES_PASS_REASON),
+            e(
+                "equation_fidelity",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no equation reading could be attached",
+            ),
+            e("figure_text", "NOT_APPLICABLE", "page", V.CHART_VALUES_NOT_APPLICABLE_REASON),
+            e("page_judge", "NOT_APPLICABLE", "page", V.EXACT_PASS_NOT_APPLICABLE_REASON),
+            e("prior_ocr_layer", "PASS", "page", V.PRIOR_OCR_PASS_REASON),
+            e("row_binding", "NOT_APPLICABLE", "page", V.ROW_BINDING_NO_TABLE_REASON),
+            e(
+                "text_layer_drops",
+                "NOT_RUN",
+                "table_rows",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
+            ),
+            e(
+                "text_layer_numbers",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
+            ),
+            e("text_layer_words", "NOT_RUN", "page", V.WORDS_NO_REFERENCE_REASON),
+        ],
+        2: [
+            e("control_bytes", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
+            e(
+                "equation_fidelity",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no equation reading could be attached",
+            ),
+            e("figure_text", "NOT_APPLICABLE", "page", V.CHART_VALUES_NOT_APPLICABLE_REASON),
+            e("page_judge", "NOT_APPLICABLE", "page", V.EXACT_PASS_NOT_APPLICABLE_REASON),
+            e("prior_ocr_layer", "PASS", "page", V.PRIOR_OCR_PASS_REASON),
+            e("row_binding", "NOT_APPLICABLE", "page", V.ROW_BINDING_NO_TABLE_REASON),
+            e(
+                "table_structure",
+                "FAIL",
+                "page",
+                "this page's native table structure could not be read",
+            ),
+            e(
+                "text_layer_drops",
+                "NOT_RUN",
+                "table_rows",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
+            ),
+            e(
+                "text_layer_numbers",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
+            ),
+            e("text_layer_words", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
+        ],
+        3: [
+            e("control_bytes", "PASS", "page", V.CONTROL_BYTES_PASS_REASON),
+            e(
+                "equation_fidelity",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no equation reading could be attached",
+            ),
+            e("figure_text", "NOT_APPLICABLE", "page", V.CHART_VALUES_NOT_APPLICABLE_REASON),
+            e(
+                "native_table_verifier",
+                "FAIL",
+                "page",
+                "a model table ships here over a native floor that failed verification",
+            ),
+            e("page_judge", "FAIL", "page", "the page judge did not accept the bytes that ship"),
+            e("prior_ocr_layer", "PASS", "page", V.PRIOR_OCR_PASS_REASON),
+            e("row_binding", "NOT_RUN", "table:1", V.ROW_BINDING_NOT_RUN_REASON),
+            e("text_layer_drops", "NOT_RUN", "table_rows", V.DROPS_LAYER_NOT_USABLE_REASON),
+            e("text_layer_numbers", "UNKNOWN", "page", V.NO_OWN_TEXT_REASON),
+            e("text_layer_words", "NOT_RUN", "page", V.WORDS_NO_REFERENCE_REASON),
+        ],
+        4: [
+            e("control_bytes", "PASS", "page", V.CONTROL_BYTES_PASS_REASON),
+            e(
+                "equation_fidelity",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no equation reading could be attached",
+            ),
+            e("figure_text", "NOT_APPLICABLE", "page", V.CHART_VALUES_NOT_APPLICABLE_REASON),
+            e("page_judge", "NOT_APPLICABLE", "page", V.EXACT_PASS_NOT_APPLICABLE_REASON),
+            e("prior_ocr_layer", "PASS", "page", V.PRIOR_OCR_PASS_REASON),
+            e("row_binding", "NOT_RUN", "table:1", V.ROW_BINDING_NOT_RUN_REASON),
+            e("text_layer_drops", "NOT_RUN", "table_rows", V.DROPS_LAYER_NOT_USABLE_REASON),
+            e("text_layer_numbers", "UNKNOWN", "page", V.NO_OWN_TEXT_REASON),
+            e("text_layer_words", "NOT_RUN", "page", V.WORDS_NO_REFERENCE_REASON),
+        ],
+        5: [
+            e("control_bytes", "PASS", "page", V.CONTROL_BYTES_PASS_REASON),
+            e(
+                "equation_fidelity",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no equation reading could be attached",
+            ),
+            e("figure_text", "NOT_APPLICABLE", "page", V.CHART_VALUES_NOT_APPLICABLE_REASON),
+            e("page_judge", "NOT_APPLICABLE", "page", V.EXACT_PASS_NOT_APPLICABLE_REASON),
+            e("prior_ocr_layer", "PASS", "page", V.PRIOR_OCR_PASS_REASON),
+            e("row_binding", "NOT_RUN", "table:1", V.ROW_BINDING_NOT_RUN_REASON),
+            e("text_layer_drops", "NOT_RUN", "table_rows", V.DROPS_LAYER_NOT_USABLE_REASON),
+            e("text_layer_numbers", "UNKNOWN", "page", V.NO_OWN_TEXT_REASON),
+            e("text_layer_words", "NOT_RUN", "page", V.WORDS_NO_REFERENCE_REASON),
+        ],
+        6: [
+            e("control_bytes", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
+            e(
+                "equation_fidelity",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no equation reading could be attached",
+            ),
+            e("figure_text", "NOT_APPLICABLE", "page", V.CHART_VALUES_NOT_APPLICABLE_REASON),
+            e("page_judge", "NOT_APPLICABLE", "page", V.EXACT_PASS_NOT_APPLICABLE_REASON),
+            e("prior_ocr_layer", "NOT_APPLICABLE", "page", V.PRIOR_OCR_NO_LAYER_REASON),
+            e("row_binding", "NOT_APPLICABLE", "page", V.ROW_BINDING_NO_TABLE_REASON),
+            e(
+                "text_layer_drops",
+                "NOT_RUN",
+                "table_rows",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
+            ),
+            e(
+                "text_layer_numbers",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
+            ),
+            e("text_layer_words", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
+            e(
+                "unknown",
+                "UNKNOWN",
+                "page",
+                "socr did not confirm this page and did not record which check failed (status error, failure mode none)",
+            ),
+        ],
+        7: [
+            e("control_bytes", "PASS", "page", V.CONTROL_BYTES_PASS_REASON),
+            e(
+                "equation_fidelity",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no equation reading could be attached",
+            ),
+            e("figure_text", "NOT_APPLICABLE", "page", V.CHART_VALUES_NOT_APPLICABLE_REASON),
+            e("page_judge", "NOT_APPLICABLE", "page", V.EXACT_PASS_NOT_APPLICABLE_REASON),
+            e("prior_ocr_layer", "NOT_APPLICABLE", "page", V.PRIOR_OCR_NO_LAYER_REASON),
+            e("row_binding", "NOT_APPLICABLE", "page", V.ROW_BINDING_NO_TABLE_REASON),
+            e("text_layer_drops", "NOT_RUN", "table_rows", V.DROPS_LAYER_NOT_USABLE_REASON),
+            e("text_layer_numbers", "UNKNOWN", "page", V.NO_OWN_TEXT_REASON),
+            e("text_layer_words", "NOT_APPLICABLE", "page", V.WORDS_NO_LAYER_REASON),
+        ],
+        8: [
+            e("control_bytes", "PASS", "page", V.CONTROL_BYTES_PASS_REASON),
+            e(
+                "equation_fidelity",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no equation reading could be attached",
+            ),
+            e("figure_text", "NOT_APPLICABLE", "page", V.CHART_VALUES_NOT_APPLICABLE_REASON),
+            e(
+                "native_table_verifier",
+                "FAIL",
+                "page",
+                "no table-ladder rung accepted this page's table and the model reading still ships",
+            ),
+            e("page_judge", "FAIL", "page", "the page judge did not accept the bytes that ship"),
+            e("prior_ocr_layer", "PASS", "page", V.PRIOR_OCR_PASS_REASON),
+            e("row_binding", "NOT_RUN", "table:1", V.ROW_BINDING_NOT_RUN_REASON),
+            e("text_layer_drops", "NOT_RUN", "table_rows", V.DROPS_LAYER_NOT_USABLE_REASON),
+            e("text_layer_numbers", "UNKNOWN", "page", V.NO_OWN_TEXT_REASON),
+            e("text_layer_words", "NOT_RUN", "page", V.WORDS_NO_REFERENCE_REASON),
+        ],
+        9: [
+            e("control_bytes", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
+            e(
+                "equation_fidelity",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no equation reading could be attached",
+            ),
+            e("figure_text", "NOT_APPLICABLE", "page", V.CHART_VALUES_NOT_APPLICABLE_REASON),
+            e("page_judge", "FAIL", "page", "the page judge did not accept the bytes that ship"),
+            e("prior_ocr_layer", "PASS", "page", V.PRIOR_OCR_PASS_REASON),
+            e("row_binding", "NOT_APPLICABLE", "page", V.ROW_BINDING_NO_TABLE_REASON),
+            e(
+                "table_structure",
+                "FAIL",
+                "page",
+                "a table on this page cannot be represented faithfully and was withheld",
+            ),
+            e("text_layer_drops", "NOT_RUN", "table_rows", V.FAILED_MARKER_REASON),
+            e("text_layer_numbers", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
+            e("text_layer_words", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
+        ],
+        10: [
+            e("control_bytes", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
+            e(
+                "equation_fidelity",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no equation reading could be attached",
+            ),
+            e("figure_text", "NOT_APPLICABLE", "page", V.CHART_VALUES_NOT_APPLICABLE_REASON),
+            e(
+                "native_table_verifier",
+                "FAIL",
+                "page",
+                "every rung of the table ladder was exhausted without accepting this page's grid",
+            ),
+            e("page_judge", "NOT_APPLICABLE", "page", V.EXACT_PASS_NOT_APPLICABLE_REASON),
+            e("prior_ocr_layer", "PASS", "page", V.PRIOR_OCR_PASS_REASON),
+            e("row_binding", "NOT_APPLICABLE", "page", V.ROW_BINDING_NO_TABLE_REASON),
+            e(
+                "text_layer_drops",
+                "NOT_RUN",
+                "table_rows",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
+            ),
+            e(
+                "text_layer_numbers",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
+            ),
+            e("text_layer_words", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
+        ],
+        11: [
+            e("control_bytes", "PASS", "page", V.CONTROL_BYTES_PASS_REASON),
+            e(
+                "equation_fidelity",
+                "FAIL",
+                "page",
+                "a corrupt equation candidate ships on this page without a verified reading",
+            ),
+            e("figure_text", "NOT_APPLICABLE", "page", V.CHART_VALUES_NOT_APPLICABLE_REASON),
+            e("page_judge", "NOT_APPLICABLE", "page", V.EXACT_PASS_NOT_APPLICABLE_REASON),
+            e("prior_ocr_layer", "PASS", "page", V.PRIOR_OCR_PASS_REASON),
+            e("row_binding", "NOT_APPLICABLE", "page", V.ROW_BINDING_NO_TABLE_REASON),
+            e(
+                "text_layer_drops",
+                "NOT_RUN",
+                "table_rows",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
+            ),
+            e(
+                "text_layer_numbers",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
+            ),
+            e("text_layer_words", "NOT_RUN", "page", V.WORDS_NO_REFERENCE_REASON),
+        ],
+        12: [
+            e("control_bytes", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
+            e(
+                "equation_fidelity",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no equation reading could be attached",
+            ),
+            e("figure_text", "NOT_APPLICABLE", "page", V.CHART_VALUES_NOT_APPLICABLE_REASON),
+            e("page_judge", "NOT_APPLICABLE", "page", V.EXACT_PASS_NOT_APPLICABLE_REASON),
+            e("prior_ocr_layer", "PASS", "page", V.PRIOR_OCR_PASS_REASON),
+            e("row_binding", "NOT_APPLICABLE", "page", V.ROW_BINDING_NO_TABLE_REASON),
+            e(
+                "table_structure",
+                "FAIL",
+                "page",
+                "a table on this page cannot be represented faithfully and was withheld",
+            ),
+            e(
+                "text_layer_drops",
+                "NOT_RUN",
+                "table_rows",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
+            ),
+            e(
+                "text_layer_numbers",
+                "NOT_RUN",
+                "page",
+                f"{V.NO_PROVIDER_LADDER_REASON}: no model reading exists to compare",
+            ),
+            e("text_layer_words", "NOT_RUN", "page", V.FAILED_MARKER_REASON),
+        ],
+    }
+    # Every PASS names the text it was computed on (#1183 review round 2): the sha256 of the page
+    # text the corpus ships, pinned like the other text digests of this oracle.
+    for page, trace in pages.items():
+        for entry in trace:
+            if entry["result"] == "PASS":
+                entry["text_sha"] = _PASS_TRACE_TEXT_SHA_1183[page]
+    return pages
+
+
+PASS_TRACE_SIDECAR_1183_DIFFERENCES: list[ExpectedDiff] = [
+    ExpectedDiff(
+        path=("sidecars", f"p6_corpus/pages/{page:05d}.json", "checks"),
+        old_value=None,
+        new_value=trace,
+        description=(
+            f"checks: page {page} gains the additive pass trace (#1183): every check's own "
+            "outcome, PASS included. A record only; no status, mode or byte moves with it."
+        ),
+    )
+    for page, trace in _pass_trace_1183_pages().items()
+]
+
+
 #: #1185: the text_layer_numbers clause (src/socr/core/verdict.py). A model-read page whose
 #: numbers have no own text layer to be checked against is MARKED, not CHECKED: the canonical
 #: unchecked line goes at the top of its text, the page is demoted to WARNING with
@@ -1840,6 +2193,7 @@ EXPECTED_STAGE_C_DIFFERENCE_ENTRIES: list[ExpectedDiff] = [
     *CHART_FLOOR_ABSTENTION_SIDECAR_1269_DIFFERENCES,
     *TABLE_FLOOR_BODY_1266_DIFFERENCES,
     *NATIVE_CELL_BINDING_SIDECAR_DIFFERENCES,
+    *PASS_TRACE_SIDECAR_1183_DIFFERENCES,
     *TEXT_LAYER_NUMBERS_1185_DIFFERENCES,
     *PUBLISHED_AUDIT_PASSED_1244_DIFFERENCES,
 ]

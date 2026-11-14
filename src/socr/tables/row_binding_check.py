@@ -1141,9 +1141,17 @@ def row_evidence_dicts(result: RowBindingResult) -> list[dict]:
 
 
 def table_payload(
-    page_num: int, table_index: int, outcome: str, rows: list[dict], error: str = ""
+    page_num: int,
+    table_index: int,
+    outcome: str,
+    rows: list[dict],
+    error: str = "",
+    table_sha: str = "",
 ) -> dict:
-    """One table's ``ps.row_binding`` record (before ``withheld_markdown`` / ``repairs``)."""
+    """One table's ``ps.row_binding`` record (before ``withheld_markdown`` / ``repairs``).
+
+    *table_sha* (#1183) is the digest of the table block the check ran on; the pass trace states a
+    ``bound`` record only for a shipped table with that digest."""
     counts: dict[str, int] = {}
     for r in rows:
         counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
@@ -1156,6 +1164,8 @@ def table_payload(
     }
     if error:
         payload["error"] = error
+    if table_sha:
+        payload["table_sha"] = table_sha
     return payload
 
 

@@ -162,8 +162,10 @@ from socr.pipeline.agentic import (
     route_page,
 )
 from socr.core.ollama_utils import probe_model_generation
+from socr.core.pass_trace import trace_to_dicts
 from socr.core.verdict import (
     NATIVE_TABLE_EXACT_PASS_KIND,
+    table_block_digest,
     published_audit_passed,
     pages_not_success_note as _pages_not_success_note,
     NUMBERS_DISAGREE_EVENT_DETAIL,
@@ -9959,7 +9961,14 @@ class UnifiedPipeline:
 
         def _record(table_index: int, outcome: str, rows: list[dict], error: str = "") -> None:
             table_id = f"p{page_num}-t{table_index}"
-            payload = table_payload(page_num, table_index, outcome, rows, error)
+            payload = table_payload(
+                page_num,
+                table_index,
+                outcome,
+                rows,
+                error,
+                table_sha=table_block_digest(out.text, table_index),
+            )
             counts = payload["counts"]
             _repairs = _valid_repairs(table_index)
             if _repairs and outcome != TableOutcome.CONTRADICTED.value:
@@ -12194,6 +12203,16 @@ class UnifiedPipeline:
                 ps.best_output = fallback
 
         # Snapshot the ladder for manifest provenance (B3).
+        # Gated as the lane itself is (``_equation_region_lane_enabled``): a native-only run
+        # reads no equation, so its trace must say NOT_APPLICABLE and not "lane on, none found".
+        state.equation_lane_enabled = bool(
+            self.config.agentic
+            and not self.config.native_only
+            and (
+                self.config.equation_region_lane
+                or (self.config.recover_clean_equations and self.config.detect_equations)
+            )
+        )
         state.agentic_ladder = [
             {
                 "provider_id": p.id,
@@ -17899,6 +17918,12 @@ class UnifiedPipeline:
                 if record is not None and record.verdict is not None
                 else {}
             ),
+            # #1183: every check's own outcome on this page, PASS included, so an empty
+            # ``verdict`` can no longer be read as "every check passed". A record, not an
+            # input: no reader decides a status or a byte from it. The final records flush
+            # writes the authoritative list (late assembly clauses included); a resumed
+            # terminal page replays the list its original run wrote.
+            "checks": trace_to_dicts(record.checks or ()) if record is not None else [],
             # Full serialised winning PageOutput.  PP-5 reconstructs a skipped
             # page's in-memory PageState.best_output from this dict (paired with
             # the fragment text) so the resumed run carries the SAME status /
@@ -19382,6 +19407,11 @@ class UnifiedPipeline:
             from socr.core.verdict import PageVerdict
 
             ps.published_verdict = PageVerdict.from_dict(raw_verdict)
+            # #1183: the trace the original run recorded, replayed unchanged. ``None`` when the
+            # sidecar predates it, which the seam states as NOT_RUN for every check.
+            from socr.core.pass_trace import trace_from_dicts
+
+            ps.published_checks = trace_from_dicts(meta.get("checks"))
         else:
             logger.warning(
                 "#1145: p%d restored without its published verdict; the seam will "

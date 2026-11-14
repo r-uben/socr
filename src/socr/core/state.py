@@ -262,6 +262,10 @@ class PageState:
     #: as the single frozen winner), so a recomputed verdict would silently drop them.
     #: Typed ``Any`` to keep this module free of a ``core.verdict`` import.
     published_verdict: Any = None
+    #: #1183: the pass trace (a tuple of ``core.pass_trace.TraceEntry``) this page's ORIGINAL
+    #: run wrote to its sidecar, set only by the resume reader, ``None`` when the sidecar
+    #: carries none. A terminal resumed page REPLAYS it unchanged: its checks do not run again.
+    published_checks: Any = None
     #: GH-271: the corrupt-equation lane (default on) produced a region hybrid
     #: that must ship even though it remains WARNING/audit_passed=False (syntax
     #: is not a mathematical-fidelity oracle). Read only by final winner selection.
@@ -869,6 +873,9 @@ class DocumentState:
     # Agentic routing ladder snapshot (B3) — populated by _phase_agentic, None otherwise.
     # Each entry: {provider_id, model, backend, cost_per_page_usd, tier}.
     agentic_ladder: list[dict] = field(default_factory=list)
+    # #1183: whether an equation-reading lane (the region lane, or the legacy detect + recover-clean
+    # pair) could attach a reading on this run. Set with the ladder; read only by the pass trace.
+    equation_lane_enabled: bool = False
     # Judge model used for agentic routing (B3) — "" when heuristic judge was used.
     agentic_judge_model: str = ""
     # PP-2 cascade halt: non-empty when the page loop stopped early because the

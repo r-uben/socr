@@ -51,7 +51,7 @@ _COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 
 GROUPS = ("coverage", "labels", "tells", "events", "textlayer", "records", "gold")
 # Counts kept in --json but not rendered: one row per value would bury the table.
-_JSON_ONLY_PREFIX = "records.source_digest."
+_JSON_ONLY_PREFIXES = ("records.source_digest.", "records.check_result.")
 
 
 def scan_documents(run: Path) -> tuple[dict[str, Path], list[Path]]:
@@ -107,6 +107,16 @@ def _is_marked(text: str) -> bool:
 def _clauses(sidecar: dict) -> list[dict]:
     verdict = sidecar.get("verdict") or {}
     return [c for c in verdict.get("clauses") or [] if isinstance(c, dict)]
+
+
+def _checks(sidecar: dict) -> list[dict]:
+    """The page's pass trace (#1183), ``[]`` when the sidecar carries none or a malformed one: one
+    unreadable entry makes the whole list unreadable (the reader's rule), so a valid PASS beside it
+    is not counted."""
+    from socr.core.pass_trace import trace_from_dicts
+
+    raw = sidecar.get("checks")
+    return raw if trace_from_dicts(raw) is not None else []
 
 
 def _missing_links(text: str, doc_dir: Path) -> int:
@@ -208,10 +218,30 @@ def count_document(doc_dir: Path) -> collections.Counter:
         attempts = sidecar.get("attempts_summary") or sidecar.get("attempts") or []
         if len(attempts) > 1:
             c["records.pages_more_than_one_attempt"] += 1
-        if status == "success" and engine == "native" and not events and not clauses:
+        checks = _checks(sidecar)
+        # "No trace" is a page with no event, no clause AND no pass trace: a traced page that has
+        # nothing else to say is not untraced (#1183).
+        if status == "success" and engine == "native" and not events and not clauses and not checks:
             c["records.clean_native_success_no_trace"] += 1
         if any(str(cl.get("check")) == "unknown" for cl in clauses):
             c["records.pages_clause_check_unknown"] += 1
+        # #1183: what the pass trace says. A page with no entry at all cannot say which checks
+        # ran; a page with any PASS names at least one check that ran and found nothing. NOT_RUN
+        # is counted per check: it is where a check could have applied and did not.
+        if not checks:
+            c["records.pages_checks_empty"] += 1
+        if any(str(e.get("result")) == "PASS" for e in checks):
+            c["records.pages_checks_any_pass"] += 1
+        # A table-scope pass says nothing about the rest of the page (#1181): counted apart.
+        if any(str(e.get("result")) == "PASS" and str(e.get("scope")) == "page" for e in checks):
+            c["records.pages_checks_page_scope_pass"] += 1
+        for entry in checks:
+            result = str(entry.get("result"))
+            name = str(entry.get("check"))
+            scope_kind = str(entry.get("scope")).split(":", 1)[0]
+            c[f"records.check_result.{name}@{scope_kind}|{result}"] += 1
+            if result == "NOT_RUN":
+                c[f"records.checks_not_run.{name}"] += 1
         digest = str(sidecar.get("socr_source_digest") or "missing")
         c[f"records.source_digest.{digest[:12]}"] += 1
 
@@ -464,7 +494,7 @@ def _group_order(key: str) -> tuple[int, str]:
 
 def render(results: list[collections.Counter], labels: list[str]) -> str:
     keys = sorted(
-        {k for r in results for k in r if not k.startswith(_JSON_ONLY_PREFIX)}, key=_group_order
+        {k for r in results for k in r if not k.startswith(_JSON_ONLY_PREFIXES)}, key=_group_order
     )
     width = max(len(k) for k in keys) if keys else 10
     head = f"{'count':<{width}}  " + "  ".join(f"{lab:>12}" for lab in labels)
