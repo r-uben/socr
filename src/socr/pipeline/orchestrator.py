@@ -9692,7 +9692,13 @@ class UnifiedPipeline:
         ps.point_repairs = dict(kept)
 
     def _commit_point_repairs(
-        self, state: DocumentState, page_num: int, ps: PageState, shipped: PageOutput | None
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        shipped: PageOutput | None,
+        bo: PageOutput,
+        pre_repair_text: str,
     ) -> int:
         """#1282: record the repairs the page's FINAL output carries, drop the rest.
 
@@ -9706,7 +9712,28 @@ class UnifiedPipeline:
         if not ps.point_repairs and not pending:
             return 0
         kept = self._shipped_repairs(ps, shipped)
+        _repaired_tables = list(ps.point_repairs)
         self._forget_point_repairs(ps, kept)
+        if not kept:
+            # #1300: no repair of the page is kept, so the reading goes back to what the model
+            # wrote (as ``_abandon_point_repairs``): a repaired cell must never ship, on any
+            # later path (assemble), without its record.
+            if getattr(bo, "point_repaired", False):
+                bo.text = pre_repair_text
+                bo.point_repaired = False
+                # When the output that shipped descended from the repaired reading, every record
+                # of a repaired table described the repaired bytes, which no longer ship: none
+                # of them may stay BOUND.  An older attempt that wins was never repaired; its
+                # records stand.
+                from socr.tables.row_binding_check import TableOutcome
+
+                for table_id in (
+                    _repaired_tables if getattr(shipped, "point_repaired", False) else ()
+                ):
+                    record = ps.row_binding.get(table_id)
+                    if isinstance(record, dict):
+                        record["outcome"] = TableOutcome.UNVERIFIABLE.value
+                        record["error"] = POINT_REPAIR_NOT_SHIPPED
         for ev in pending:
             if (ev.data or {}).get("table_id") in kept:
                 state.events.append(ev)
@@ -13281,7 +13308,16 @@ class UnifiedPipeline:
 
                         # #1282: the repairs are recorded now that the page's final output is
                         # known: only those whose repaired row is in the bytes that ship.
-                        self._commit_point_repairs(state, page_num, ps, _record.output)
+                        _was_repaired = bool(getattr(bo, "point_repaired", False))
+                        self._commit_point_repairs(
+                            state, page_num, ps, _record.output, bo, _pre_repair_text
+                        )
+                        if _was_repaired and not getattr(bo, "point_repaired", False):
+                            # #1300: the restore changed the reading; the shipped record (and
+                            # so the flushed fragment and sidecar) is taken from it again.
+                            _record = finalized_page_record(
+                                state, page_num, _whole_doc_page_texts(state)
+                            )
                         _repairs_committed = True
 
                         # Strip any leading ## Page N marker so the provisional fragment
