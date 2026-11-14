@@ -274,6 +274,10 @@ def test_a_wrapper_before_punctuation_leaves_no_space() -> None:
         ("a -{w}5", "a - 5"),  # sign must not attach to the next number
         ("a - {w}5", "a - 5"),
         ("+{w}.5", "+ .5"),
+        ("\u2013{w}5", "\u2013 5"),  # en dash
+        ("\u2212{w}5", "\u2212 5"),  # minus sign
+        ("\u2012{w}5", "\u2012 5"),  # figure dash
+        ("1{w},234", "1 ,234"),  # comma + digit on the right, like point + digit
         ("x.{w}5", "x. 5"),  # a point on the left must not become a decimal point
         ("2020{w}.", "2020."),  # sentence end: no number formed, no space
         ("rate{w}.", "rate."),

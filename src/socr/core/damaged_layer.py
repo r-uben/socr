@@ -151,14 +151,15 @@ def _printed_number_re(note: int) -> re.Pattern:
     return re.compile(rf"(?m)^[ \t]*0*{note}[.)]?[ \t]+\S")
 
 
-_NUMBER_LEFT_EDGE = frozenset("+-\u2212.,")
+# ASCII hyphen-minus, plus, figure dash, en dash, minus sign, then the two separators.
+_NUMBER_LEFT_EDGE = frozenset("+-\u2012\u2013\u2212.,")
 
 
 def _would_join_number(left: str, right: str) -> bool:
     """Would ``left`` + ``right`` touching form or extend a numeric token (sign, digit, point)?"""
     if not (left.isdigit() or left in _NUMBER_LEFT_EDGE):
         return False
-    return right[:1].isdigit() or (right[:1] == "." and right[1:2].isdigit())
+    return right[:1].isdigit() or (right[:1] in ".," and right[1:2].isdigit())
 
 
 def strip_hidden_footnotes(text: str, painted: str | None = None) -> FootnoteResult:
