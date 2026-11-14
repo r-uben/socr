@@ -82,6 +82,7 @@ from socr.core.pass_trace import TraceEntry
 from socr.core.verdict import (
     ENGINE_NATIVE_MATH,
     JUDGE_ONLY_REASON,
+    UNCHECKED_TABLE_REASON,
     PageVerdict,
     build_page_verdict,
     build_pass_trace,
@@ -7064,6 +7065,11 @@ def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
         # told apart by the clause's own reason, which is the constant this module emits.
         if clause.check is Check.PAGE_JUDGE and clause.reason == JUDGE_ONLY_REASON:
             return FailureMode.READING_UNCORROBORATED
+        # #1270: a table no ladder terminal covers, on a page whose numbers clause class 2
+        # released. The page used to carry ``numbers_unchecked`` for the same page; keep it, so the
+        # mode explains the status and the seam is idempotent (Carbon, re-check of PR #1325).
+        if clause.check is Check.SOURCE_EVIDENCE and clause.reason == UNCHECKED_TABLE_REASON:
+            return FailureMode.NUMBERS_UNCHECKED
         return by_check.get(clause.check) or by_result.get((clause.check, clause.result))
 
     # A FAIL outranks an UNKNOWN, whatever the clause order (Argon P0-A). A FAIL means a check
@@ -7538,10 +7544,18 @@ def _apply_unresolved_math_guard(
 
     if not native_math_damage_ships(output, provenance):
         return output
+    from socr.core.verdict import private_use_bullets_released
+
+    # #1270 class 1: a page whose only private-use codepoints are bullets, with independent
+    # page-scope evidence on the text it ships, owes the maths accounting nothing. Without that
+    # evidence it keeps its demotion and says what is true (bullets; not otherwise checked).
+    if private_use_bullets_released(output, p):
+        return output
     detail = unresolved_math_detail(
         has_unmapped_math_glyphs=bool(getattr(p, "has_unmapped_math_glyphs", False)),
         evidence=getattr(p, "math_recovery_evidence", None),
         text=output.text or "",
+        bullets_only=bool(getattr(p, "private_use_bullets_only", False)),
     )
     if detail is None:
         return output
