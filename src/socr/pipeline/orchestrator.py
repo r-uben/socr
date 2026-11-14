@@ -9553,7 +9553,9 @@ class UnifiedPipeline:
     def _repair_dropped_points(
         self, state: DocumentState, page_num: int, ps: PageState, bo: PageOutput | None
     ) -> int:
-        """#1282: restore decimal points the model dropped, from the page's own text layer.
+        """#1282: restore decimal points the model dropped AND minus signs it flipped (added or
+        removed), from the page's own text layer; each repaired cell records its ``kind``
+        (``"point"`` or ``"sign"``).
 
         Runs once per page, BEFORE ``finalized_page_record``, on the winning output's text, under
         ``_row_binding_applies`` (the check's own guards).  Transform once, from source, before
@@ -9578,7 +9580,11 @@ class UnifiedPipeline:
         try:
             from socr.core.pdf import open_pdf
             from socr.tables.locate import locate_tables
-            from socr.tables.row_binding_check import propose_page_point_repairs
+            from socr.tables.row_binding_check import (
+                propose_page_point_repairs,
+                repair_event_detail,
+                repair_row_dict,
+            )
 
             with open_pdf(state.handle.path) as doc:
                 if page_num < 1 or page_num > doc.page_count or doc[page_num - 1] is None:
@@ -9605,21 +9611,7 @@ class UnifiedPipeline:
         for table_index, reps in repaired:
             table_id = f"p{page_num}-t{table_index}"
             start = blocks[table_index].start
-            rows = [
-                {
-                    "table_line": r.md_line,  # within the table block: stable across the marks above the page
-                    "label": r.label,
-                    "col": r.col,
-                    "old": r.old,
-                    "new": r.new,
-                    "native_line": r.native_line,
-                    "printed_label": r.printed_label,
-                    "agreeing_values": r.agreeing_values,
-                    "n_values": r.n_values,
-                    "row_after": text_lines[start + r.md_line],
-                }
-                for r in reps
-            ]
+            rows = [repair_row_dict(r, text_lines[start + r.md_line]) for r in reps]
             ps.point_repairs[table_id] = rows
             cells += len(rows)
             ps.point_repair_events.append(
@@ -9627,11 +9619,7 @@ class UnifiedPipeline:
                     page_num=page_num,
                     kind=TABLE_POINT_REPAIRED_KIND,
                     engine=bo.engine or "",
-                    detail=(
-                        f"table {table_id}: {len(rows)} cell(s) restored from the page's text "
-                        "layer (the model dropped the decimal point): "
-                        + ", ".join(f"{r['old']} -> {r['new']}" for r in rows)
-                    ),
+                    detail=repair_event_detail(table_id, rows),
                     data={"table_id": table_id, "rows": rows},
                 )
             )
@@ -9734,6 +9722,22 @@ class UnifiedPipeline:
                     if isinstance(record, dict):
                         record["outcome"] = TableOutcome.UNVERIFIABLE.value
                         record["error"] = POINT_REPAIR_NOT_SHIPPED
+                        # the page flags the row-binding mark is drawn from must agree with the
+                        # record: a table the record calls UNVERIFIABLE is marked.  The policy
+                        # runs once per page (its mark-only reading depends on what was set
+                        # before it), so it runs here only for the page's first such table.
+                        try:
+                            table_index = int(table_id.rsplit("-t", 1)[1])
+                        except (IndexError, ValueError):
+                            continue
+                        if table_index in ps.row_binding_unverifiable_tables:
+                            continue
+                        first = not ps.row_binding_unverifiable_tables
+                        ps.row_binding_unverifiable_tables.append(table_index)
+                        if first:
+                            self._apply_row_binding_policy(
+                                ps, bo, contradicted=False, unverifiable=True
+                            )
         for ev in pending:
             if (ev.data or {}).get("table_id") in kept:
                 state.events.append(ev)
