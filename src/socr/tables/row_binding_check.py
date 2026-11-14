@@ -1628,12 +1628,16 @@ def table_payload(
     rows: list[dict],
     error: str = "",
     result: RowBindingResult | None = None,
+    table_sha: str = "",
 ) -> dict:
     """One table's ``ps.row_binding`` record (before ``withheld_markdown`` / ``repairs``).
 
     *result* adds what a pass leaves behind (#1257): ``rows_bound`` / ``rows_total`` and, when a row
     was bound by evidence beyond the same-line rule, ``evidence`` (rows per kind).  ``rows`` still
-    lists only the rows that are not BOUND."""
+    lists only the rows that are not BOUND.
+
+    *table_sha* (#1183) is the digest of the table block the check ran on; the pass trace states a
+    ``bound`` record only for a shipped table with that digest."""
     counts: dict[str, int] = {}
     for r in rows:
         counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
@@ -1651,6 +1655,8 @@ def table_payload(
             payload["evidence"] = evidence
     if error:
         payload["error"] = error
+    if table_sha:
+        payload["table_sha"] = table_sha
     return payload
 
 

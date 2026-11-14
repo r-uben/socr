@@ -262,6 +262,23 @@ class PageState:
     #: as the single frozen winner), so a recomputed verdict would silently drop them.
     #: Typed ``Any`` to keep this module free of a ``core.verdict`` import.
     published_verdict: Any = None
+    #: #1183: the pass trace (a tuple of ``core.pass_trace.TraceEntry``) this page's ORIGINAL
+    #: run wrote to its sidecar, set only by the resume reader, ``None`` when the sidecar
+    #: carries none. A terminal resumed page REPLAYS it unchanged: its checks do not run again.
+    published_checks: Any = None
+    #: #1251: every page-judge call made for this page, in the order they happened (dicts of
+    #: ``judge.judge.judge_call_record``). Appended by the judge itself, possibly from the deadline
+    #: worker's thread; a resumed page holds the list its original run wrote. Written to
+    #: ``pages/NNNNN.judge-calls`` by the sidecar writer and NOT part of the run fingerprint.
+    judge_calls: list[dict] = field(default_factory=list)
+    #: #1251: set when the sidecar named a judge-calls file that could not be restored (missing,
+    #: altered, unreadable): ``{"reason": ..., "ref": <the sidecar's reference>}``. The file and
+    #: the reference are then KEPT by the writer with a flag, never deleted: an unreadable history
+    #: is not the history of an unjudged page.
+    judge_calls_unrestored: dict | None = None
+    #: #1251: the note a sidecar's ``judge_calls`` reference carried about an earlier unreadable
+    #: history (``prior_unavailable``), carried forward so a later flush does not drop it.
+    judge_calls_prior_unavailable: dict | None = None
     #: GH-271: the corrupt-equation lane (default on) produced a region hybrid
     #: that must ship even though it remains WARNING/audit_passed=False (syntax
     #: is not a mathematical-fidelity oracle). Read only by final winner selection.
@@ -334,6 +351,10 @@ class PageState:
     #: property's docstring -- forcing repair under --native-only is barred).
     native_table_header_unattributed: bool = False
     native_table_unverifiable: bool = False  # TR-3: per-region verifier flagged hard-fail
+    #: #1253 B3: the refusal reason on which this page's refused native grid was handed to the
+    #: model ladder (empty = no retry ran). Read by ``d3_floor_kept_model_output``: on such a
+    #: page a model reading that is not ACCEPTED never ships over the fail-closed floor.
+    native_table_model_retry: str = ""
     #: GH-371: zero-based ordinals of native table regions whose per-region
     #: verifier hard-failed.  Empty when no failed region identity is available.
     native_table_unverifiable_ordinals: list[int] = field(default_factory=list)
@@ -406,6 +427,10 @@ class PageState:
     #: way ``scanned_table_no_witness`` does, and like it is DERIVED on resume from the
     #: persisted winning ``failure_mode`` rather than given a sidecar key of its own.
     scanned_table_withheld_unconfirmed: bool = False
+    #: #1270: the scanned floor above was applied because the source-evidence witness could
+    #: not EXAMINE this page's table (``FailureMode.TABLE_UNVERIFIED_WITNESS``). Recorded
+    #: cause only, never control flow; DERIVED on resume like its two siblings.
+    scanned_table_witness_unverifiable: bool = False
     #: What this page has actually SPENT, as a recorded fact rather than a
     #: derivation (cold review rounds 4-5). Every site that journals an
     #: ``EngineResult`` for this page adds to it: each ladder rung ``route_page``
@@ -861,6 +886,9 @@ class DocumentState:
     # Agentic routing ladder snapshot (B3) — populated by _phase_agentic, None otherwise.
     # Each entry: {provider_id, model, backend, cost_per_page_usd, tier}.
     agentic_ladder: list[dict] = field(default_factory=list)
+    # #1183: whether an equation-reading lane (the region lane, or the legacy detect + recover-clean
+    # pair) could attach a reading on this run. Set with the ladder; read only by the pass trace.
+    equation_lane_enabled: bool = False
     # Judge model used for agentic routing (B3) — "" when heuristic judge was used.
     agentic_judge_model: str = ""
     # PP-2 cascade halt: non-empty when the page loop stopped early because the

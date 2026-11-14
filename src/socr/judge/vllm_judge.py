@@ -126,7 +126,8 @@ def _post_chat(
     if choices[0].get("finish_reason") == "length":
         raise JudgeReplyTruncatedError(
             f"vLLM judge reply hit the {JUDGE_MAX_REPLY_TOKENS}-token cap "
-            "(finish_reason=length); no verdict"
+            "(finish_reason=length); no verdict",
+            raw=(choices[0].get("message") or {}).get("content") or "",
         )
     return (choices[0].get("message") or {}).get("content") or ""
 

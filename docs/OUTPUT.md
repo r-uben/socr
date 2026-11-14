@@ -20,6 +20,7 @@ non-PDF input uses `<stem>_<ext>` so it cannot collide with a PDF of the same na
     ├── pages/
     │   ├── 00001.md           # body text of page 1, no "## Page" header
     │   ├── 00001.json         # page sidecar: status, failure_mode, provenance, resume ledger
+    │   ├── 00001.judge-calls   # only when a model judged the page: every judge call, reply included
     │   └── ...
     ├── manifest.json          # per-page fingerprints and blob pointers, used by `socr replay`
     ├── cache/                 # content-addressed blobs the manifest points to
@@ -37,6 +38,7 @@ non-PDF input uses `<stem>_<ext>` so it cannot collide with a PDF of the same na
 | `metadata.json` (root) | Index over all documents in the run. The resume gate reads it. | `RootIndex.record` |
 | `pages/NNNNN.md` | One page body, five-digit page number. Written as soon as the page finishes. | `_flush_page_fragment` |
 | `pages/NNNNN.json` | Page sidecar. Section 2 says which fields to read. | `_flush_page_sidecar` |
+| `pages/NNNNN.judge-calls` | A JSON list of every page-judge call made for the page, in order (#1251): Always: `page`, `outcome` (`verdict`, `timeout`, `error`, `deadline_exceeded`), `judge_model`, `judge_backend`, `prompt_sha256`, `reading_sha256`. Conditional: `reply` and `reply_chars` (the full reply as the backend returned it) on a `verdict`, and on an `error` whose reply was returned but did not parse; `parsed` on a `verdict` only; `error: {type, message}` on a `timeout` or `error` (never on `deadline_exceeded`, which is identified by its outcome alone and records our own deadline: a worker that answers after it is not recorded). A terminal resume keeps the file unchanged; a retry or re-judge seeds the list from the first run's calls and appends to it; a fresh re-run (no resume) removes the stale file and writes the new run's calls. The sidecar keeps `judge_calls: {path, sha256, count}`, plus `unavailable` when the file could not be read back (kept, never deleted) or `prior_unavailable` when new calls followed an unreadable history (its `kept_as` is the moved-aside file, `NNNNN.judge-calls.unrestored`, or the next free `.unrestored.N`; `null` when there was no file to move). It is a record, not a sidecar: readers of `pages/*.json` skip names ending `.judge-calls` (`core/page_files.py`), it is not part of the run fingerprint, and a resume keeps it unchanged. | `_write_page_judge_calls` |
 | `manifest.json` | Frozen record of which output won each page, with fingerprint, journal of attempts, disposition and asset hashes. Written when the run is agentic (the default) or `write_manifest` is set, and only if the document produced text. | `_write_manifest`, `Manifest` in `core/manifest.py` |
 | `cache/` | Blob store: the winning `PageOutput` of each page, named by the SHA-256 of its content, sharded by the first two hex characters. Replay reads these and never calls an engine. | `BlobStore` in `core/cache.py` |
 | `audit_log.json` | `{pdf_filename, event_count, counts, events[]}`. Each event is `{page_num, kind, engine, detail, data}`. Written only when there is at least one event. Page 0 means a document-level event. | `core/audit_log.py` |
@@ -374,6 +376,7 @@ in the Markdown.
 
 | Value | What happened | What the reader should do |
 | --- | --- | --- |
+| `reading_uncorroborated` | A model reading the page judge accepted, and no independent check confirmed it (#1251). The judge is a model call on the same page, so its acceptance is not a check. The page stays SUCCESS only when the words check passed at page scope, the numbers check passed (or has no numbers to check) and no check found anything, all on the shipped text. Ships under a `page_judge=UNKNOWN` mark; the text is untouched. A resume restores it instead of re-reading it. | Verify the page against the image before citing. |
 | `model_output_flagged` | A model produced the page, no ladder rung accepted it, and the native table carries a distrust flag. The model output ships, flagged. | Verify table numbers. |
 | `model_table_over_failed_floor` | The native table failed its geometry check and a model attempt authored a grid. The model's grid ships instead of the failed-table marker. A stronger warning than `model_output_flagged`. | Verify the whole table against the PDF. |
 | `table_rejected` | The table judge ladder ran out of rungs on a corroborated FAIL. The table text ships, demoted under a warning. | Do not quote its numbers without checking. |

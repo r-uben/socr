@@ -51,6 +51,15 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from socr.core.page_files import page_sidecar_paths
+from socr.core.verdict import (
+    PageVerdict,
+    published_audit_passed,
+    rerun_text_dependent_checks,
+    text_layer_words_outcome,
+    write_reconciled_trace,
+)
+
 #: The per-document record of what this tool changed and what the run had shipped.
 LOG_NAME = "refinalized_own_text.json"
 
@@ -179,6 +188,7 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
         text_layer_drops_clause,
         text_layer_numbers_clause,
         text_layer_words_clause,
+        with_judge_only_clause,
         with_text_layer_numbers_clause,
     )
 
@@ -214,8 +224,6 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
                 clause = replace(clause, reason=PRIOR_OCR_UNMARKED_REASON)
         else:
             clause = text_layer_numbers_clause(output, p)
-    if clause is None and drops is None and words is None:
-        return None
     as_run = slot_reference_state(sidecar, output.page_num)
     extended = replace(published, page_num=output.page_num)
     if clause is not None:
@@ -226,6 +234,20 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
         extended = replace(extended, clauses=tuple(in_fresh_run_order((*extended.clauses, drops))))
     if words is not None:
         extended = replace(extended, clauses=tuple(in_fresh_run_order((*extended.clauses, words))))
+    # #1251: the page_judge clause a live run derives from the same trace this tool writes (the
+    # layer checks run again on the shipped text, below), so an old run becomes what a run of
+    # this code writes. A page that gained another clause loses it, as in a fresh run.
+    extended = with_judge_only_clause(
+        extended,
+        output,
+        sidecar.get("checks"),
+        event_kinds,
+        recomputed=rerun_text_dependent_checks(
+            output, _page_state(sidecar, pa), sidecar.get("checks")
+        ),
+    )
+    if extended == replace(published, page_num=output.page_num):
+        return None
     return apply_verdict_marks(output, p, output.page_num, published=extended)
 
 
@@ -449,6 +471,7 @@ def _updated_sidecar(
     why_sink=None,
     missing_words=None,
     words_record=None,
+    page_state=None,
 ) -> dict:
     from socr.core.manifest import is_page_failed_marker
     from socr.pipeline.orchestrator import _page_blob_key, _socr_source_digest, _socr_version
@@ -457,8 +480,25 @@ def _updated_sidecar(
     out = dict(sidecar)
     out["status"] = winning.get("status", "missing")
     out["failure_mode"] = winning.get("failure_mode", "none")
-    out["audit_passed"] = winning.get("audit_passed", False)
+    out["audit_passed"] = published_audit_passed(
+        out["status"], winning.get("audit_passed", False), verdict
+    )
     out["verdict"] = verdict.to_dict()
+    # #1183: keep the pass trace consistent with the verdict this tool wrote (no invention).
+    # The tool holds the page state, so it runs every text-dependent check again on the text it
+    # wrote and those entries are its own; any other kept PASS is not run on text that changed.
+    _words = (
+        rerun_text_dependent_checks(output, page_state, sidecar.get("checks"))
+        if page_state is not None
+        else ()
+    )
+    write_reconciled_trace(
+        out,
+        sidecar.get("checks"),
+        verdict,
+        recomputed=_words,
+        text=winning.get("text") or "",
+    )
     out["winning_output"] = winning
     out["page_fingerprint"] = (
         _page_blob_key(winning) if not is_page_failed_marker(winning.get("text", "")) else ""
@@ -560,6 +600,45 @@ def _place_note(error: str, note: str, later_notes: tuple[str, ...]) -> str:
     if at >= 0:
         return f"{error[:at]}; {note}{error[at:]}"
     return f"{error}; {note}"
+
+
+def _record_unfinished_pages(
+    doc_dir: Path, meta_path: Path, meta: dict, sidecar_paths: list[Path]
+) -> None:
+    """#1244 C1 completion rule, applied to a finished document: a ``completed`` status
+    becomes ``partial``, here and in the root index, with the run's note naming the pages
+    that are not SUCCESS with a true published ``audit_passed``. A worse status is left as
+    the run wrote it, and a document already off ``completed`` is not touched again."""
+    from ocr_output_contract import Status
+
+    from socr.core.verdict import pages_not_success_note
+
+    unfinished = sorted(
+        int(sc["page_num"])
+        for sc in map(_read_json, sidecar_paths)
+        if sc.get("terminal") is True
+        and not (sc.get("status") == "success" and sc.get("audit_passed") is True)
+    )
+    if not unfinished:
+        return
+    note = pages_not_success_note(unfinished)
+
+    def recorded(record: dict) -> bool:
+        if record.get("status") != Status.COMPLETED.value:
+            return False
+        record["status"] = Status.PARTIAL.value
+        error = record.get("error") or ""
+        record["error"] = f"{error}; {note}" if error else note
+        return True
+
+    if recorded(meta):
+        _write_json(meta_path, meta)
+    root_path = doc_dir.parent / "metadata.json"
+    if root_path.is_file():
+        root = _read_json(root_path)
+        entry = (root.get("files") or {}).get(meta.get("key"))
+        if isinstance(entry, dict) and recorded(entry):
+            _write_json(root_path, root)
 
 
 def _record_disagreement(
@@ -771,7 +850,7 @@ def refinalize_document(
     meta_path = doc_dir / "metadata.json"
     if not pages_dir.is_dir():
         return []
-    sidecar_paths = sorted(pages_dir.glob("[0-9]*.json"))
+    sidecar_paths = page_sidecar_paths(pages_dir, "[0-9]*.json")
     candidates = []
     for path in sidecar_paths:
         sidecar = _read_json(path)
@@ -830,6 +909,27 @@ def refinalize_document(
             record = page_word_check_record(shipped, state)
             if record is not None and "text_layer_words" not in sidecar:
                 whole = {**(whole if whole is not None else sidecar), "text_layer_words": record}
+                # #1183: the words check ran here on the shipped text, so the trace states it
+                # (the text is unchanged: every other entry stays as it was).
+                write_reconciled_trace(
+                    whole,
+                    whole.get("checks"),
+                    PageVerdict.from_dict(whole.get("verdict") or {}),
+                    recomputed=(text_layer_words_outcome(shipped, state).entry,),
+                    text=shipped.text or "",
+                )
+            # #1244 C1: re-derive the PUBLISHED audit_passed here too. A page an earlier pass
+            # (or a run from before the derivation) demoted keeps a stale ``true`` otherwise,
+            # because this path never goes through ``_updated_sidecar``.
+            if sidecar.get("terminal") is True:
+                published = published_audit_passed(
+                    sidecar.get("status"),
+                    (sidecar.get("winning_output") or {}).get("audit_passed", False),
+                    sidecar.get("verdict"),
+                )
+                current = whole if whole is not None else sidecar
+                if current.get("audit_passed") != published:
+                    whole = {**current, "audit_passed": published}
             if whole is not None:
                 repairs.append((path, whole))
             continue
@@ -851,6 +951,7 @@ def refinalize_document(
             why_by_page,
             missing_words=page_missing_words(output, state),
             words_record=page_word_check_record(output, state),
+            page_state=state,
         )
         writes.append((fragment_path, output.text, path, new_sidecar))
         changes.append(
@@ -984,6 +1085,10 @@ def refinalize_document(
         _record_disagreement(
             doc_dir, meta_path, meta, missing, words=True, data_by_page=words_by_page
         )
+    # #1244 C1: a document is completed only when every page is SUCCESS with a true published
+    # audit_passed. Read from the sidecars as they now are (an interrupted pass is finished
+    # by the next one), after the repairs above have re-derived the label.
+    _record_unfinished_pages(doc_dir, meta_path, meta, sidecar_paths)
     _recount_tables(doc_dir, meta_path, meta)
     return changes
 

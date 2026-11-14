@@ -27,6 +27,7 @@ import pytest
 
 pytest.importorskip("fitz")
 
+from c3_support import add_page_lines, page_line  # noqa: E402
 from socr.core.providers import PROFILE_GEMINI, PROFILE_QWEN_LOCAL  # noqa: E402
 from socr.core.result import PageOutput, PageStatus  # noqa: E402
 from socr.pipeline.agentic import AcceptDecision  # noqa: E402
@@ -44,6 +45,31 @@ from test_gh855_scoring_independent_of_lane_health import (  # noqa: E402
 _DEADLINE = 0.2
 
 
+def _with_page_line(page_num: int, table: str) -> str:
+    return f"{page_line(page_num)}\n\n{table}"
+
+
+def _evidenced_grid_pdf(pdf: Path) -> Path:
+    """#1251: the grid, plus a line of prose per page that differs from page to page, so the
+    page's own layer owes words the readings carry (a judge's acceptance is not a check)."""
+    _grid_pdf(pdf, pages=2)
+    add_page_lines(pdf)
+    return pdf
+
+
+def _evidenced_route_fn(page_num, ladder, run_provider, judge, **kwargs):
+    """``_route_fn`` whose reading also carries the page's line (the layer's words)."""
+    # The evidenced reading is built BEFORE the judge assesses it: one reading is judged and shipped.
+    return _route_fn(
+        page_num,
+        ladder,
+        run_provider,
+        judge,
+        reading_text=_with_page_line(page_num, _MISSING_COLUMNS_CANDIDATE),
+        **kwargs,
+    )
+
+
 def _run(root: Path, *, mode: str):
     """Two-page document; page 1's escalation call outlives the deadline.
 
@@ -55,7 +81,7 @@ def _run(root: Path, *, mode: str):
     """
     pdf = root / "doc.pdf"
     if not pdf.exists():  # a resume must see the SAME bytes (input checksum gate)
-        _grid_pdf(pdf, pages=2)
+        _evidenced_grid_pdf(pdf)
     cfg = _config()
     cfg.escalation_timeout_sec = _DEADLINE
     cfg.local_engine = PROFILE_QWEN_LOCAL.engine
@@ -80,7 +106,7 @@ def _run(root: Path, *, mode: str):
         return [
             PageOutput(
                 page_num=page_num,
-                text=_MISSING_COLUMNS_CANDIDATE,
+                text=_with_page_line(page_num, _MISSING_COLUMNS_CANDIDATE),
                 status=PageStatus.SUCCESS,
                 engine=engine.value,
             )
@@ -117,7 +143,7 @@ def _run(root: Path, *, mode: str):
             # #1267: scope narrowed. The fixture's text layer does not print the model's values,
             # so the row-binding check would mark the page too; this file pins the escalation latch.
             patch.object(pipeline, "_run_row_binding_check", return_value=False),
-            patch("socr.pipeline.orchestrator.route_page", side_effect=_route_fn),
+            patch("socr.pipeline.orchestrator.route_page", side_effect=_evidenced_route_fn),
             patch(
                 "socr.pipeline.agentic.HeuristicPageJudge.assess",
                 return_value=AcceptDecision(accept=True, reason="heuristics passed"),
@@ -173,7 +199,7 @@ def _run_with_native_cell_gating(root: Path, *, mode: str):
     cfg.native_cell_gating = True
     pdf = root / "doc.pdf"
     if not pdf.exists():
-        _grid_pdf(pdf, pages=2)
+        _evidenced_grid_pdf(pdf)
     pipeline = UnifiedPipeline(cfg)
     release = threading.Event()
     calls: list[int] = []
@@ -194,7 +220,7 @@ def _run_with_native_cell_gating(root: Path, *, mode: str):
         return [
             PageOutput(
                 page_num=page_num,
-                text=_MISSING_COLUMNS_CANDIDATE,
+                text=_with_page_line(page_num, _MISSING_COLUMNS_CANDIDATE),
                 status=PageStatus.SUCCESS,
                 engine=engine.value,
             )
@@ -227,7 +253,7 @@ def _run_with_native_cell_gating(root: Path, *, mode: str):
             # #1267: scope narrowed. The fixture's text layer does not print the model's values,
             # so the row-binding check would mark the page too; this file pins the escalation latch.
             patch.object(pipeline, "_run_row_binding_check", return_value=False),
-            patch("socr.pipeline.orchestrator.route_page", side_effect=_route_fn),
+            patch("socr.pipeline.orchestrator.route_page", side_effect=_evidenced_route_fn),
             patch(
                 "socr.pipeline.agentic.HeuristicPageJudge.assess",
                 return_value=AcceptDecision(accept=True, reason="heuristics passed"),

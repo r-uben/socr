@@ -57,6 +57,23 @@ class FailureMode(str, Enum):
     MODEL_UNAVAILABLE = "model_unavailable"
     AUDIT_FAILED = "audit_failed"
     HALLUCINATION = "hallucination"
+    #: #1270 (B4): a table-evidence witness (a second reader of the page pixels) read the
+    #: page and its numbers disagree with the model's table. It says a second reader
+    #: disagreed and NOTHING about which reader is wrong: on the measured corpus the
+    #: witness is a classical OCR engine that misreads dense tables, so the old label
+    #: ``HALLUCINATION`` published a verdict against the model that socr never reached
+    #: (85 of 90 such pages in run 51270eb5 were this case). The ENDING is unchanged
+    #: (ERROR, ``audit_passed`` False, the scanned-table floor): every control-flow site
+    #: that read ``HALLUCINATION`` as "a witness refused this table" reads
+    #: ``WITNESS_REJECT_MODES`` instead. Only the recorded cause differs.
+    WITNESS_DISAGREES = "witness_disagrees"
+    #: #1270 (B4): the witness could not EXAMINE the table (``verifiable`` False: no
+    #: parseable table region, an HTML table it cannot read, a crop it could not
+    #: localize). Nothing was contradicted and nothing was confirmed. Same family as
+    #: ``TABLE_UNVERIFIED`` (could-not-check), kept a separate member because
+    #: ``TABLE_UNVERIFIED`` is the table-judge ladder's terminal and drives its own
+    #: retry/bucket logic; this one is the source-evidence gate's. Same ending.
+    TABLE_UNVERIFIED_WITNESS = "table_unverified_witness"
     REFUSAL = "refusal"
     RECITATION = "recitation"  # Gemini copyright/recitation filter blocked verbatim output
     GARBAGE = "garbage"
@@ -273,6 +290,15 @@ class FailureMode(str, Enum):
     #: #1306: the page's own text layer holds control bytes, shipped as U+FFFD under a mark.
     #: In ``PERMANENTLY_UNRESOLVABLE_MODES``: the same layer gives the same bytes.
     CONTROL_BYTES_REPLACED = "control_bytes_replaced"
+    #: #1251 (C3): a model reading the page judge accepted and nothing independent confirmed.
+    #: The judge is a model call on the same page, so its acceptance is not a check; the page
+    #: ships under a ``page_judge=UNKNOWN`` mark until a page-scope check of the page's own text
+    #: layer (words, and numbers when owed) passes on the shipped text. In
+    #: ``PERMANENTLY_UNRESOLVABLE_MODES``: re-reading the page cannot produce that evidence
+    #: (the same layer and config give the same absence), so a resume restores the page instead
+    #: of re-reading it on every run. Kept apart from ``MODEL_OUTPUT_UNJUDGED``, whose pages a
+    #: later judge can resolve and must stay reprocessable.
+    READING_UNCORROBORATED = "reading_uncorroborated"
     #: #658: a scanned table page failed the source-evidence gate because this
     #: host has NO classical OCR backend, so the gate never read the pixels and
     #: holds no evidence about the table at all.
@@ -444,6 +470,21 @@ JUDGE_OUTCOME_VERIFIER_ERROR = "page_judge_verifier_error"
 #: page judge ran. A missing verdict in the same family as the three above:
 #: the boundary must not stamp ``JUDGE_OUTCOME_COMPLETED``.
 JUDGE_OUTCOME_SOURCE_EVIDENCE = "source_evidence_table"
+
+
+#: #1270 (B4): every mode that means "the source-evidence witness refused this table or could
+#: not examine it, so the model's table is not corroborated". ``HALLUCINATION`` is kept in the
+#: set: pre-#1270 sidecars record it, and it is still the mode of a fabricated image
+#: reference, which every one of these control-flow sites must also treat as a refusal. A new
+#: member must be added HERE, never as a fresh ``is`` comparison at a site (that is how a
+#: floor fails open).
+WITNESS_REJECT_MODES: frozenset[FailureMode] = frozenset(
+    {
+        FailureMode.HALLUCINATION,
+        FailureMode.WITNESS_DISAGREES,
+        FailureMode.TABLE_UNVERIFIED_WITNESS,
+    }
+)
 
 
 @dataclass

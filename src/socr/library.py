@@ -14,6 +14,8 @@ Safety rules, each enforced in code rather than by convention:
 
 from __future__ import annotations
 
+from socr.core.page_files import page_sidecar_paths
+
 import ctypes
 import errno
 import fcntl
@@ -314,7 +316,7 @@ def doc_status(cfg: LibraryConfig, doc_dir: Path) -> dict[str, Any]:
     bad_pages: list[str] = []
     pages_dir = doc_dir / "pages"
     if pages_dir.is_dir():
-        for sidecar in sorted(pages_dir.glob("*.json")):
+        for sidecar in page_sidecar_paths(pages_dir):
             rec = _read_json(sidecar)
             page_status = rec.get("status") if isinstance(rec, dict) else None
             if isinstance(page_status, str) and page_status in _BAD_PAGE_STATUSES:

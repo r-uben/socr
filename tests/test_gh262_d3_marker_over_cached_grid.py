@@ -446,9 +446,10 @@ def test_a_plain_qwen_grid_still_supersedes_the_d3_floor(tmp_path: Path) -> None
 def test_gh90_scanned_source_evidence_floor_still_wins(tmp_path: Path) -> None:
     """GH-90's floor is on the SCANNED lane and is not touched by this change.
 
-    A grid rejected by the source-evidence gate on a scan is a fluent
-    hallucination with no source support -- the opposite of the cached reading
-    #262 is about, and it must keep failing closed.
+    A grid rejected by the source-evidence gate on a scan has no source support
+    (a witness read the page and disagreed, #1270: which reader is wrong is not
+    decided) -- the opposite of the cached reading #262 is about, and it must
+    keep failing closed.
     """
     state = _state(
         _born_digital_pdf(tmp_path),
@@ -458,7 +459,7 @@ def test_gh90_scanned_source_evidence_floor_still_wins(tmp_path: Path) -> None:
 
     winner = _winning_page_output(state, 1)
     assert "failed: unverifiable table" in winner.text, winner.text
-    assert winner.failure_mode is FailureMode.HALLUCINATION, winner.failure_mode
+    assert winner.failure_mode is FailureMode.WITNESS_DISAGREES, winner.failure_mode
 
 
 def test_born_digital_page_carrying_the_scanned_flag_is_not_rescued(tmp_path: Path) -> None:

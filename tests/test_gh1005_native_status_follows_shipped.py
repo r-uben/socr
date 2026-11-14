@@ -21,6 +21,7 @@ import pytest
 
 fitz = pytest.importorskip("fitz")
 
+from c3_support import give_word_evidence  # noqa: E402
 from socr.core.config import EngineType, PipelineConfig  # noqa: E402
 from socr.core.document import DocumentHandle  # noqa: E402
 from socr.core.manifest import finalized_page_record  # noqa: E402
@@ -138,6 +139,13 @@ def test_status_follows_the_shipped_output(tmp_path: Path, damage: str) -> None:
 def test_unmapped_math_document_level_follows_the_shipped_output(tmp_path: Path) -> None:
     native_state = _state(tmp_path, "n", "unmapped_math", model_ships=False)
     model_state = _state(tmp_path, "m", "unmapped_math", model_ships=True)
+    # #1244 C1: the model arm must be a CHECKED SUCCESS page for the two documents to differ:
+    # a born-digital layer of its own sharing a number with the reading.
+    model_page = model_state.pages[1]
+    model_page.own_layer_text = "Prose of the page with the equation T = f(T) in it, 4.2."
+    model_page.best_output.text = MODEL_TEXT + " 4.2"
+    # #1251: a judge's acceptance is not a check; the layer's words are the independent evidence.
+    give_word_evidence(model_page)
     native_result = _assemble(tmp_path, native_state, "n")
     model_result = _assemble(tmp_path, model_state, "m")
 

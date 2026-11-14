@@ -42,6 +42,7 @@ from socr.core.state import DocumentState  # noqa: E402
 from socr.engines.base import BaseEngine  # noqa: E402
 from socr.pipeline.orchestrator import UnifiedPipeline  # noqa: E402
 
+from c3_support import give_word_evidence  # noqa: E402
 from gh1185_agreement_spy import assert_agreed_on, spy_agreement  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -255,6 +256,8 @@ class TestCanonicalBodyAndReplay:
             state.pages[i].own_layer_text = f"text {i} measured 4.2{i}"
             # #1185 round 2 (approved fixture change): the layer is born-digital
             state.pages[i].is_born_digital = True
+            # #1251: a judge's acceptance is not a check; the layer's words are the evidence
+            give_word_evidence(state.pages[i], f"text {i} measured 4.2{i}")
             state.pages[i].best_output = PageOutput(
                 page_num=i,
                 text=f"text {i} measured 4.2{i}",
@@ -493,6 +496,11 @@ class TestConformance:
         handle = DocumentHandle.from_path(pdf)
         state = DocumentState(handle=handle)
         for i in (1, 2):
+            # #1244 C1: CHECKED needs a born-digital layer sharing a number with the reading.
+            state.pages[i].own_layer_text = f"Conformant content for page {i}."
+            state.pages[i].is_born_digital = True
+            # #1251: a judge's acceptance is not a check; the layer's words are the evidence
+            give_word_evidence(state.pages[i], f"Conformant content for page {i}.")
             state.pages[i].best_output = PageOutput(
                 page_num=i,
                 text=f"Conformant content for page {i}.",

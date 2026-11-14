@@ -395,6 +395,7 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
         "and control groups evaluated over the thirty-day observation period."
     )
     page.insert_text((54, 72), prose)
+    reading_prose = prose.replace("Table 1.", "Table")
     doc.save(str(pdf_path))
     doc.close()
 
@@ -467,7 +468,11 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
         patch.object(pipeline_empty, "_run_row_binding_check", return_value=False),
         patch(
             "socr.pipeline.orchestrator.route_page",
-            side_effect=_make_route_fn(EMPTY_TABLE_FIXTURE),
+            # #1251: both arms carry the page's prose, the layer's words, so the populated arm
+            # is CHECKED by the layer (a judge's acceptance is not a check); the arms still
+            # differ only in the one body cell. The prose's own "1." is left to the cell: the
+            # layer prints that number once, and a reading that said it twice would dispute it.
+            side_effect=_make_route_fn(f"{reading_prose}\n\n{EMPTY_TABLE_FIXTURE}"),
         ) as mock_route_empty,
         patch(
             "socr.pipeline.agentic.HeuristicPageJudge.assess",
@@ -494,7 +499,7 @@ def test_paired_pipeline_run_empty_vs_populated_differs_at_all_surfaces(
         patch.object(pipeline_pop, "_run_row_binding_check", return_value=False),
         patch(
             "socr.pipeline.orchestrator.route_page",
-            side_effect=_make_route_fn(PAIRED_POPULATED_TABLE_FIXTURE),
+            side_effect=_make_route_fn(f"{reading_prose}\n\n{PAIRED_POPULATED_TABLE_FIXTURE}"),
         ) as mock_route_pop,
         patch(
             "socr.pipeline.agentic.HeuristicPageJudge.assess",

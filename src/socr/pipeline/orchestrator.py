@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import functools
 import logging
 import math
@@ -74,6 +75,7 @@ from socr.core.providers import (
 from socr.core.result import (
     JUDGE_OUTCOME_COMPLETED,
     JUDGE_OUTCOME_TIMEOUT,
+    WITNESS_REJECT_MODES,
     DocumentStatus,
     EngineResult,
     FailureMode,
@@ -110,7 +112,15 @@ from socr.figures.chart_reconcile import (
     GRID_RECONCILED,
 )
 from socr.tables.ditto import DITTO_UNRESOLVED_KIND
-from socr.tables.native_first import ROTATED_QUARANTINE_KIND
+from socr.tables.native_first import (
+    CELL_MISMATCH_REASON,
+    MODEL_RETRY_KIND,
+    MODEL_RETRY_REFUSAL_REASONS,
+    REFUSE,
+    ROTATED_QUARANTINE_KIND,
+    NativeTableFirstWork,
+    NativeTablePlan,
+)
 from socr.tables.ship_gate import SHIP_GATE_KIND
 from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND, NO_WITNESS_BACKEND_KIND
 from socr.judge.table_rung_gemini import gemini_rung_reachable as table_judge_gemini_rung_reachable
@@ -152,8 +162,12 @@ from socr.pipeline.agentic import (
     route_page,
 )
 from socr.core.ollama_utils import probe_model_generation
+from socr.core.pass_trace import trace_to_dicts
 from socr.core.verdict import (
     NATIVE_TABLE_EXACT_PASS_KIND,
+    table_block_digest,
+    published_audit_passed,
+    pages_not_success_note as _pages_not_success_note,
     NUMBERS_DISAGREE_EVENT_DETAIL,
     NUMBERS_DISAGREE_KIND,
     INVALID_FINAL_EMISSION_NOTE_PREFIX,
@@ -620,6 +634,11 @@ _RESUME_REPLAYED: dict[str, str] = {
         "GH-917: emitted by _plan_native_table_first, which runs only over pages not "
         "resumed; the quarantine is a standing property of the page's source grid"
     ),
+    MODEL_RETRY_KIND: (
+        "#1253 B3: emitted at the end of the page loop for a refused native grid handed to the "
+        "model; a terminal resumed page skips that step, and the record of the attempt and "
+        "its outcome lives only on this event"
+    ),
     SHIP_GATE_KIND: (
         "GH-916: emitted by _plan_native_table_first (upright and rotated); the fault is "
         "a standing property of the native grid and records why native was rejected"
@@ -843,6 +862,27 @@ def _derive_disposition_buckets(
 #: The full reason lives on the attempt in the audit log; the sidecar carries a compact
 #: pointer, so a reasoning-heavy judge cannot bloat every page file.
 ATTEMPT_SUMMARY_REASON_MAX_CHARS = 200
+
+
+def _pages_not_success(records: list, page_count: int) -> list[int]:
+    """#1244 C1: every page of 1..page_count without a FINAL record that publishes as SUCCESS.
+
+    The document-level invariant. A page with no record counts as incomplete, so a record
+    list that is empty or covers a subset can never read as a clean document (``all()`` over
+    such a list is vacuously true, which is the shape this exists to refuse). Every status
+    other than SUCCESS is incomplete: WARNING, ERROR, SKIPPED and PENDING alike, and so is a
+    SUCCESS page whose published ``audit_passed`` is false (``published_audit_passed``).
+    """
+    finished = {
+        rec.output.page_num
+        for rec in records
+        if rec.output.status == PageStatus.SUCCESS
+        # The PUBLISHED label, not only the status: a SUCCESS page whose sidecar publishes
+        # ``audit_passed=false`` (a FAIL clause, or an internal acceptance that is not True)
+        # is not a finished page, so the document must not read ``completed`` over it.
+        and published_audit_passed(rec.output.status, rec.output.audit_passed, rec.verdict)
+    }
+    return [n for n in range(1, page_count + 1) if n not in finished]
 
 
 def _attempts_summary(ps) -> list[dict]:
@@ -1128,6 +1168,15 @@ def _table_judge_prompt_digest() -> str:
         return f"unreadable-table-judge-prompt:{uuid.uuid4().hex}"
 
 
+#: #1251: guards every ``PageState.judge_calls`` list (appended by the judge, possibly on an
+#: abandoned deadline worker's thread, and read by the sidecar writer) and the abandon flag below.
+#: Re-entrant: the deadline path sets the flag and records its own row under one hold.
+_JUDGE_CALLS_LOCK = threading.RLock()
+#: #1251: the deadline worker thread's own token (``{"abandoned": bool}``), so a record made by a
+#: worker whose caller has already given up on it is recognised as late.
+_JUDGE_WORKER = threading.local()
+
+
 def _page_judge_prompt_digest() -> str:
     """SHA-256 of the page-judge prompt, read at call time.
 
@@ -1139,16 +1188,9 @@ def _page_judge_prompt_digest() -> str:
     keep pages judged under the old wording. Same non-caching rule as
     ``_table_judge_prompt_digest``.
     """
-    import hashlib
+    from socr.judge.judge import page_judge_prompt_sha256
 
-    from socr.judge.judge import load_judge_prompt
-
-    try:
-        return hashlib.sha256(load_judge_prompt().encode("utf-8")).hexdigest()
-    except OSError:
-        import uuid
-
-        return f"unreadable-page-judge-prompt:{uuid.uuid4().hex}"
+    return page_judge_prompt_sha256()
 
 
 def _cell_transcribe_prompt_digest() -> str:
@@ -1576,8 +1618,8 @@ def _resume_verdict_is_permanently_unverifiable(
     from socr.core.result import FailureMode as _FailureMode
     from socr.core.verdict import (
         PERMANENTLY_UNRESOLVABLE_MODES,
-        REPROCESSABLE_CLAUSE_CHECKS,
         PageVerdict,
+        clause_is_reprocessable,
     )
 
     if not isinstance(raw_verdict, dict):
@@ -1617,7 +1659,7 @@ def _resume_verdict_is_permanently_unverifiable(
     # resolvable -- so the page skipped for ever with its table still unjudged. Measured
     # through the seam before this line existed. Doubt reprocesses, so the refusal is the
     # safe direction.
-    if any(clause.check in REPROCESSABLE_CLAUSE_CHECKS for clause in verdict.clauses):
+    if any(clause_is_reprocessable(clause) for clause in verdict.clauses):
         return False
     return mode in PERMANENTLY_UNRESOLVABLE_MODES
 
@@ -6577,11 +6619,26 @@ class UnifiedPipeline:
         survives #1048's settling (that rewrites the mode to NONE while the attempt keeps
         the witness's list of refused cells). Either one alone is blind to a real case.
         """
+        return any(disputed or mode in WITNESS_REJECT_MODES for _reason, disputed, mode in records)
+
+    @staticmethod
+    def _floor_cause_is_witness_unverifiable(records: "list[tuple[str, str, object]]") -> bool:
+        """#1270: the witness could not EXAMINE the table, and nothing else decided the cause.
+
+        A witness that read the table and disagreed (``disputed`` / ``WITNESS_DISAGREES``)
+        wins: that is a positive signal, and "could not check" is the weaker finding. Only
+        an attempt the gate left ``TABLE_UNVERIFIED_WITNESS`` counts here. Control flow is
+        unchanged: both causes are in ``WITNESS_REJECT_MODES`` and so is "contradiction" to
+        every other reader; this only picks which cause the floor RECORDS.
+        """
         from socr.core.result import FailureMode as _FailureMode
 
-        return any(
-            disputed or mode is _FailureMode.HALLUCINATION for _reason, disputed, mode in records
-        )
+        if any(
+            disputed or mode in (_FailureMode.HALLUCINATION, _FailureMode.WITNESS_DISAGREES)
+            for _reason, disputed, mode in records
+        ):
+            return False
+        return any(mode is _FailureMode.TABLE_UNVERIFIED_WITNESS for _r, _d, mode in records)
 
     @staticmethod
     def _floor_cause_is_no_witness(records: "list[tuple[str, str, object]]") -> bool:
@@ -6796,6 +6853,7 @@ class UnifiedPipeline:
             figures_dir,
             no_witness=_no_witness,
             withheld_unconfirmed=_unconfirmed,
+            witness_unverifiable=self._floor_cause_is_witness_unverifiable(_records),
         )
         return True
 
@@ -6808,6 +6866,7 @@ class UnifiedPipeline:
         *,
         no_witness: bool = False,
         withheld_unconfirmed: bool = False,
+        witness_unverifiable: bool = False,
     ) -> None:
         """GH-90: mark a scanned page whose table evidence failed for the D3 floor.
 
@@ -6830,6 +6889,11 @@ class UnifiedPipeline:
         # the ladder floor at the routing site -- that one also fires on ordinary
         # non-suspect scanned pages, which are main's behaviour and outside this rule.
         ps.scanned_table_withheld_unconfirmed = bool(withheld_unconfirmed) and not no_witness
+        # #1270: the fourth cause, recorded only. ``witness_unverifiable`` is the witness
+        # saying "could not examine"; it never outranks the two causes above.
+        ps.scanned_table_witness_unverifiable = (
+            bool(witness_unverifiable) and not no_witness and not withheld_unconfirmed
+        )
         if figures_dir is not None:
             ps.d3_floor_png_ref = self._render_d3_floor_png(
                 pdf_path,
@@ -6848,7 +6912,9 @@ class UnifiedPipeline:
                 if no_witness
                 else FailureMode.TABLE_WITHHELD_UNCONFIRMED
                 if withheld_unconfirmed
-                else FailureMode.HALLUCINATION
+                else FailureMode.TABLE_UNVERIFIED_WITNESS
+                if ps.scanned_table_witness_unverifiable
+                else FailureMode.WITNESS_DISAGREES
             )
 
     # ------------------------------------------------------------------
@@ -8417,6 +8483,7 @@ class UnifiedPipeline:
                 "scanned_table_evidence_failed",
                 "scanned_table_no_witness",  # #658: qualifies the flag above
                 "scanned_table_withheld_unconfirmed",  # #1203: likewise
+                "scanned_table_witness_unverifiable",  # #1270: likewise
             )
             if getattr(ps, name, False)
         ]
@@ -9898,7 +9965,15 @@ class UnifiedPipeline:
             table_index: int, outcome: str, rows: list[dict], error: str = "", result=None
         ) -> None:
             table_id = f"p{page_num}-t{table_index}"
-            payload = table_payload(page_num, table_index, outcome, rows, error, result)
+            payload = table_payload(
+                page_num,
+                table_index,
+                outcome,
+                rows,
+                error,
+                result,
+                table_sha=table_block_digest(out.text, table_index),
+            )
             counts = payload["counts"]
             _repairs = _valid_repairs(table_index)
             if _repairs and outcome != TableOutcome.CONTRADICTED.value:
@@ -11673,8 +11748,13 @@ class UnifiedPipeline:
         ``_read_with_deadline``, and ``killable.run`` (child process).
         """
 
-        def __init__(self, inner, timeout_sec: float | None, owner=None, on_timeout=None) -> None:
+        def __init__(
+            self, inner, timeout_sec: float | None, owner=None, on_timeout=None, on_deadline=None
+        ) -> None:
             self._inner = inner
+            # #1251: called once when OUR wall-clock deadline hit (not when the inner judge raised
+            # its own timeout, which the inner judge records itself).
+            self._on_deadline = on_deadline
             # #987: called once per timed-out judge call (either branch), before
             # the typed exception leaves; the circuit breaker's evidence probe.
             self._on_timeout = on_timeout
@@ -11702,11 +11782,13 @@ class UnifiedPipeline:
             owner = self._owner
             binding = owner._current_judge_binding() if owner is not None else None
             probe = copy.deepcopy(output)
+            token = {"abandoned": False}
 
             def _run():
                 # Return exceptions as values so ``result(timeout=)`` raising
                 # TimeoutError means only OUR deadline — never re-read
                 # ``future.done()`` for that decision (#1128 r2).
+                _JUDGE_WORKER.token = token
                 try:
                     if owner is not None:
                         owner._bind_judge_events(binding)
@@ -11717,6 +11799,8 @@ class UnifiedPipeline:
                     return ("ok", self._inner.assess(probe, provider))
                 except Exception as exc:
                     return ("err", exc)
+                finally:
+                    _JUDGE_WORKER.token = None
 
             if owner is not None:
                 owner._enter_judge_call()
@@ -11731,6 +11815,18 @@ class UnifiedPipeline:
                     note = "late page-judge result discarded"
                     if note not in output.audit_notes:
                         output.audit_notes.append(note)
+                    # #1251: from here this worker is abandoned. Its deadline row and the flag
+                    # are one atomic step against its own late record: a call that returns after
+                    # the deadline is NOT recorded (the deadline row says the call was given up
+                    # on, and its result is discarded by design above), so the side file and the
+                    # page's list never differ by a record that lands after a flush.
+                    with _JUDGE_CALLS_LOCK:
+                        token["abandoned"] = True
+                        if self._on_deadline is not None:
+                            try:
+                                self._on_deadline(output)
+                            except Exception as rec_exc:  # never mask the timeout itself
+                                logger.warning("judge deadline record failed: %s", rec_exc)
                     if self._on_timeout is not None:
                         try:
                             self._on_timeout(output.page_num)
@@ -12133,6 +12229,16 @@ class UnifiedPipeline:
                 ps.best_output = fallback
 
         # Snapshot the ladder for manifest provenance (B3).
+        # Gated as the lane itself is (``_equation_region_lane_enabled``): a native-only run
+        # reads no equation, so its trace must say NOT_APPLICABLE and not "lane on, none found".
+        state.equation_lane_enabled = bool(
+            self.config.agentic
+            and not self.config.native_only
+            and (
+                self.config.equation_region_lane
+                or (self.config.recover_clean_equations and self.config.detect_equations)
+            )
+        )
         state.agentic_ladder = [
             {
                 "provider_id": p.id,
@@ -12315,6 +12421,11 @@ class UnifiedPipeline:
         _routed_pages: set[int] = set()
         _before_page: dict[int, tuple[PageState, int]] = {}
         _retried_pages: list[int] = []
+        # #1253 B3: per page handed to the model retry, the plan that was dropped and the
+        # flags the refusal overwrote. Kept here, not on PageState: a --retry-failed-pages
+        # reset restores the page to before its first attempt and would lose both.
+        _retry_plans_kept: dict[int, NativeTableFirstWork] = {}
+        _retry_prior_flags: dict[int, dict] = {}
 
         def _pages_in_order():
             nonlocal ladder
@@ -12458,6 +12569,24 @@ class UnifiedPipeline:
                         )
                     if _cell_md is not None:
                         native_cell_repairs[page_num] = _cell_md
+                    elif (
+                        ladder
+                        and (_replan is None or _replan.action == "refuse")
+                        and (_replan.reason if _replan is not None else CELL_MISMATCH_REASON)
+                        in MODEL_RETRY_REFUSAL_REASONS
+                    ):
+                        # #1253 B3: the repair could not confirm the cells, or the spliced
+                        # grid re-plans to a REFUSE the allowlist names: the page is a
+                        # refusal like any other, so the retry below takes it. The plan is
+                        # replaced only when a provider exists; without one the page keeps
+                        # the plan it had and ends as it did before.
+                        _cells_work = native_table_plans[page_num]
+                        native_table_plans[page_num] = dataclasses.replace(
+                            _cells_work,
+                            plan=_replan
+                            if _replan is not None
+                            else NativeTablePlan(REFUSE, reason=CELL_MISMATCH_REASON),
+                        )
                     elif _replan is not None and _replan.action == "defer":
                         self._record_native_ship_gate(state, page_num, _replan)
                         del native_table_plans[page_num]
@@ -12480,6 +12609,58 @@ class UnifiedPipeline:
                                 )
                                 ps.attempts.append(_fallback)
                                 ps.best_output = _fallback
+                # #1253 B3: a REFUSED native grid whose refusal reason is on the retry
+                # allowlist gets one model attempt instead of going straight to the
+                # failed-table marker. The refusal bookkeeping runs FIRST and unchanged
+                # (``_refuse_native_table_first``: ``native_table_structure_failed`` /
+                # ``native_table_unverifiable``, the floor PNG, the native attempt, the
+                # ``native_table_cell_unresolved`` event). Those flags are what keep a model
+                # attempt that is not accepted from routing to NATIVE_FALLBACK and shipping
+                # the refused grid. The plan is then dropped so the page takes the
+                # whole-page route below, like a DEFER, with every downstream table check.
+                # An empty ladder never gets here: with no provider nothing changes.
+                if (
+                    page_num in _retried_pages
+                    and page_num not in native_table_plans
+                    and page_num in _retry_plans_kept
+                ):
+                    # --retry-failed-pages: the reset restored the page to before its first
+                    # attempt, and that attempt had dropped the plan. The second pass is the
+                    # same page under the same refusal, so it gets the same plan and the same
+                    # bookkeeping; without them a rejected grid ships through #262.
+                    native_table_plans[page_num] = _retry_plans_kept[page_num]
+                _retry_work = native_table_plans.get(page_num)
+                if (
+                    _retry_work is not None
+                    and _retry_work.plan.action == "refuse"
+                    and _retry_work.plan.reason in MODEL_RETRY_REFUSAL_REASONS
+                    and ladder
+                    and not is_native
+                    and page_num not in blank_pages
+                    and page_num not in math_recovery_pages
+                    and page_num not in chart_winner_pages
+                    and page_num not in equation_lane_pages
+                    and page_num not in no_ocr_provider_pages
+                ):
+                    # What the refusal is about to set, so an ACCEPTED model reading can put
+                    # the page back where a page that was never refused stands (as
+                    # ``_crop_repair`` does): the refusal is the floor for a reading that is
+                    # NOT accepted, not a verdict on one that is.
+                    _retry_prior_flags[page_num] = {
+                        "native_table_structure_failed": ps.native_table_structure_failed,
+                        "native_table_unverifiable": ps.native_table_unverifiable,
+                        "native_table_unverifiable_ordinals": list(
+                            getattr(ps, "native_table_unverifiable_ordinals", []) or []
+                        ),
+                        "d3_floor_png_ref": getattr(ps, "d3_floor_png_ref", ""),
+                    }
+                    with clock.span("tables"):
+                        self._refuse_native_table_first(
+                            state, page_num, ps, _retry_work.plan, _chart_figures_dir
+                        )
+                    ps.native_table_model_retry = _retry_work.plan.reason
+                    _retry_plans_kept[page_num] = _retry_work
+                    del native_table_plans[page_num]
                 # #1100: no text and no ink — ship the note, never a model.
                 if page_num in blank_pages:
                     with clock.span("extract"):
@@ -12635,6 +12816,10 @@ class UnifiedPipeline:
 
                             ps.attempts.append(att.output)
                         ps.best_output = decision.final_output
+                        if ps.native_table_model_retry and decision.accepted:
+                            self._lift_native_table_refusal(
+                                ps, page_num, _retry_prior_flags.get(page_num), _chart_figures_dir
+                            )
 
                         # GH-90: scanned-table source-evidence fail-closed floor.
                         _source_ev_attempts = [
@@ -12666,7 +12851,7 @@ class UnifiedPipeline:
                         # neither signal present this falls back to the
                         # pre-ticket reading.
                         _source_ev_contradicted = any(
-                            att.output.failure_mode is FailureMode.HALLUCINATION
+                            att.output.failure_mode in WITNESS_REJECT_MODES
                             for att in _source_ev_attempts
                         )
                         _source_ev_no_witness = not _source_ev_contradicted and any(
@@ -12689,20 +12874,22 @@ class UnifiedPipeline:
                         # ``_withhold_unconfirmed_table``, called just before the page is
                         # finalised. See ``denylist-safety-lanes-leak-every-round``.
                         if _source_ev_rejected and not ps.is_born_digital and not decision.accepted:
+                            _floor_records = [
+                                (
+                                    att.reason or "",
+                                    getattr(att.output, "table_disputed", "") or "",
+                                    att.output.failure_mode,
+                                )
+                                for att in _source_ev_attempts
+                            ]
                             self._apply_scanned_table_floor(
                                 ps,
                                 state.handle.path,
                                 page_num,
                                 _chart_figures_dir,
-                                no_witness=self._floor_cause_is_no_witness(
-                                    [
-                                        (
-                                            att.reason or "",
-                                            getattr(att.output, "table_disputed", "") or "",
-                                            att.output.failure_mode,
-                                        )
-                                        for att in _source_ev_attempts
-                                    ]
+                                no_witness=self._floor_cause_is_no_witness(_floor_records),
+                                witness_unverifiable=self._floor_cause_is_witness_unverifiable(
+                                    _floor_records
                                 ),
                             )
                         if _unchecked_table_attempt is not None and (
@@ -13385,6 +13572,11 @@ class UnifiedPipeline:
                                 state, page_num, _whole_doc_page_texts(state)
                             )
                         _repairs_committed = True
+                        # #1253 B3: recorded last, on the record that ships after the
+                        # row-binding withhold and the point repairs; assemble updates it once
+                        # more against the final-body guard.
+                        if ps.native_table_model_retry:
+                            self._record_native_table_model_retry(state, page_num, ps, _record)
 
                         # Strip any leading ## Page N marker so the provisional fragment
                         # body matches what assemble would produce (modulo
@@ -13490,6 +13682,12 @@ class UnifiedPipeline:
         state.events[:] = [ev for ev in state.events if id(ev) not in moved]
         fresh = copy.deepcopy(snapshot)
         fresh.page_cost_usd = spent
+        # #1251: a judge call is a recorded fact, like spend: the first attempt's calls stay on
+        # the page (the retry's calls follow them), and so does an unreadable history's flag.
+        with _JUDGE_CALLS_LOCK:
+            fresh.judge_calls = list(state.pages[page_num].judge_calls)
+        fresh.judge_calls_unrestored = state.pages[page_num].judge_calls_unrestored
+        fresh.judge_calls_prior_unavailable = state.pages[page_num].judge_calls_prior_unavailable
         fresh.page_retry = {
             "first_attempt": {
                 "status": first.output.status.value,
@@ -15814,6 +16012,137 @@ class UnifiedPipeline:
         )
         self._agentic_native_page(state, page_num, ps)
 
+    @staticmethod
+    def _lift_native_table_refusal(
+        ps: PageState, page_num: int, prior: dict | None, figures_dir: Path | None
+    ) -> None:
+        """#1253 B3: an ACCEPTED model reading retires the refusal that handed the page to it.
+
+        ``_refuse_native_table_first`` set the floor flags so that a reading that is not
+        accepted ends as the failed-table marker. An accepted reading is a normal model page:
+        left set, those flags put it in ``d3_floor_pages`` (a false ``table_region_unverifiable``
+        event, a red CLI line, a distrusted table, a document error) and the floor picture
+        suppresses the scanned-figure lane. The flags go back to what they were before the
+        refusal; a page the refusal did not touch keeps what it had.
+        """
+        if prior is None:
+            return
+        ps.native_table_structure_failed = prior["native_table_structure_failed"]
+        ps.native_table_unverifiable = prior["native_table_unverifiable"]
+        ps.native_table_unverifiable_ordinals = list(prior["native_table_unverifiable_ordinals"])
+        if not prior["d3_floor_png_ref"] and getattr(ps, "d3_floor_png_ref", ""):
+            ps.d3_floor_png_ref = ""
+            if figures_dir is not None:
+                try:
+                    (figures_dir / f"failed_table_p{page_num}.png").unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.debug("p%d: floor picture not removed (%s)", page_num, exc)
+
+    @staticmethod
+    def _restate_native_table_model_retry(state: DocumentState, record) -> None:
+        """#1253 B3: bring the page's retry event in line with the final bodies.
+
+        The loop records the outcome before assemble's final-body table guard, which can turn
+        an accepted reading into a failure marker. The event is edited, not rebuilt: a page
+        restored from a terminal sidecar has no attempts to rebuild it from, and its event is
+        already the record of what was done.
+        """
+        page_num = record.output.page_num
+        for ev in state.events:
+            if getattr(ev, "page_num", None) != page_num or ev.kind != MODEL_RETRY_KIND:
+                continue
+            data = ev.data
+            data["ending"] = record.disposition.ending.value
+            data["primary_reason"] = record.disposition.primary_reason.value
+            data["selection_provenance"] = record.selection_provenance.value
+            if data.get("accepted") and record.output.status is PageStatus.ERROR:
+                data["accepted"] = False
+                data["why_not_accepted"] = (
+                    f"the reading shipped as a failure marker ({record.output.failure_mode.value})"
+                )
+                ev.detail = (
+                    f"refused native table ({data.get('reason', '')}) was handed to the model "
+                    f"ladder: reading not accepted ({data['why_not_accepted']}); "
+                    "the failed-table floor ships"
+                )
+
+    @staticmethod
+    def _record_native_table_model_retry(
+        state: DocumentState, page_num: int, ps: PageState, record
+    ) -> None:
+        """#1253 B3: one record per retried page: the attempt, whether it was accepted, why not.
+
+        ``accepted`` is true only when the page ships a non-native reading the ladder
+        accepted (selection took ``PASSING_BEST_OUTPUT``). Anything else, including a
+        rejected model reading, ships the failed-table floor. ``shipped_refused_native_grid``
+        is the P0-1 tripwire: it is true only if selection fell to a native ending, which the
+        refusal flags are there to prevent.
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.core.manifest import SelectionProvenance
+
+        # One record per page: a later call (assemble, with the final bodies) replaces the
+        # loop-time one rather than adding a second.
+        state.events[:] = [
+            ev
+            for ev in state.events
+            if not (getattr(ev, "page_num", None) == page_num and ev.kind == MODEL_RETRY_KIND)
+        ]
+        model_attempts = [
+            a
+            for a in ps.attempts
+            if (a.engine or "") and not (a.engine or "").startswith(("native", "chart_asset"))
+        ]
+        winner = ps.best_output
+        provenance = record.selection_provenance
+        # What SHIPS decides it: a reading the ladder accepted that a later gate withheld
+        # (row binding, the final-body table guard) ships a failure marker, an ERROR page.
+        accepted = (
+            provenance is SelectionProvenance.PASSING_BEST_OUTPUT
+            and record.output.status is not PageStatus.ERROR
+            and winner is not None
+            and not (winner.engine or "").startswith(("native", "chart_asset"))
+            and bool(winner.audit_passed)
+        )
+        shipped_native = provenance in (
+            SelectionProvenance.NATIVE_FALLBACK,
+            SelectionProvenance.NATIVE_CLEAN,
+        )
+        why = ""
+        if not accepted:
+            why = (
+                (getattr(winner, "judge_reason", "") or "")
+                or (getattr(winner, "rejection_class", "") or "")
+                or ("no model reading was produced" if not model_attempts else "not accepted")
+            )
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=MODEL_RETRY_KIND,
+                engine=(model_attempts[-1].engine if model_attempts else "") or "",
+                detail=(
+                    f"refused native table ({ps.native_table_model_retry}) was handed to the "
+                    "model ladder: "
+                    + (
+                        "reading accepted"
+                        if accepted
+                        else f"reading not accepted ({why}); the failed-table floor ships"
+                    )
+                ),
+                data={
+                    "reason": ps.native_table_model_retry,
+                    "attempted": bool(model_attempts),
+                    "accepted": accepted,
+                    "why_not_accepted": why,
+                    "model_attempts": len(model_attempts),
+                    "selection_provenance": provenance.value,
+                    "ending": record.disposition.ending.value,
+                    "primary_reason": record.disposition.primary_reason.value,
+                    "shipped_refused_native_grid": shipped_native,
+                },
+            )
+        )
+
     def _available_engines_for_agentic(self) -> list:
         """Probe which known providers are actually usable right now.
 
@@ -16567,6 +16896,8 @@ class UnifiedPipeline:
             # #1203: same reason. A released page that kept this would report a
             # withheld-pending-confirmation floor it no longer sits under.
             ps.scanned_table_withheld_unconfirmed = False
+            # #1270: and the fourth cause, for the same reason.
+            ps.scanned_table_witness_unverifiable = False
             # #1048: the patched text PASSED the source-evidence check (this judge
             # chain contains it), so the unchecked/disputed claims about the old
             # reading no longer describe what ships: clear them, the disposition
@@ -17004,6 +17335,35 @@ class UnifiedPipeline:
             cur = getattr(cur, "_inner", None)
         return False
 
+    @staticmethod
+    def _record_page_judge_call(state: DocumentState, record: dict) -> None:
+        """#1251: keep one page-judge call on its page, for ``pages/NNNNN.judge-calls``."""
+        ps = state.pages.get(int(record.get("page") or 0))
+        if ps is None:
+            logger.warning("page-judge call for unknown page %r not recorded", record.get("page"))
+            return
+        token = getattr(_JUDGE_WORKER, "token", None)
+        with _JUDGE_CALLS_LOCK:
+            if token is not None and token.get("abandoned"):
+                logger.info(
+                    "#1251: p%s late page-judge call not recorded (its deadline row stands)",
+                    record.get("page"),
+                )
+                return
+            ps.judge_calls.append(record)
+
+    def _record_page_judge_deadline(self, state: DocumentState, output, leaf) -> None:
+        """#1251: our own deadline hit before the leaf judge answered: a call with no reply."""
+        from socr.judge.judge import JUDGE_CALL_DEADLINE, judge_call_record
+
+        record = judge_call_record(
+            page_num=output.page_num,
+            outcome=JUDGE_CALL_DEADLINE,
+            judge=getattr(leaf, "_judge", leaf),
+            reading=output.text or "",
+        )
+        self._record_page_judge_call(state, record)
+
     def _build_page_judge(self, state: DocumentState):
         """Select the page judge: VLM if requested+available, else heuristics.
 
@@ -17049,7 +17409,11 @@ class UnifiedPipeline:
                         )
                     else:
                         vj = OllamaVisionJudge(model=resolved_model)
-                    inner_judge = VLMPageJudge(vj, self._make_page_renderer(state))
+                    inner_judge = VLMPageJudge(
+                        vj,
+                        self._make_page_renderer(state),
+                        record_call=lambda rec: self._record_page_judge_call(state, rec),
+                    )
                     judge_identity = resolved_model
                     # #987: breaker target + leaf. An Ollama judge is probed with a
                     # 1-token generation; a vLLM judge with the OpenAI-compatible
@@ -17152,6 +17516,14 @@ class UnifiedPipeline:
             self._page_judge_leaf_timeout_sec(),
             owner=self,
             on_timeout=lambda page_num: self._judge_circuit_breaker(state, page_num),
+            # Only a model judge makes a call worth a record; the heuristic one reads no image.
+            on_deadline=(
+                None
+                if judge_identity == JUDGE_IDENTITY_HEURISTIC
+                else lambda output: self._record_page_judge_deadline(
+                    state, output, getattr(inner_judge, "_inner", inner_judge)
+                )
+            ),
         )
 
         def native_evidence_suspect(page_num: int) -> bool:
@@ -17578,7 +17950,14 @@ class UnifiedPipeline:
             # Keep the terminal disposition directly addressable for consumers
             # that inspect the sidecar without unpacking ``winning_output``.
             "failure_mode": winning_dict.get("failure_mode", "none"),
-            "audit_passed": winning_dict.get("audit_passed", False),
+            # #1244 C1: the PUBLISHED label, derived from status and the verdict. The
+            # internal winner-selection acceptance (#252) is ``winning_output.audit_passed``
+            # below and is what resume reads; this key is never read back for selection.
+            "audit_passed": published_audit_passed(
+                winning_dict.get("status", "missing"),
+                winning_dict.get("audit_passed", False),
+                record.verdict if record is not None else None,
+            ),
             # terminal: True when this is the definitive sidecar written at
             # assembly time; False for a provisional mid-run incremental
             # flush from PP-2 that may be superseded by the authoritative write.
@@ -17612,6 +17991,12 @@ class UnifiedPipeline:
                 if record is not None and record.verdict is not None
                 else {}
             ),
+            # #1183: every check's own outcome on this page, PASS included, so an empty
+            # ``verdict`` can no longer be read as "every check passed". A record, not an
+            # input: no reader decides a status or a byte from it. The final records flush
+            # writes the authoritative list (late assembly clauses included); a resumed
+            # terminal page replays the list its original run wrote.
+            "checks": trace_to_dicts(record.checks or ()) if record is not None else [],
             # Full serialised winning PageOutput.  PP-5 reconstructs a skipped
             # page's in-memory PageState.best_output from this dict (paired with
             # the fragment text) so the resumed run carries the SAME status /
@@ -17700,6 +18085,11 @@ class UnifiedPipeline:
             # TR-3: per-region geometry hard-fail flag (D3 floor trigger).
             "native_table_unverifiable": (
                 bool(getattr(ps, "native_table_unverifiable", False)) if ps else False
+            ),
+            # #1253 B3: the refusal reason a model retry ran on ("" = none). Persisted so a
+            # resumed page keeps the #262 exemption and the restored record agrees.
+            "native_table_model_retry": (
+                str(getattr(ps, "native_table_model_retry", "") or "") if ps else ""
             ),
             # GH-371: native failed-region identity and the expected number of
             # regions, used to preserve surrounding prose on D3 resume.
@@ -17984,10 +18374,114 @@ class UnifiedPipeline:
                 },
             }
 
+        # #1251: the page judge's calls live in ``pages/NNNNN.judge-calls``; the sidecar keeps the
+        # file's name, digest and call count. Sparse (absent on a page no model judged), and not
+        # part of the run fingerprint, so no other sidecar changes by a byte.
+        judge_calls_ref = self._write_page_judge_calls(ps, sidecar_path.parent, page_num)
+        if judge_calls_ref is not None:
+            payload["judge_calls"] = judge_calls_ref
+
         tmp_path = sidecar_path.with_suffix(".json.tmp")
         tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_path.rename(sidecar_path)
         return sidecar_path
+
+    @staticmethod
+    def _write_page_judge_calls(ps, pages_dir: Path, page_num: int) -> dict | None:
+        """#1251: write ``pages/NNNNN.judge-calls`` (a JSON list of every page-judge call of this
+        page, in order) and return the reference the sidecar keeps, or ``None`` when the page has
+        no call.
+
+        Called by every sidecar write, so the in-loop flush, the assemble flush and the final
+        records flush all leave the same file: the list on ``ps`` is the whole history (a resumed
+        page was loaded with the list its original run wrote). A page with no call has no file,
+        and a stale one from an earlier run of the page is removed. Written atomically."""
+        import json
+
+        from socr.core.page_credential import sha256_text
+        from socr.core.page_files import JUDGE_CALLS_UNRESTORED_SUFFIX, judge_calls_path
+
+        if ps is None:
+            return None
+        path = judge_calls_path(pages_dir, page_num)
+        with _JUDGE_CALLS_LOCK:
+            calls = list(ps.judge_calls)
+        lost = getattr(ps, "judge_calls_unrestored", None)
+        if not calls:
+            if isinstance(lost, dict):
+                # The sidecar named a history that could not be read back. It is kept as it is
+                # on disk (never deleted) and its reference stays, flagged: an unreadable
+                # history is not the history of an unjudged page.
+                return {**lost["ref"], "unavailable": lost["reason"]}
+            path.unlink(missing_ok=True)
+            return None
+        prior: dict | None = getattr(ps, "judge_calls_prior_unavailable", None)
+        if isinstance(lost, dict):
+            # New calls on top of a history that could not be read: the unreadable file moves
+            # aside (kept, once) and the reference says so.
+            aside = path.with_name(path.name + JUDGE_CALLS_UNRESTORED_SUFFIX)
+            kept = False
+            if path.exists():
+                # Never overwrite an unreadable history that is already aside: a second one
+                # takes the next free name, so every history the sidecar refers to survives.
+                n = 1
+                while aside.exists():
+                    aside = path.with_name(f"{path.name}{JUDGE_CALLS_UNRESTORED_SUFFIX}.{n}")
+                    n += 1
+                path.rename(aside)
+                kept = True
+            elif aside.exists():
+                kept = True
+            prior = {
+                **lost["ref"],
+                "reason": lost["reason"],
+                "kept_as": aside.name if kept else None,
+            }
+            # Handled once: the unreadable file is aside, so the next flush must not treat the
+            # file now at ``path`` (the new, readable one) as the unreadable history.
+            ps.judge_calls_prior_unavailable = prior
+            ps.judge_calls_unrestored = None
+        body = json.dumps(calls, indent=2, ensure_ascii=False)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(body, encoding="utf-8")
+        tmp.rename(path)
+        ref = {"path": path.name, "sha256": sha256_text(body), "count": len(calls)}
+        if prior is not None:
+            ref["prior_unavailable"] = prior
+        return ref
+
+    @staticmethod
+    def _load_page_judge_calls(
+        pages_dir: Path, page_num: int, ref: object
+    ) -> tuple[list[dict], dict | None, dict | None]:
+        """#1251: ``(calls, unrestored, prior)``: the calls a resumed page's original run recorded,
+        ``None`` for *unrestored* and the reference's own ``prior_unavailable`` note (carried);
+        or ``([], {"reason", "ref"}, ...)`` when the sidecar names a file that is missing,
+        altered (digest) or unreadable. The record is never rebuilt from anything else, and the
+        caller keeps the file and the reference (never deletes them)."""
+        import json
+
+        from socr.core.page_credential import sha256_text
+        from socr.core.page_files import judge_calls_path
+
+        if not isinstance(ref, dict):
+            return [], None, None
+        prior = ref.get("prior_unavailable")
+        prior = prior if isinstance(prior, dict) else None
+        try:
+            body = judge_calls_path(pages_dir, page_num).read_text(encoding="utf-8")
+            calls = json.loads(body)
+            if ref.get("sha256") != sha256_text(body) or not isinstance(calls, list):
+                raise ValueError("digest mismatch or not a list")
+            return [c for c in calls if isinstance(c, dict)], None, prior
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "#1251: p%d page-judge calls named by its sidecar could not be restored (%s); "
+                "the file and its reference are kept",
+                page_num,
+                exc,
+            )
+            return [], {"reason": f"{type(exc).__name__}: {exc}"[:500], "ref": dict(ref)}, prior
 
     def _load_rejudge_candidate(
         self, state: DocumentState, page_num: int, output_dir: Path, ladder: list
@@ -18048,6 +18542,19 @@ class UnifiedPipeline:
             if cand.get("provider_backend") != backend or cand.get("provider_model") != model:
                 return None
             figures = [FigureInfo.from_dict(f) for f in cand.get("figures", [])]
+            # #1251: the first run's judge calls (the timeout that caused this re-judge among
+            # them) are carried onto the page BEFORE any new call is made, so the next flush
+            # extends the file instead of replacing it. The sidecar was matched above on run
+            # fingerprint and input checksum, so these are this page's own calls.
+            if meta.get("judge_calls") is not None:
+                with _JUDGE_CALLS_LOCK:
+                    (
+                        ps.judge_calls,
+                        ps.judge_calls_unrestored,
+                        ps.judge_calls_prior_unavailable,
+                    ) = self._load_page_judge_calls(
+                        doc_dir / "pages", page_num, meta["judge_calls"]
+                    )
             return text, judge_model, figures, prof
         except Exception:
             logger.debug("#1013: p%d kept candidate unreadable; reprocessing", page_num)
@@ -18605,7 +19112,10 @@ class UnifiedPipeline:
                     _mode = _FM(str(winning.get("failure_mode") or ""))
                 except ValueError:
                     _mode = None
-                if _mode in LAYER_CHECK_MODES and winning.get("status") != PageStatus.WARNING.value:
+                # #1251: this mode too is written only by the verdict demotion of a SUCCESS page.
+                if (
+                    _mode in LAYER_CHECK_MODES or _mode is _FM.READING_UNCORROBORATED
+                ) and winning.get("status") != PageStatus.WARNING.value:
                     is_permanently_unverifiable = False
 
             # #1187 round 5 (Argon P1-2c): a crop this lane FAILED to render is retried,
@@ -19085,11 +19595,23 @@ class UnifiedPipeline:
         ps.persisted_text_layer_words = (
             dict(_words_record) if isinstance(_words_record, dict) else None
         )
+        # #1251: the page-judge calls of the original run, so the writer leaves the same file.
+        if meta.get("judge_calls") is not None:
+            (
+                ps.judge_calls,
+                ps.judge_calls_unrestored,
+                ps.judge_calls_prior_unavailable,
+            ) = self._load_page_judge_calls(sidecar_path.parent, page_num, meta["judge_calls"])
         raw_verdict = meta.get("verdict")
         if isinstance(raw_verdict, dict):
             from socr.core.verdict import PageVerdict
 
             ps.published_verdict = PageVerdict.from_dict(raw_verdict)
+            # #1183: the trace the original run recorded, replayed unchanged. ``None`` when the
+            # sidecar predates it, which the seam states as NOT_RUN for every check.
+            from socr.core.pass_trace import trace_from_dicts
+
+            ps.published_checks = trace_from_dicts(meta.get("checks"))
         else:
             logger.warning(
                 "#1145: p%d restored without its published verdict; the seam will "
@@ -19145,6 +19667,8 @@ class UnifiedPipeline:
             )
             # TR-3: restore per-region verifier flag and D3 PNG ref.
             ps.native_table_unverifiable = bool(meta.get("native_table_unverifiable", False))
+            _retry_reason = meta.get("native_table_model_retry", "")
+            ps.native_table_model_retry = _retry_reason if isinstance(_retry_reason, str) else ""
             # #1156 (Argon, stack review): without this a resumed page comes back with
             # no suspicion, so the assemble re-flush drops the flag and its mark, and the
             # page reads as checked on evidence nothing can see.
@@ -19319,6 +19843,13 @@ class UnifiedPipeline:
             ps.scanned_table_withheld_unconfirmed = (
                 ps.scanned_table_evidence_failed
                 and page_out.failure_mode is FailureMode.TABLE_WITHHELD_UNCONFIRMED
+            )
+            # #1270: DERIVED again, for the same reason. A sidecar written before this
+            # ticket records HALLUCINATION and restores False for all three flags, which is
+            # what that record meant; it keeps shipping its recorded mode.
+            ps.scanned_table_witness_unverifiable = (
+                ps.scanned_table_evidence_failed
+                and page_out.failure_mode is FailureMode.TABLE_UNVERIFIED_WITNESS
             )
             # #263: restore the shredded-page image ref too, so a resumed run's
             # floor ships marker + image exactly as the first run did instead of
@@ -20970,6 +21501,17 @@ class UnifiedPipeline:
             # document, for the same reason a withheld table is not.
             and not unshipped_figure_marked_pages
         )
+        # #697/#1244: the recovered-prose bucket was computed and reported but never gated.
+        pages_ok = pages_ok and not scanned_prose_recovered_pages
+        # #1244 C1: the invariant behind every bucket above. A document is clean only if
+        # EVERY page has a final record with status SUCCESS; the bucket list is an allowlist
+        # of known defects, so a new defect class would repeat the hole. ``pages_ok`` is
+        # recorded first so the reason is named only where no bucket already names one.
+        incomplete_only_pages: list[int] = []
+        _incomplete_pages = _pages_not_success(pre_records, state.handle.page_count)
+        if pages_ok and _incomplete_pages:
+            incomplete_only_pages = _incomplete_pages
+        pages_ok = pages_ok and not _incomplete_pages
 
         if has_text and pages_ok:
             status = DocumentStatus.SUCCESS
@@ -22180,6 +22722,8 @@ class UnifiedPipeline:
             cost=state.total_cost,
             audit_passed=status == DocumentStatus.SUCCESS,
         )
+        if incomplete_only_pages:
+            final_result.error = _pages_not_success_note(incomplete_only_pages)
         # GH-189 piece 7: the chart crops must reach ``figure_refs`` even with
         # ordinary figure extraction switched off, and ``final_result.figures``
         # is the carrier every terminal sidecar writer reads.
@@ -22620,6 +23164,10 @@ class UnifiedPipeline:
                 # #1282: the page loop committed its repairs against the page's loop-time
                 # record; this one is authoritative.
                 self._reconcile_point_repairs(state, final_records)
+                for _final in final_records:
+                    _final_ps = state.pages.get(_final.output.page_num)
+                    if _final_ps is not None and _final_ps.native_table_model_retry:
+                        self._restate_native_table_model_retry(state, _final)
                 final_page_outputs = [record.output for record in final_records]
                 self._record_table_counts(state, final_records)
                 emission_failures = [
@@ -22692,6 +23240,11 @@ class UnifiedPipeline:
                     )
                     final_result.pages[0].text = final_text
                     self._save_markdown(state, final_text, output_dir)
+                # #1244 C1: the FINAL records are authoritative. A page the figure phase,
+                # the final-body guard or ``_preserve_chart_regions`` demoted after
+                # ``pre_records`` was read must carry up to the document status, the
+                # metadata and the CLI result, not only to its own sidecar.
+                _late_incomplete = _pages_not_success(final_records, state.handle.page_count)
             else:
                 logger.warning(
                     "GH-226 final-body guard: split yielded %d page(s), expected %d; "
@@ -22699,6 +23252,47 @@ class UnifiedPipeline:
                     len(final_bodies),
                     state.handle.page_count,
                 )
+                # #1244 C1: no final record exists to read, so FAIL CLOSED: every page is
+                # a page without a final record, hence incomplete. A document that was
+                # SUCCESS on the pre-figure records cannot stay completed on a body whose
+                # pages cannot be told apart.
+                _late_incomplete = _pages_not_success([], state.handle.page_count)
+                # The sidecars flushed above are terminal SUCCESS records of pages whose
+                # final body could not be confirmed. Demote them to provisional so the
+                # per-page resume gate (``_load_terminal_page``) reprocesses them instead
+                # of skipping a page this run could not vouch for.
+                for pnum in range(1, state.handle.page_count + 1):
+                    try:
+                        self._flush_page_sidecar(
+                            state,
+                            pnum,
+                            output_dir,
+                            terminal=False,
+                            extra_figures=list(getattr(final_result, "figures", []) or []),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "#1244 C1 [%s]: could not demote page %d sidecar (%s)",
+                            state.handle.path.name,
+                            pnum,
+                            exc,
+                        )
+            if _late_incomplete and final_result.status == DocumentStatus.SUCCESS:
+                _late_note = _pages_not_success_note(_late_incomplete)
+                final_result.status = DocumentStatus.AUDIT_FAILED
+                final_result.audit_passed = False
+                state.status = DocumentStatus.AUDIT_FAILED
+                final_result.error = (
+                    f"{final_result.error}; {_late_note}" if final_result.error else _late_note
+                )
+                self._write_metadata(
+                    state,
+                    final_result,
+                    output_dir,
+                    has_text,
+                    provisional=figure_phase_failed,
+                )
+                metadata_rewritten = True
 
         # GH-993: a final recount that differs from the one already persisted (a caption
         # table the figure phase added, a guard rewrite) must reach metadata.json, which

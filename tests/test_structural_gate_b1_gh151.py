@@ -31,6 +31,7 @@ import pytest
 
 fitz = pytest.importorskip("fitz")
 
+from c3_support import give_word_evidence
 from socr.core.born_digital import BornDigitalDetector
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
@@ -479,10 +480,13 @@ class TestWiringUnits:
         ps.native_text = "native text"
         # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
         ps.own_layer_text = "native text 4.25"
+        # #1251: a judge's acceptance is not a check; the layer's words are the evidence
+        # the reference is the COMPLETE layer's words, and the reading carries all of them
+        give_word_evidence(ps, ps.own_layer_text)
         ps.native_table_structure_defective = True
         bo = PageOutput(
             page_num=1,
-            text="qwen text 4.25",
+            text="qwen native text 4.25",
             status=PageStatus.SUCCESS,
             engine="qwen",
             audit_passed=True,

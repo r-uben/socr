@@ -259,6 +259,9 @@ def _events(out_dir: Path, kind: str) -> list[dict]:
 # Run-to-run noise that is not part of the table verdict.
 _NOISE = {
     "timings_s",
+    # #1183: the pass trace states the row-binding check's own outcome, so it differs between the
+    # arm where the check ran and the arm where it did not; asserted explicitly where it matters.
+    "checks",
     "row_binding",
     "row_binding_contradicted_tables",
     "row_binding_unverifiable_tables",
@@ -286,6 +289,14 @@ def test_clean_table_the_check_changes_nothing_but_its_record(tmp_path, rotation
     # and the check did run: its record is the only new field
     assert _sidecar(on).get("row_binding")
     assert "row_binding" not in _sidecar(off)
+    trace = lambda out: {  # noqa: E731
+        (e["check"], e["scope"]): e["result"] for e in _sidecar(out)["checks"]
+    }
+    assert trace(on)[("row_binding", "table:1")] == "PASS"
+    assert trace(off)[("row_binding", "table:1")] == "NOT_RUN"
+    assert {k: v for k, v in trace(on).items() if k[0] != "row_binding"} == {
+        k: v for k, v in trace(off).items() if k[0] != "row_binding"
+    }
 
 
 def _withheld_trust(out_dir: Path) -> int:
@@ -801,11 +812,27 @@ ABSENT_VALUES_ROWS = [*GROUP[:3], ("Net xprts", GROUP[3][1])]
 
 @pytest.mark.parametrize("rotation", [0, 90])
 def test_unverifiable_table_is_marked_without_claiming_a_contradiction(tmp_path, rotation):
+    # #1251: a judge's acceptance is not a check, so the control arm needs the layer's words
+    # in the reading. The table slip drops one word the layer prints ("exports"); the reading
+    # also names it in a line below the table (the page's words check passes for it), so the
+    # arms differ only in whether the row-binding check ran.
+    slip_markdown = md(ABSENT_VALUES_ROWS) + "\nNet exports\n"
     _, res_on, _, on, pdf = _run(
-        tmp_path, ABSENT_VALUES_ROWS, rotation, check_runs=True, out_name="on"
+        tmp_path,
+        ABSENT_VALUES_ROWS,
+        rotation,
+        check_runs=True,
+        out_name="on",
+        markdown=slip_markdown,
     )
     _, res_off, _, off, _ = _run(
-        tmp_path, ABSENT_VALUES_ROWS, rotation, check_runs=False, out_name="off", pdf=pdf
+        tmp_path,
+        ABSENT_VALUES_ROWS,
+        rotation,
+        check_runs=False,
+        out_name="off",
+        pdf=pdf,
+        markdown=slip_markdown,
     )
     side_on, side_off = _sidecar(on), _sidecar(off)
     assert side_on["winning_output"]["status"] == PageStatus.WARNING.value

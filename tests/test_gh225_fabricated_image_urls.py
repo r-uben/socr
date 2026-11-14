@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from c3_support import give_word_evidence
 from socr.core.config import EngineType, PipelineConfig
 from socr.core.document import DocumentHandle
 from socr.core.manifest import _winning_page_output, canonical_page_texts
@@ -397,7 +398,12 @@ def test_clean_phase_major_document_still_succeeds(tmp_path: Path) -> None:
 
     pipeline = _make_pipeline()
     pipeline._scan_root = pdf_path.parent
-    state, _out = _state_for(pdf_path, "Real prose with no image references at all.\n")
+    state, _out = _state_for(pdf_path, "Real prose with no image references at all, 4.2.\n")
+    # #1244 C1: CHECKED needs a born-digital layer of the page's own sharing a number.
+    state.pages[1].own_layer_text = "Real prose with no image references at all, 4.2."
+    state.pages[1].is_born_digital = True
+    # #1251: a judge's acceptance is not a check; the layer's words are the independent evidence
+    give_word_evidence(state.pages[1], "Real prose with no image references at all, 4.2.")
 
     result = pipeline._phase_assemble(state, out_dir)
 

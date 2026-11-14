@@ -70,6 +70,7 @@ from pathlib import Path
 
 import pytest
 
+from c3_support import give_word_evidence
 from socr.core.document import DocumentHandle
 from socr.core.manifest import _winning_page_output
 from socr.core.result import FailureMode, PageOutput, PageStatus
@@ -529,6 +530,8 @@ def test_ordinary_already_passing_non_native_winner_is_not_an_s1_event(
     ps = state.pages[1]
     # #1185 (approved fixture change): control page given an own text layer and a number, so it is a real CHECKED reading
     ps.own_layer_text = MODEL_GRID
+    # #1251: a judge's acceptance is not a check; the layer's words are the independent evidence
+    give_word_evidence(ps, MODEL_GRID)
     # The pivotal difference from every other fixture in this module: the
     # model's own grid-authoring attempt is ALREADY best_output, not native.
     model_attempt = ps.attempts[1]

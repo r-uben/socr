@@ -34,6 +34,7 @@ from socr.core.state import DocumentState
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 from gh1185_agreement_spy import assert_agreed_on, spy_agreement
+from c1_support import assert_clean_or_only_unchecked
 
 # ---------------------------------------------------------------------------
 # Shared helpers (mirror the PP-2 harness)
@@ -227,7 +228,7 @@ class TestResumeSkipsTerminalPages:
         # --- Run 1: complete the whole doc. All 3 pages routed. ---
         run1_calls: list[int] = []
         result1 = _run(pipeline, pdf_path, tmp_path, run1_calls)
-        assert result1.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result1, pages=(1, 2, 3))  # #1244 C1: see c1_support
         assert sorted(run1_calls) == [1, 2, 3], f"Run 1 must OCR all pages; got {run1_calls}"
 
         pages_dir = _doc_dir(tmp_path) / "pages"
@@ -247,7 +248,7 @@ class TestResumeSkipsTerminalPages:
         run2_calls: list[int] = []
         result2 = _run(run2_pipeline, pdf_path, tmp_path, run2_calls)
 
-        assert result2.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result2, pages=(1, 2, 3))  # #1244 C1: see c1_support
         assert run2_calls == [3], (
             f"Run 2 must re-OCR ONLY p3 (pages 1-2 were terminal); got {run2_calls}"
         )
@@ -294,7 +295,7 @@ class TestResumeSkipsTerminalPages:
 
         run1_calls: list[int] = []
         result1 = _run(pipeline, pdf_path, tmp_path, run1_calls)
-        assert result1.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result1, pages=(1, 3))  # #1244 C1: see c1_support
         # Only the OCR pages (1, 3) were routed in run 1 — p2 took the native bypass.
         assert sorted(run1_calls) == [1, 3], f"Run 1 must OCR only p1,p3; got {run1_calls}"
 
@@ -306,7 +307,7 @@ class TestResumeSkipsTerminalPages:
         run2_calls: list[int] = []
         result2 = _run(pipeline2, pdf_path, tmp_path, run2_calls)
 
-        assert result2.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result2, pages=(1, 3))  # #1244 C1: see c1_support
         assert run2_calls == [3], (
             f"Resume must re-OCR ONLY p3; p1 (OCR-terminal) and p2 (native-terminal) "
             f"must both be ledger hits. got {run2_calls}"
@@ -533,7 +534,7 @@ class TestNonTerminalNotSkipped:
         run2_calls: list[int] = []
         result2 = _run(pipeline2, pdf_path, tmp_path, run2_calls)
 
-        assert result2.status == DocumentStatus.SUCCESS, "A corrupt sidecar must not crash the run"
+        assert_clean_or_only_unchecked(result2, pages=(1, 2))  # #1244 C1: see c1_support
         assert run2_calls == [2], (
             f"A corrupt sidecar must reprocess that page (p1 still skipped); got {run2_calls}"
         )
@@ -808,7 +809,7 @@ class TestPartialDocResume:
         run2_calls: list[int] = []
         result2 = _run(pipeline2, pdf_path, tmp_path, run2_calls)
 
-        assert result2.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result2, pages=(1, 2, 3, 4))  # #1244 C1: see c1_support
         assert sorted(run2_calls) == [3, 4], (
             f"Partial resume must re-OCR ONLY the unfinished pages 3-4; got {run2_calls}"
         )
@@ -894,7 +895,7 @@ class TestFigureDocResume:
         run1_calls: list[int] = []
         with patch.object(pipeline, "_describe_and_embed_figures", side_effect=_noop_figures):
             result1 = _run(pipeline, pdf_path, tmp_path, run1_calls)
-        assert result1.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result1, pages=(1, 2))  # #1244 C1: see c1_support
         assert sorted(run1_calls) == [1, 2], f"Run 1 must OCR both pages; got {run1_calls}"
         assert figure_calls, "figure phase must have run in run 1 (save_figures=True)"
 
@@ -930,7 +931,7 @@ class TestFigureDocResume:
         with patch.object(pipeline2, "_describe_and_embed_figures", side_effect=_noop_figures2):
             result2 = _run(pipeline2, pdf_path, tmp_path, run2_calls)
 
-        assert result2.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result2, pages=(1, 2))  # #1244 C1: see c1_support
         assert run2_calls == [], (
             f"Both pages were terminal pre-figures; resume must re-OCR NONE; got {run2_calls}"
         )
@@ -961,7 +962,7 @@ class TestResumeWithEmptyLadder:
         # --- Run 1: complete the whole doc with a live provider. ---
         run1_calls: list[int] = []
         result1 = _run(pipeline, pdf_path, tmp_path, run1_calls)
-        assert result1.status == DocumentStatus.SUCCESS
+        assert_clean_or_only_unchecked(result1, pages=(1, 2, 3))  # #1244 C1: see c1_support
         assert sorted(run1_calls) == [1, 2, 3]
 
         # --- Crash: pages 1-2 terminal, p3 unfinished, no COMPLETED doc record. ---

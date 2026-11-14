@@ -281,7 +281,7 @@ def test_absent_backend_is_not_reported_as_hallucination(
     contra_decision, contra_output, _ = contradicting_backend
 
     assert absent_output.failure_mode is FailureMode.NO_WITNESS_BACKEND
-    assert contra_output.failure_mode is FailureMode.HALLUCINATION
+    assert contra_output.failure_mode is FailureMode.WITNESS_DISAGREES
     assert absent_output.failure_mode is not contra_output.failure_mode
 
     assert CAUSE_NO_WITNESS_BACKEND in absent_decision.reason
@@ -637,7 +637,7 @@ def test_final_selector_carries_the_reason_and_changes_nothing_else(tmp_path: Pa
     assert witness_prov is SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
 
     assert witness_out.failure_mode is FailureMode.NO_WITNESS_BACKEND
-    assert halluc_out.failure_mode is FailureMode.HALLUCINATION
+    assert halluc_out.failure_mode is FailureMode.WITNESS_DISAGREES
 
     assert witness_out.text == halluc_out.text
     assert witness_out.status is halluc_out.status is PageStatus.ERROR
@@ -647,7 +647,7 @@ def test_final_selector_carries_the_reason_and_changes_nothing_else(tmp_path: Pa
 
 def test_floor_applier_sets_the_flag_and_the_mode_together(tmp_path: Path) -> None:
     """``_apply_scanned_table_floor`` is the single writer of both. A page
-    floored WITHOUT the no-witness cause must keep reading as HALLUCINATION.
+    floored WITHOUT the no-witness cause must keep reading as WITNESS_DISAGREES.
     """
     pdf = tmp_path / "doc.pdf"
     with patch.object(DocumentHandle, "__post_init__", lambda self: None):
@@ -657,7 +657,7 @@ def test_floor_applier_sets_the_flag_and_the_mode_together(tmp_path: Path) -> No
 
     for no_witness, expected in (
         (True, FailureMode.NO_WITNESS_BACKEND),
-        (False, FailureMode.HALLUCINATION),
+        (False, FailureMode.WITNESS_DISAGREES),
     ):
         ps = state.pages[1]
         ps.best_output = PageOutput(
@@ -1008,7 +1008,7 @@ def test_a_later_contradiction_beats_an_earlier_missing_witness(tmp_path: Path) 
 
     assert ps.scanned_table_evidence_failed is True, "the floor must still apply"
     assert ps.scanned_table_no_witness is False
-    assert shipped.failure_mode is FailureMode.HALLUCINATION
+    assert shipped.failure_mode is FailureMode.WITNESS_DISAGREES
     assert UnifiedPipeline._no_witness_backend_pages(state_of(ps)) == []
 
 

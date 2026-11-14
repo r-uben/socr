@@ -118,6 +118,10 @@ EXPECTED_RESUME_KINDS = frozenset(
         # only record of which cells the model read differently from the shipped text.
         "table_point_repaired",
         "blank_page",
+        # #1253 B3: the record of a refused native table handed to the model (attempted,
+        # accepted or not, why). Emitted at the end of the page loop, which a terminal
+        # resumed page skips; it is the only carrier of the outcome.
+        "native_table_model_retry",
         # PR #1160: counted by the run summary, emitted by steps a resumed page skips.
         "provider_empty_response",
         "page_retry",
@@ -169,4 +173,5 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 69 with #1282's table_point_repaired.
     # 71 with #1306's control_bytes_replaced and hidden_footnote_stripped.
     # 75 with #1276's four figure-presence kinds merged onto #1306's two.
-    assert len(EXPECTED_RESUME_KINDS) == 75
+    # 76 with #1253 B3's native_table_model_retry.
+    assert len(EXPECTED_RESUME_KINDS) == 76

@@ -71,17 +71,22 @@ from socr.core.result import (
     REJECTION_AMBIGUOUS_DEFERRED,
     REJECTION_JUDGE_ONLY,
     REJECTION_VERIFIER_ERROR,
+    WITNESS_REJECT_MODES,
     FailureMode,
     PageOutput,
     PageStatus,
 )
 from socr.core.native_paragraphs import NativeVocabulary, reflow_native_prose
 from socr.core.verdict import PRIOR_OCR_MODEL_REASON, PRIOR_OCR_NATIVE_REASON
+from socr.core.pass_trace import TraceEntry
 from socr.core.verdict import (
     ENGINE_NATIVE_MATH,
+    JUDGE_ONLY_REASON,
     PageVerdict,
     build_page_verdict,
+    build_pass_trace,
     marks_to_write,
+    resumed_verdict_with_judge_only_clause,
 )
 from socr.core.state import DocumentState, PageState, layer_is_admissible_evidence
 
@@ -796,7 +801,7 @@ def flagged_model_page_output(p) -> PageOutput | None:
     # A positively-rejected reading, not a flagged one: an ERROR output, or one
     # a floor already overwrote with a failure marker, is not evidence of
     # anything and must not displace the native reading.
-    if bo.status is PageStatus.ERROR or bo.failure_mode is FailureMode.HALLUCINATION:
+    if bo.status is PageStatus.ERROR or bo.failure_mode in WITNESS_REJECT_MODES:
         return None
     # The comparison being fixed is between two readings of a TABLE. If the
     # model emitted no grid at all on a table page it did not produce the thing
@@ -842,6 +847,13 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
     The D3 conjunction is a verdict on the native lane. When a model attempt
     authored a grid, shipping the failed-table marker would discard the page's
     model reading, prose, and equations along with the native table.
+
+    #1253 B3: returns ``None`` on a page whose refused native grid was handed to the
+    model (``native_table_model_retry``). The retry's contract is that an accepted reading
+    replaces the marker and a reading that is NOT accepted leaves the marker. Without this
+    exemption a judge-only refusal on a retried page (REJECTION_JUDGE_ONLY /
+    AMBIGUOUS_DEFERRED) would ship the refused model grid here as UNACCEPTED_OUTPUT_KEPT:
+    on the chart-like row_count pages that is a grid built from axis ticks.
 
     Returns the output to keep, or ``None`` to leave the floor firing. The
     caller demotes a COPY; this predicate never mutates anything, and in
@@ -896,6 +908,8 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
         and bool(p.attempts)
     ):
         return None
+    if getattr(p, "native_table_model_retry", ""):
+        return None
     # GH-90's scanned floor is a different lane and is not reachable from here
     # (it requires ``not is_born_digital``), but a page carrying its flag must
     # never be rescued by this path either.
@@ -922,7 +936,7 @@ def d3_floor_kept_model_output(p) -> PageOutput | None:
         text = (out.text or "").strip()
         if not text or is_page_failed_marker(text):
             return False
-        if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
+        if out.status is PageStatus.ERROR or out.failure_mode in WITNESS_REJECT_MODES:
             return False
         return has_strict_table_grid(text)
 
@@ -989,7 +1003,7 @@ def _grid_shaped_attempt(out: PageOutput | None) -> bool:
     text = (out.text or "").strip()
     if not text or is_page_failed_marker(text):
         return False
-    if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
+    if out.status is PageStatus.ERROR or out.failure_mode in WITNESS_REJECT_MODES:
         return False
 
     from socr.tables.reconcile import has_strict_table_grid
@@ -1028,7 +1042,7 @@ def _grid_reading_attempt(out: PageOutput | None) -> bool:
     text = (out.text or "").strip()
     if not text or is_page_failed_marker(text):
         return False
-    if out.status is PageStatus.ERROR or out.failure_mode is FailureMode.HALLUCINATION:
+    if out.status is PageStatus.ERROR or out.failure_mode in WITNESS_REJECT_MODES:
         return False
 
     from socr.tables.reconcile import has_authored_table_grid
@@ -3370,6 +3384,180 @@ def _native_text_line_body(p, page_num: int, *, marker_line: str, png_ref: str) 
     return "\n\n".join(blocks)
 
 
+#: #1261 review: the mark a withheld run of layer lines gets when no detected box is in it
+#: (a page number, a subscript, an axis tick, a legend). The table marker is not true of such a
+#: line, and printing it six times a page cut sentences with a false "unverifiable table".
+_LINE_WITHHELD_MARK = "[line withheld]"
+_LINES_WITHHELD_MARK = "[{n} lines withheld]"
+
+
+def _native_order_boxes(p) -> list[tuple[float, float, float, float]] | None:
+    """The page's detected boxes as float rectangles, or ``None`` when one cannot be read.
+
+    ``None`` is the abstention: a box whose geometry cannot be read cannot be used to exclude
+    the lines that continue it, so the caller ships no prose.
+    """
+    import math
+
+    boxes = []
+    for box in getattr(p, "detected_table_bboxes", None) or []:
+        try:
+            x0, y0, x1, y1 = (float(v) for v in tuple(box)[:4])
+        except (TypeError, ValueError):
+            return None
+        if len(tuple(box)) < 4 or not all(math.isfinite(v) for v in (x0, y0, x1, y1)):
+            return None
+        if not (x0 <= x1 and y0 <= y1):
+            return None
+        boxes.append((x0, y0, x1, y1))
+    return boxes
+
+
+def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str) -> str | None:
+    """#1261: the words the geometry floor would ship, in the text layer's OWN line order.
+
+    ``native_prose_floor_text`` clusters words by baseline, so on a page whose columns are
+    drawn column-major the bands weld two columns and the order gate refuses the page. The
+    layer's own order (PyMuPDF block, line, word) keeps the columns apart. This takes the
+    partition the floor already took (every box withheld, keep-sentences rule, categorical
+    rows withheld: ``_page_prose_partition``) and changes the ORDER the surviving words are
+    emitted in. It admits no word the bands body would not ship, and it withholds more:
+
+    * A layer line is narrower than a baseline band, so the keep-sentences numerals rule is
+      applied to each layer line, and then a numerals-withheld line withholds the lines beside
+      it in its band (x order, both directions) until a line that is a sentence. A table row
+      split into fragments by wide cell gaps cannot ship a fragment, and neither do the stub
+      labels and legend entries of a table whose values were withheld.
+    * TABLE SPAN. Within the horizontal span of ANY detected box (any word whose x-range
+      overlaps a box's x-range, top of page to bottom), and in the band of any numerals-withheld
+      line, NOTHING ships: every such line is withheld. Block shape and punctuation do not
+      establish prose (a multi-line ruled cell is a block ending in a period). Only lines
+      entirely outside every box's x-span ship, under the numerals, two-letter-word,
+      keep-sentences and block-break rules. A box whose geometry cannot be read makes the body
+      abstain (``None``).
+    * A line with no word of two or more letters (shredded inline math: ``t``, ``y``, ``+``) is
+      withheld.
+    * A layer line that holds both shipped and withheld words is withheld whole, and a line that
+      parses as markdown table syntax is withheld.
+
+    A run of withheld lines gets the table marker (plus page-image link) when it holds a line in
+    or continuing a detected box, otherwise a neutral line-withheld mark; the page carries the
+    table marker at least once. A paragraph breaks where the layer block changes. Returns None
+    when nothing ships or the shipped text is not a trusted layer.
+    """
+    from socr.core.born_digital import text_layer_trusted
+    from socr.tables.reconcile import table_syntax_line_indices
+    from socr.tables.row_corroboration import (
+        band_is_mostly_numerals,
+        cluster_band_words,
+    )
+
+    words = getattr(p, "native_words", None) or []
+    bands = _page_prose_partition(p, keep_sentences=True)
+    if not words or not bands:
+        return None
+    boxes = _native_order_boxes(p)
+    if boxes is None:
+        return None
+    shipped = {tuple(w[:8]) for is_prose, band in bands if is_prose for w in band}
+    lines: list[list[tuple]] = []
+    index: dict[tuple, int] = {}
+    for w in words:
+        key = (w[5], w[6])
+        if key not in index:
+            index[key] = len(lines)
+            lines.append([])
+        lines[index[key]].append(w)
+    texts = [" ".join(str(w[4]) for w in line).strip() for line in lines]
+    table_syntax = table_syntax_line_indices(texts)
+
+    band_lines: list[set[int]] = [
+        {index[(w[5], w[6])] for w in band} for band in cluster_band_words(words)
+    ]
+
+    def _centroid_in(w, box) -> bool:
+        cx, cy = (w[0] + w[2]) / 2.0, (w[1] + w[3]) / 2.0
+        return box[0] <= cx <= box[2] and box[1] <= cy <= box[3]
+
+    numerals = [band_is_mostly_numerals(line) for line in lines]
+    base_ok = [
+        bool(texts[i])
+        and i not in table_syntax
+        and all(tuple(w[:8]) in shipped for w in line)
+        and not numerals[i]
+        and any(sum(c.isalpha() for c in str(w[4])) >= 2 for w in line)
+        for i, line in enumerate(lines)
+    ]
+
+    box_span: set[int] = set()
+    for box in boxes:
+        for i, line in enumerate(lines):
+            if any(w[0] <= box[2] and w[2] >= box[0] for w in line):
+                box_span.add(i)
+    band_span: set[int] = set()
+    for members in band_lines:
+        if any(numerals[i] for i in members):
+            band_span.update(members)
+    continuation = box_span | band_span
+    ships = [base_ok[i] and i not in continuation for i in range(len(lines))]
+    if not any(ships) or not text_layer_trusted("\n".join(t for t, ok in zip(texts, ships) if ok)):
+        return None
+    box_related = [
+        (i in continuation and i in box_span)
+        or any(_centroid_in(w, box) for box in boxes for w in line)
+        for i, line in enumerate(lines)
+    ]
+
+    blocks = [prose_recovered_flag(page_num, born_digital=True, keep_sentences=True)]
+    if png_ref:
+        blocks.append(png_ref)
+    page_image = page_image_link(png_ref)
+    marker_block = f"{marker_line}\n\n{page_image}" if page_image else marker_line
+    # (position in ``blocks``, lines in the run, whether the run holds a box line)
+    runs: list[list] = []
+    paragraph: list[str] = []
+    paragraph_block = None
+    in_run = False
+
+    def _flush() -> None:
+        if paragraph:
+            blocks.append("\n".join(_escaped_native_line(line) for line in paragraph))
+            paragraph.clear()
+
+    for i, text in enumerate(texts):
+        if ships[i]:
+            in_run = False
+            block = lines[i][0][5]
+            if paragraph and block != paragraph_block:
+                _flush()
+            paragraph_block = block
+            paragraph.append(text)
+            continue
+        _flush()
+        if not text:
+            continue
+        if not in_run:
+            runs.append([len(blocks), 0, False])
+            blocks.append("")
+            in_run = True
+        runs[-1][1] += 1
+        runs[-1][2] = runs[-1][2] or box_related[i]
+    _flush()
+    if runs and not any(box_bearing for _pos, _n, box_bearing in runs):
+        runs[0][2] = True  # the page's table notice must appear somewhere
+    for pos, n, box_bearing in runs:
+        blocks[pos] = (
+            marker_block
+            if box_bearing
+            else _LINE_WITHHELD_MARK
+            if n == 1
+            else _LINES_WITHHELD_MARK.format(n=n)
+        )
+    if not runs:
+        blocks.append(marker_block)
+    return "\n\n".join(blocks)
+
+
 def prose_recovery_is_born_digital(text: str, page_num: int) -> bool:
     """Whether a recovered body's own banner is the born-digital form (page-kind wording)."""
     return _body_has_born_digital_banner(text, page_num)
@@ -3564,6 +3752,7 @@ def table_floor_text_for_source(
     chart_floor: Callable[[], str | None] | None = None,
     geometry_floor: bool = False,
     chart_floor_offered: bool = True,
+    refusals: list[str] | None = None,
 ) -> str:
     """The GH-520 coverage check plus splice, over ANY source.
 
@@ -3611,6 +3800,17 @@ def table_floor_text_for_source(
         else (f"{d3_marker}\n\n{png_ref}" if png_ref else d3_marker)
     )
 
+    def _refuse(reason: str) -> str:
+        """The whole-page marker, with the reason recorded when the caller asked (#1261).
+
+        ``refusals`` is a replay hook: a measurement passes a list and reads back which gate
+        refused each page, so a gate is relaxed against the recorded reasons rather than a
+        guess. Production callers pass nothing and nothing is recorded.
+        """
+        if refusals is not None:
+            refusals.append(reason)
+        return whole_page
+
     def _refused() -> str:
         """#1144: what ships when the GH-520 splice is refused.
 
@@ -3631,7 +3831,7 @@ def table_floor_text_for_source(
         floored page is the design the owner closed unmerged in PR #1047.
         """
         if not prose_recovery:
-            return whole_page
+            return _refuse("no_prose_recovery")
         # #1144: a page whose native table lane GH-147 refused for rotation has
         # a ``get_text()`` order that is not its reading order, so this lane's
         # "prose" is confetti. Measured on GH-147's own rotated fixture, which
@@ -3641,7 +3841,7 @@ def table_floor_text_for_source(
         if getattr(p, "native_table_lane_refused_rotated", False) or getattr(
             p, "native_rotated_text_shredded", False
         ):
-            return whole_page
+            return _refuse("rotated_lane")
         # #1144 (owner ruling, 2026-10-15): the recovery runs ONLY when the page
         # has at least one detected table box.
         #
@@ -3707,19 +3907,19 @@ def table_floor_text_for_source(
             # so this costs none of them; both reviewers' partial-inventory cases were
             # CONSTRUCTED states, not pages in either corpus.
             if _count != 0 or _boxes:
-                return whole_page
+                return _refuse("boxes_incomplete")
             if chart_floor is None:
                 # #1269 records why the chart floor kept the bare marker. A caller that never
                 # offers a chart floor (``chart_floor_offered=False``: the #1266 D3 ending and
                 # ``withheld_table_floor_text``) has no chart decision to explain.
                 if chart_floor_offered:
                     _record_chart_floor_abstention(p)
-                return whole_page
+                return _refuse("no_boxes_no_chart_floor")
             if int(getattr(p, "page_rotation", 0) or 0) % 360 != 0:
                 # Same refusal the normal lane makes below, applied before the
                 # chart lane too: on a /Rotate page the box coordinates and the
                 # word coordinates are in different spaces.
-                return whole_page
+                return _refuse("rotated_page")
             # The order gate is applied INSIDE the builder, to the recovered prose
             # alone. It cannot be applied here: this body leads with socr's own
             # canonical mark lines, which are not page content and which the gate
@@ -3728,7 +3928,7 @@ def table_floor_text_for_source(
             chart_body = chart_floor()
             if not chart_body:
                 _record_chart_floor_abstention(p, empty_body=True)
-                return whole_page
+                return _refuse("chart_floor_empty")
             # Record that this body came from the chart floor, so the generic
             # chart-preservation pass skips it: that pass anchors crops on the
             # in-chart words this lane deliberately withheld (Argon 3).
@@ -3754,7 +3954,7 @@ def table_floor_text_for_source(
         # content, and it is #1159's to make. Until then these pages keep the
         # marker plus picture -- no worse than main.
         if int(getattr(p, "page_rotation", 0) or 0) % 360 != 0:
-            return whole_page
+            return _refuse("rotated_page")
         # #1144 round 4's two-column refusal lived here and is GONE. It asked
         # ``reconstruct.page_column_gutter`` whether a prose band straddled the
         # page's own gutter -- a proxy for "would this band weld two columns".
@@ -3772,8 +3972,10 @@ def table_floor_text_for_source(
             # whole-page marker and the page image, never text. Missing evidence is not a
             # pass: ``_each_table_box_sane`` and ``_structure_outside_boxes`` both fail closed
             # without words.
-            if not _each_table_box_sane(p) or _structure_outside_boxes(p):
-                return whole_page
+            if not _each_table_box_sane(p):
+                return _refuse("box_unsane")
+            if _structure_outside_boxes(p):
+                return _refuse("structure_outside")
         recovered = native_prose_floor_text(
             p,
             page_num,
@@ -3782,10 +3984,21 @@ def table_floor_text_for_source(
             keep_sentences=geometry_floor,
         )
         if not recovered:
-            return whole_page
+            return _refuse("no_recoverable_prose")
         # #1144 round 5: the last word belongs to the page's own reading order.
-        if not _prose_follows_native_order(recovered, getattr(p, "native_text", "") or ""):
-            return whole_page
+        native_text = getattr(p, "native_text", "") or ""
+        if not _prose_follows_native_order(recovered, native_text):
+            # #1261: the bands body welded columns. On the born-digital geometry floor the
+            # SAME shippable words are re-emitted in the layer's own line order, after the
+            # box sanity and structure-outside gates above have already passed. It is
+            # held to the same order gate; a page it cannot satisfy keeps the whole-page marker.
+            if geometry_floor:
+                in_order = _native_order_prose_body(
+                    p, page_num, marker_line=d3_marker, png_ref=png_ref
+                )
+                if in_order and _prose_follows_native_order(in_order, native_text):
+                    return in_order
+            return _refuse("order_gate")
         return recovered
 
     if geometry_floor:
@@ -3842,7 +4055,9 @@ def native_region_text(words: list) -> str:
 #: #1144 round 5: socr's own furniture in a recovered body -- the banner, the
 #: withheld-table marker, an image embed, a page-image link. Never the page's
 #: own words, so never part of the order check.
-_RECOVERED_FURNITURE_RE = re.compile(r"^\s*(?:\[page \b|!\[|\[page image\])")
+_RECOVERED_FURNITURE_RE = re.compile(
+    r"^\s*(?:\[page \b|!\[|\[page image\]|\[(?:\d+ lines|line) withheld\]$)"
+)
 
 
 def _order_tokens(text: str) -> list[str]:
@@ -4107,6 +4322,20 @@ def _is_restored_prose_recovery(p, page_num: int) -> bool:
     # the next run -- the exact resume loss #649 round 2 closed for the other shape,
     # reopened by adding a second noun.
     return _is_prose_recovery_body(text, page_num)
+
+
+def _is_stored_pre_1270_floor(source: PageOutput | None, marker: str) -> bool:
+    """#1270: *source* is this floor's own saved output carrying the pre-split ``hallucination``.
+
+    Both halves: the stored mode, and the floor's failed-table marker in the saved text (a
+    live model attempt that merely audited as a hallucination does not carry it, so a live run
+    is always labelled by the witness flags above).
+    """
+    return (
+        source is not None
+        and source.failure_mode is FailureMode.HALLUCINATION
+        and marker in (source.text or "")
+    )
 
 
 def _restored_floor_body_holds(p, page_num: int) -> bool:
@@ -4863,6 +5092,10 @@ class _FinalizedPageRecord:
     #: #1145: why this page is not CHECKED, and the marks that say so. ``None`` only on
     #: records built outside the seam; the seam always sets it.
     verdict: PageVerdict | None = None
+    #: #1183: the page's pass trace (``core.pass_trace``): every check's own outcome, PASS
+    #: included. A record, never an input: nothing reads it to decide a status, a mode or a byte
+    #: of the ``.md``. ``None`` only on records built outside the seam.
+    checks: tuple[TraceEntry, ...] | None = None
 
 
 FinalizedPageRecord = _FinalizedPageRecord
@@ -5183,7 +5416,14 @@ def _select_page_output_tagged(
                 if getattr(p, "scanned_table_no_witness", False)
                 else FailureMode.TABLE_WITHHELD_UNCONFIRMED
                 if getattr(p, "scanned_table_withheld_unconfirmed", False)
+                else FailureMode.TABLE_UNVERIFIED_WITNESS
+                if getattr(p, "scanned_table_witness_unverifiable", False)
+                # #1270: a page whose own sidecar stored ``hallucination`` for THIS floor was
+                # written before the label was split. Resume does not re-label it: the stored
+                # mode is what that run recorded, and the page keeps it.
                 else FailureMode.HALLUCINATION
+                if _is_stored_pre_1270_floor(source, d3_marker)
+                else FailureMode.WITNESS_DISAGREES
             ),
         ), SelectionProvenance.UNVERIFIABLE_TABLE_SCANNED
     if p.is_born_digital and p.native_text:
@@ -6688,6 +6928,7 @@ _VERDICT_DERIVED_MODES: frozenset[FailureMode] = frozenset(
         FailureMode.EQUATION_FIDELITY_UNVERIFIED,
         FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
         FailureMode.MODEL_OUTPUT_UNJUDGED,
+        FailureMode.READING_UNCORROBORATED,
         FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
         FailureMode.FIGURE_NOT_SHOWN,
         FailureMode.FIGURE_RENDER_FAILED,
@@ -6819,6 +7060,10 @@ def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
             if scoped is FailureMode.FIGURE_NOT_SHOWN and kind in _FIGURE_RENDER_FAILED_KINDS:
                 return FailureMode.FIGURE_RENDER_FAILED
             return scoped
+        # #1251: same check as #1181's unjudged accept, different mode (resumability differs),
+        # told apart by the clause's own reason, which is the constant this module emits.
+        if clause.check is Check.PAGE_JUDGE and clause.reason == JUDGE_ONLY_REASON:
+            return FailureMode.READING_UNCORROBORATED
         return by_check.get(clause.check) or by_result.get((clause.check, clause.result))
 
     # A FAIL outranks an UNKNOWN, whatever the clause order (Argon P0-A). A FAIL means a check
@@ -7740,22 +7985,30 @@ def _select_and_finalize_page(
     # clause inputs (``table_label_unverified``; slice 3's escalation predicate, which
     # reads ``p.attempts``) do not survive a resume, and recomputing would drop them, so
     # the page would come back from a resume looking cleaner than it left.
+    _page_event_kinds = frozenset(
+        getattr(ev, "kind", "") for ev in state.events if getattr(ev, "page_num", None) == page_num
+    )
+    # #1251: a resumed page's published verdict is completed from the trace this pass will
+    # WRITE (its replay, digest-verified), never trusted when empty over a trace with no evidence.
+    _published = getattr(p, "published_verdict", None)
+    _replay = getattr(p, "published_checks", None)
+    _replay = _replay if isinstance(_replay, tuple) else None
+    if _published is not None:
+        _published = resumed_verdict_with_judge_only_clause(
+            _published, output, _replay, _page_event_kinds
+        )
     output, verdict = _apply_verdict_marks(
         output,
         p,
         page_num,
-        published=getattr(p, "published_verdict", None),
+        published=_published,
         # #1145 slice 3: the KINDS of this page's audit events, which is where the lanes
         # record what they did. ``state.events`` is document-level, so the page's own are
         # filtered here with the same predicate the sidecar writer uses (``ev.page_num``).
         # Kinds only, not the events: a clause needs to know THAT the lane attached a
         # reading, not what it said, and passing the objects would put mutable run state
         # inside the verdict layer.
-        event_kinds=frozenset(
-            getattr(ev, "kind", "")
-            for ev in state.events
-            if getattr(ev, "page_num", None) == page_num
-        ),
+        event_kinds=_page_event_kinds,
         # #1145 round 2: the ENDING, not only the output. Two clauses are about who authored
         # the shipped bytes -- a judge refusal recorded on a body the judge never saw, and
         # native glyph damage on a page a model reading replaced -- and neither can be
@@ -7864,11 +8117,25 @@ def _select_and_finalize_page(
         except Exception:  # pragma: no cover - a read-only stand-in in tests
             pass
 
+    # #1183: the pass trace, from the FINAL bytes and verdict. A terminal page restored from a
+    # sidecar that carries a trace replays it unchanged; one whose sidecar predates the trace
+    # states every check NOT_RUN. Only a page this run read computes its checks.
+    checks = build_pass_trace(
+        output,
+        p,
+        verdict,
+        event_kinds=_page_event_kinds,
+        providers_available=bool(getattr(state, "agentic_ladder", None)),
+        equation_lane_enabled=bool(getattr(state, "equation_lane_enabled", False)),
+        replay=_replay,
+        resumed_without_trace=_replay is None and getattr(p, "published_verdict", None) is not None,
+    )
     return _FinalizedPageRecord(
         output=output,
         disposition=disposition,
         selection_provenance=provenance,
         verdict=verdict,
+        checks=checks,
     )
 
 

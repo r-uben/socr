@@ -554,6 +554,7 @@ def _run(tmp_path: Path, monkeypatch, tag: str, *, accept: bool, route_live: boo
     events = json.loads(logs[0].read_text())["events"] if logs else []
     return {
         "status": result.status,
+        "error": result.error or "",
         "side": side,
         "text": text,
         "kinds": sorted({e.get("kind") for e in events if e.get("page_num") == 1}),
@@ -624,12 +625,17 @@ def test_the_flag_the_retention_and_the_mark_appear_only_with_the_route(
     # does, so only the accepted arm discriminates and only it is asserted both ways.
     from socr.core.result import DocumentStatus
 
-    assert live["status"] is not DocumentStatus.SUCCESS
+    assert live["status"] is DocumentStatus.AUDIT_FAILED
+    # #1244 C1: main's own page is an unchecked model reading (WARNING, ``text_layer_numbers``
+    # UNKNOWN), so its document is AUDIT_FAILED too and the status cannot discriminate the arms.
+    # The difference is the retained-layer event pinned above, which only the flag adds, and on
+    # the accepted arm the reason text: main is named by the generic C1 note, the flagged run by
+    # its bucket (no generic note).
+    assert main["status"] is DocumentStatus.AUDIT_FAILED
     if accept:
-        assert main["status"] is DocumentStatus.SUCCESS, (
-            "main did not report SUCCESS over an unflagged accepted reading, so the "
-            "document-status pin shows nothing"
-        )
+        assert "did not finish with status success" in main["error"]
+        assert "did not finish with status success" not in live["error"]
+        assert live["error"] != main["error"], "the reason text does not separate the arms"
 
 
 # ---------------------------------------------------------------------------
@@ -1117,7 +1123,7 @@ def test_a_witness_that_contradicts_the_model_withholds_the_table(
     assert all(c not in live["text"] for c in _MODEL_ONLY_CELLS)
     assert "unverifiable table — see image" in live["text"]
     # The cause is the witness's own finding, not a missing install.
-    assert live["failure_mode"] == "hallucination"
+    assert live["failure_mode"] == "witness_disagrees"
     assert "| Reserves |" in (live["side"].get("withheld_table_text") or "")
 
 
@@ -1176,7 +1182,7 @@ def test_a_transient_witness_error_keeps_the_witnesss_own_cause(
             "nothing refuted this table, so the cause is the reader that never ran"
         )
     else:
-        assert live["failure_mode"] == "hallucination", (
+        assert live["failure_mode"] == "witness_disagrees", (
             "the cause was overwritten with a missing install, although a witness read "
             "the page and refused named cells"
         )
@@ -1802,7 +1808,7 @@ def test_a_corroborated_table_is_not_recorded_as_a_fabrication(tmp_path: Path, m
     assert corroborated["ships_table"] is False and contradicted["ships_table"] is False, (
         "fixture premise: both arms withhold"
     )
-    assert contradicted["failure_mode"] == FailureMode.HALLUCINATION.value, contradicted[
+    assert contradicted["failure_mode"] == FailureMode.WITNESS_DISAGREES.value, contradicted[
         "failure_mode"
     ]
     assert corroborated["failure_mode"] != contradicted["failure_mode"], (
@@ -1833,7 +1839,7 @@ def test_a_corroborated_table_is_not_recorded_as_a_fabrication(tmp_path: Path, m
     assert _cache_modes("p1-agree") == {FailureMode.TABLE_WITHHELD_UNCONFIRMED.value}, (
         f"the replay cache accuses the model: {_cache_modes('p1-agree')}"
     )
-    assert _cache_modes("p1-contra") == {FailureMode.HALLUCINATION.value}, (
+    assert _cache_modes("p1-contra") == {FailureMode.WITNESS_DISAGREES.value}, (
         f"the contradicted arm lost its honest cause: {_cache_modes('p1-contra')}"
     )
 

@@ -30,6 +30,9 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from socr.core.page_files import page_sidecar_paths
+from socr.core.verdict import PageVerdict, write_reconciled_trace
+
 LOG_NAME = "refinalized_boilerplate.json"
 
 
@@ -132,7 +135,7 @@ def refinalize_document(doc_dir: Path, *, apply: bool = False) -> list[PageChang
     changes: list[PageChange] = []
     strip_writes: list[tuple[Path, Path, dict, str]] = []
     reocr_writes: list[tuple[Path, dict]] = []
-    for path in sorted(pages_dir.glob("[0-9]*.json")):
+    for path in page_sidecar_paths(pages_dir, "[0-9]*.json"):
         sidecar = _read_json(path)
         engine = (sidecar.get("winning_output") or {}).get("engine") or ""
         if engine not in model_reading_engines():
@@ -158,12 +161,22 @@ def refinalize_document(doc_dir: Path, *, apply: bool = False) -> list[PageChang
             winning = dict(new_sidecar.get("winning_output") or {})
             winning["text"] = new_text
             new_sidecar["winning_output"] = winning
+            # #1183: the preamble strip changed the shipped text and ran none of the checks, so
+            # every kept PASS is NOT_RUN on the new text, and a malformed trace is dropped. The
+            # verdict is not rewritten here, so it is read as it stands.
+            write_reconciled_trace(
+                new_sidecar,
+                sidecar.get("checks"),
+                PageVerdict.from_dict(sidecar.get("verdict") or {}),
+                text=new_text,
+            )
             strip_writes.append((fragment_path, path, new_sidecar, new_text))
         else:
             new_sidecar = dict(sidecar)
             winning = dict(new_sidecar.get("winning_output") or {})
             winning["audit_passed"] = False
             new_sidecar["winning_output"] = winning
+            new_sidecar["audit_passed"] = False
             new_sidecar["judge_rejected"] = True
             reocr_writes.append((path, new_sidecar))
     if not apply:

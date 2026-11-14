@@ -36,6 +36,10 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from socr.core.page_files import page_sidecar_paths
+from socr.core.pass_trace import trace_to_dicts
+from socr.core.verdict import published_audit_passed
+
 #: The floors this tool may replace. Both are reachable only on a POSITIVE prior-OCR
 #: finding, so the recorded ending is itself the evidence the page qualifies.
 _FLOOR_REASONS = ("prior_ocr_layer_unread", "invisible_scan_unread")
@@ -249,9 +253,9 @@ def _with_readings_judged(
     floor pages), and exactly one reading may match -- a resumed or retried document holds
     several, and another reading of the same page standing in for this one could judge a
     table reading as prose."""
-    from socr.pipeline.orchestrator import ATTEMPT_SUMMARY_REASON_MAX_CHARS
     from socr.core.manifest import reading_holds_a_table
     from socr.core.result import PageOutput
+    from socr.pipeline.orchestrator import ATTEMPT_SUMMARY_REASON_MAX_CHARS
 
     rows = sidecar.get("attempts_summary") or []
     if _judged(sidecar):
@@ -349,11 +353,21 @@ def _updated_sidecar(sidecar: dict, record) -> dict:
     out["disposition"] = record.disposition.to_dict()
     out["status"] = winning.get("status", "missing")
     out["failure_mode"] = winning.get("failure_mode", "none")
-    out["audit_passed"] = winning.get("audit_passed", False)
+    out["audit_passed"] = published_audit_passed(
+        out["status"], winning.get("audit_passed", False), record.verdict
+    )
     out["engine"] = winning.get("engine", "")
     out["provider"] = winning.get("provider_id", "")
     if record.verdict is not None:
         out["verdict"] = record.verdict.to_dict()
+    # #1183: a page this tool rewrote ships new text, and the finalize seam that produced the
+    # record also states its checks on that text (a failure marker's trace would put
+    # ``FAILED_MARKER_REASON`` on recovered prose). The record's own trace is the page's trace;
+    # a record without one drops the old list rather than keeping entries about the old text.
+    if record.checks is not None:
+        out["checks"] = trace_to_dicts(record.checks)
+    else:
+        out.pop("checks", None)
     out["winning_output"] = winning
     # The table gate's answer, as a fresh run persists it: the masked ending is reached
     # only when the gate said "no table" (Argon, round 2 re-review).
@@ -476,7 +490,7 @@ def refinalize_document(
     if len(md_paths) != 1:
         # A document whose every page was floored has no ``.md`` at all; writing one is
         # the assembler's job, not this tool's. Left as it is, and counted.
-        for sidecar_path in pages_dir.glob("*.json"):
+        for sidecar_path in page_sidecar_paths(pages_dir):
             if is_floor_page(_read_json(sidecar_path)):
                 skipped["document has no .md (every page floored)"] += 1
         return []
@@ -498,7 +512,7 @@ def refinalize_document(
     changes: list[PageChange] = []
     fragments: list[tuple[Path, str]] = []
     sidecars: list[tuple[Path, dict]] = []
-    for sidecar_path in sorted(pages_dir.glob("*.json")):
+    for sidecar_path in page_sidecar_paths(pages_dir):
         sidecar = _read_json(sidecar_path)
         if not is_floor_page(sidecar):
             continue

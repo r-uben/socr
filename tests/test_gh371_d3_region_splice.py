@@ -1280,7 +1280,7 @@ class TestTask5_ScannedPageProsePreservation:
         winner = _winning_page_output(state, 1, None)
         assert winner.status == PageStatus.ERROR
         assert winner.audit_passed is False
-        assert winner.failure_mode == FailureMode.HALLUCINATION
+        assert winner.failure_mode == FailureMode.WITNESS_DISAGREES
 
         # Prose survives
         assert "Report Header" in winner.text

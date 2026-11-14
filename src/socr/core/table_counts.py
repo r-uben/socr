@@ -30,6 +30,8 @@ same unit the withheld-table analysis used.
 
 from __future__ import annotations
 
+from socr.core.page_files import page_sidecar_paths
+
 import json
 import re
 from collections.abc import Iterable
@@ -200,7 +202,7 @@ def count_from_sidecars(doc_dir: Path) -> TableCounts | None:
     ``None`` and the other two counts stay known.
     """
     pages_dir = Path(doc_dir) / "pages"
-    sidecars = sorted(pages_dir.glob("*.json")) if pages_dir.is_dir() else []
+    sidecars = page_sidecar_paths(pages_dir) if pages_dir.is_dir() else []
     if not sidecars:
         return None
     # The document's recorded page set. Reprocessing does not delete sidecars of pages

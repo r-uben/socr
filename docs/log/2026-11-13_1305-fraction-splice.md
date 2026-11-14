@@ -148,3 +148,88 @@ resume of a fraction-only page).
 
 Round 3 (cubic + astra recheck): Fed lane re-measured on the final rule: 403 leave, 5 stay
 (same 5). References recall on the final rule: 209,519 pages, 1751 old-flagged, 1750 still flagged (same single Spanish "7½ Hz" page leaves).
+
+## Follow-up: a math function after a number is an operand (Kimi recheck of PR #1310)
+
+Blocker: a corrupted `2 = sin x` decodes as `2 ¼ sin x`. A number on the left plus a plain
+word on the right (`sin`) took the numeric-LHS prose shortcut (`1 ¼ percent`), so the damaged
+'=' shipped as '¼'.
+
+Fix: in the numeric-LHS branch of `_is_printed_fraction`, a right-hand side that starts a math
+operand is an operator first (`_is_math_operand`): a name in `_MATH_FUNCTIONS` (sin cos tan log
+ln exp max min lim det), a one-letter Latin variable, or a vowel-free compact variable followed
+by an operator token or a number (`2 ¼ xy + 1`). Greek and bracketed right sides were already
+not plain words, so they were operator before. Unchanged: `1 ¼ percent`, `8 ½%`, `2 ½ million`,
+`2 ½ to 3 percent` (`to` has a vowel), `a ¼ point`. Pinned in `_VERDICTS`: `2 ¼ sin x`,
+`3 ¼ log y`, `1 ¼ x + y`, `2 ¼ xy + 1` operator; the existing fraction rows stay.
+
+Residual: a vowel-free word before a number or operator (`2 ½ by 4`) reads as operator. A false
+operator costs a crop, no content.
+
+Guard seen to fail (mutant copy of src and tests outside the repo, `socr.__file__` inside the
+copy, anchor count 1): the `_is_math_operand` check removed -> 3 failed (`2 ¼ sin x`,
+`3 ¼ log y`, `2 ¼ xy + 1`). `1 ¼ x + y` still passes in the mutant: a one-letter right side
+was already not a plain word, so it is pinned as a regression row, not a mutant killer.
+
+Re-measured on the final rule: Fed lane 408 pages (81 docs): 403 leave, 5 stay (same 5, the
+2020-07-29 transcript-presentation-materials p23, p26-p29).
+References recall: 209,519 pages, 1751 old-flagged, 1750 still flagged (same single Spanish "7½ Hz" page leaves).
+
+## Follow-up: cubic review of PR #1322 (Unicode operators, `min`, `by`)
+
+- P1: `_OPERATOR_CHARS` now also holds the Unicode relations and signs: `≤ ≥ ≠ ≈ ≡ ≅ ∼ ∝ ∈ ∉ ⊂ ⊃ ⊆ ⊇ ∪ ∩ ∧ ∨`, `÷ ∗ ⋅ ∘`
+  (plus the existing `+ - − * / ^ = < > × · ±`). No existing set in the module covered
+  operators, so this one was extended. `2 ¼ xy ≤ 1` is operator.
+- P2: a function name after a number is an operand only with a math-shaped continuation
+  (`_is_math_continuation`): a bracket, digit or operator glued to the name (`min(x, y)`), or
+  a next token that is a one-letter or vowel-free variable, a number, an operator, a bracket
+  or non-Latin (Greek). A name at line end or before prose stays a printed fraction:
+  `2 ½ min`, `2 ½ min.`, `3 ¼ min later`, `2 ½ max of the two`. Operator: `2 ¼ min x`,
+  `2 ¼ min(x, y)`, `2 ¼ max 3`, `2 ¼ log α`.
+- P3: `_PROSE_FUNCTION_WORDS` (by to of or in on at per and with) never count as a
+  vowel-free compact variable: `2 ½ by 4`, `2 ½ by 4 inches`, `3 ¼ per 4` stay printed.
+  Cost: `2 ¼ xy by 4` now also reads as printed (an `=` damaged before `by` is not caught).
+- Bare `2 ¼ sin` at the end of a line is now prose (before it was operator). A line never
+  ends on the `=` of a mojibake equation in the corpora measured, and the rows above pin it.
+
+Mutants (copies of src and tests outside the repo, `socr.__file__` inside the copy, anchor
+count 1):
+
+| guard removed | result |
+|---|---|
+| Unicode operators dropped from `_OPERATOR_CHARS` | 3 failed (`xy ≤ 1`, `xy ≥ 1`, `xy ≠ z`) |
+| `_is_math_continuation` replaced by `True` | 4 failed (`2 ½ min`, `2 ½ min.`, `3 ¼ min later`, `2 ½ max of the two`) |
+| prose function words allowed as vowel-free variable | 2 failed (`2 ½ by 4`, `2 ½ by 4 inches`) |
+
+Measured (cached data, no OCR). Fed run `51270eb5_words`, all four shard dirs, 156 docs, text
+layer re-read from `central_banks/fed`: this re-measure scored every page of every doc with the
+old trigger (468 pages), not only the 408 event pages of the earlier table, and the 468 are
+a superset only if the doc-to-PDF name mapping matches (hash-suffixed docs may map to a
+different file). Result: 438 leave, 30 stay, identical to the pre-change code (HEAD) on the
+same population, so this change moves no page; the 2020-07-29 p23, p26-p29 pages are among
+the stays. The 403/5 figure itself was not re-derived on its exact 408-page set (the
+per-page event list is not recoverable from the page JSONs); the claim is "unchanged versus
+HEAD on a superset".
+
+References recall on the final rule: 209,519 pages, 1751 old-flagged, 1750 still flagged (same
+single page leaves: the Spanish "EL ARCO IRIS INVISIBLE" p68, "7½ Hz").
+
+## Follow-up: cubic P1 on PR #1322 (`2 ½% a year`)
+
+- `2 ½% a year` read as an operator: the one-letter article `a` after the `%` counted as a
+  variable operand (`_is_math_operand`), which ran before the percent test. Fix: a fraction
+  whose left neighbour is a number and which is followed by `%`, `percent` or `pct`
+  (`_PERCENT_WORDS`) is a printed rate whatever follows (article, word, number, punctuation).
+  The check runs first, so `2 ½% a year`, `2 ½% by 2027`, `2½% in 2026`, `8 ½%, then`,
+  `2 ½ percent a year`, `2 ½ pct 2027` are all printed. Pinned in `_VERDICTS`.
+- Mutant (copies of src and tests outside the repo, `socr.__file__` inside the copy, anchor
+  count 1, the new early return disabled): 2 failed (`2 ½% a year`, `2 ½ pct 2027`). The
+  other four rows already passed before the guard through other branches; they pin the
+  behaviour, they do not discriminate this guard.
+- Fed lane on the original event-page set (408 pages, 81 docs, page JSONs of
+  `51270eb5_words`, text layer re-read from `inputs/fed/pdfs`): 403 leave, 5 stay, the same
+  5 (2020-07-29 transcript-presentation-materials p23, p26-p29). Unchanged.
+- All-page trigger count, text layer only (PyMuPDF, 6329 Fed PDFs under
+  `Databases/central_banks/fed`, 17427 pages with any candidate glyph, trigger = glyph
+  count >= `MIN_MATH_CORRUPTION_GLYPHS`): this branch 157 pages, main (b2d6454e) 157 pages;
+  flagged now and not by main: none; flagged by main and not now: none.

@@ -9,6 +9,7 @@ from unittest.mock import patch
 import fitz
 import pytest
 from ocr_output_contract import assemble_pages
+from verdict_marks_helper import strip_verdict_marks
 
 from socr.core.born_digital import DocumentAssessment, PageAssessment
 from socr.core.cache import BlobStore
@@ -204,7 +205,10 @@ def test_missing_page_text_cannot_crash_the_final_guard() -> None:
 
     winner = _winning_page_output(state, 1)
 
-    assert winner.text == ""
+    # #1251: an empty model reading has no words to compare, so nothing independent confirms it
+    # and it carries the page_judge mark (EXPECTATION CHANGED: the page has no layer evidence by
+    # design). The body is still empty, which is what this test pins.
+    assert strip_verdict_marks(winner.text, 1).strip() == ""
 
 
 def test_whole_document_cli_output_uses_the_same_final_guard() -> None:

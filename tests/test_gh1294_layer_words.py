@@ -446,6 +446,9 @@ def test_refinalize_turns_an_old_run_into_what_a_run_of_this_code_writes(
         # A run made before #1294: no clause and no record.
         m.setattr(verdict, "text_layer_words_clause", lambda output, p: None)
         m.setattr(verdict, "page_word_check_record", lambda output, p: None)
+        # ... nor #1251's page_judge clause, which a run before #1294 did not have either (with
+        # no words check it would fire here on the judge-accepted reading: no layer evidence).
+        m.setattr(verdict, "_judge_only_clauses", lambda output, p, event_kinds: ())
         _run(old, pdf, monkeypatch, lose_label=True, pages_read=[], ladder=True)
     assert "text_layer_words" not in _first_page(old)[0], "fixture premise: an old run"
     assert _artifacts(old) != _artifacts(fresh), "fixture premise: the runs differ"

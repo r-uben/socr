@@ -59,7 +59,13 @@ def _sidecar(output: PageOutput, verdict, **extra) -> dict:
 
 def _old_run(output: PageOutput, p) -> tuple[PageOutput, object]:
     """What a run made before #1185 published for this page."""
-    with mock.patch.object(verdict_module, "text_layer_numbers_clause", lambda o, p: None):
+    # #1251: a run before #1185 is a run before #1251 too, whose page_judge clause (a later
+    # check) would read the absent numbers evidence as "no evidence". Only the later clause is
+    # removed; the words and numbers checks themselves are the real ones.
+    with (
+        mock.patch.object(verdict_module, "text_layer_numbers_clause", lambda o, p: None),
+        mock.patch.object(verdict_module, "_judge_only_clauses", lambda o, p, kinds: ()),
+    ):
         return apply_verdict_marks(output, p, output.page_num)
 
 
@@ -75,11 +81,28 @@ def test_a_page_only_the_current_analysis_calls_earlier_ocr_is_marked_not_left_c
     old_out, old_v = _old_run(_success(), SimpleNamespace(prior_ocr_layer_suspect=False))
     assert old_out.status is PageStatus.SUCCESS and not old_v.clauses, "fixture premise"
 
+    # #1251: a page the RUN flagged carries the run's own mark (its prior-OCR layer is not
+    # evidence, so a run of this code states it); an old verdict with no clause is not that page.
+    run_out, run_v = apply_verdict_marks(
+        _success(), SimpleNamespace(prior_ocr_layer_suspect=True), 1
+    )
+    assert run_v.clauses, "fixture premise: the run that flagged the page marked it"
     unflagged = tool.refinalize_page(_sidecar(old_out, old_v), _analysis(prior_ocr=True))
     flagged = tool.refinalize_page(
-        _sidecar(old_out, old_v, prior_ocr_layer_suspect=True), _analysis(prior_ocr=True)
+        _sidecar(run_out, run_v, prior_ocr_layer_suspect=True), _analysis(prior_ocr=True)
     )
     assert flagged is None
+    # The OLD input (flagged, empty verdict) is no longer left alone: under #1251 that page, whose
+    # prior-OCR layer is no evidence, is marked by this tool like any other empty-verdict page.
+    stale = tool.refinalize_page(
+        _sidecar(old_out, old_v, prior_ocr_layer_suspect=True), _analysis(prior_ocr=True)
+    )
+    assert stale is not None
+    stale_out, stale_verdict = stale
+    assert [(c.check, c.result) for c in stale_verdict.clauses] == [
+        (verdict_module.Check.PAGE_JUDGE, verdict_module.CheckResult.UNKNOWN)
+    ]
+    assert stale_out.status is PageStatus.WARNING
     out, verdict = unflagged
     [clause] = verdict.clauses
     assert (clause.check, clause.result) == (
@@ -350,3 +373,70 @@ def test_the_table_counts_follow_the_demoted_page(tmp_path: Path, monkeypatch) -
     assert change.result == "FAIL"
     after = json.loads((doc / "metadata.json").read_text())["tables"]
     assert after["verified_text"] == 0 and after == count_from_sidecars(doc).to_dict()
+
+
+def test_a_rerun_rederives_the_published_audit_passed_of_a_page_it_already_marked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#1244 C1: a page that already carries the clause is not re-finalized, but its published
+    ``audit_passed`` is still derived (status WARNING -> false). Difference on one input: the
+    sidecar as an earlier pass left it (stale ``true``) versus the same sidecar left alone."""
+    old_out, old_v = _old_run(_success(), SimpleNamespace())
+    _with_analysis(monkeypatch, tmp_path)
+    doc = _finished_doc(tmp_path, old_out, old_v, audit=True)
+    tool.refinalize_document(doc, tmp_path)
+    path = doc / "pages" / "00001.json"
+    marked = json.loads(path.read_text())
+    assert marked["status"] == "warning" and marked["audit_passed"] is False, "fixture premise"
+    nested = marked["winning_output"]["audit_passed"]
+
+    path.write_text(json.dumps({**marked, "audit_passed": True}))
+    tool.refinalize_document(doc, tmp_path)
+    repaired = json.loads(path.read_text())
+    assert repaired["audit_passed"] is False
+    assert repaired["winning_output"]["audit_passed"] == nested, "the internal flag is untouched"
+    assert repaired == marked
+
+
+def test_a_page_the_tool_demotes_to_a_false_label_takes_the_document_off_completed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#1244 C1 completion rule: a page marked UNKNOWN (WARNING, published false, no FAIL
+    clause) must also move the document, here and in the root index, off ``completed``; the
+    disagreement path does not, because there is no FAIL. The repaired sidecar's own label is
+    checked against the first pass's, and a rerun adds nothing."""
+    from socr.core.verdict import pages_not_success_note
+
+    old_out, old_v = _old_run(_success(), SimpleNamespace(prior_ocr_layer_suspect=False))
+    from socr.core.born_digital import DocumentAssessment
+
+    assessment = DocumentAssessment(path=tmp_path / "doc.pdf", pages=[_analysis(prior_ocr=True)])
+    monkeypatch.setattr(tool, "_analyse_pdf", lambda pdf_dir, meta: (assessment, None))
+    doc = _finished_doc(tmp_path, old_out, old_v, audit=True)
+    root_path = tmp_path / "metadata.json"
+    entry = {"status": "completed", "key": "dir/doc.pdf"}
+    root_path.write_text(json.dumps({"files": {"dir/doc.pdf": entry}}))
+
+    tool.refinalize_document(doc, tmp_path)
+    path = doc / "pages" / "00001.json"
+    marked = json.loads(path.read_text())
+    assert marked["status"] == "warning" and marked["audit_passed"] is False, "fixture premise"
+    assert "FAIL" not in [c["result"] for c in marked["verdict"]["clauses"]], "no FAIL clause"
+
+    # An earlier pass left the page marked but the document recorded completed.
+    (doc / "metadata.json").write_text(
+        json.dumps({"key": "dir/doc.pdf", "pages": 1, "status": "completed"})
+    )
+    root_path.write_text(json.dumps({"files": {"dir/doc.pdf": entry}}))
+    path.write_text(json.dumps({**marked, "audit_passed": True}))
+    tool.refinalize_document(doc, tmp_path)
+
+    meta = json.loads((doc / "metadata.json").read_text())
+    root = json.loads(root_path.read_text())["files"]["dir/doc.pdf"]
+    assert meta["status"] == root["status"] == "partial"
+    assert meta["error"] == root["error"] == pages_not_success_note([1])
+    assert json.loads(path.read_text())["audit_passed"] is False
+
+    # A rerun adds nothing.
+    tool.refinalize_document(doc, tmp_path)
+    assert json.loads((doc / "metadata.json").read_text()) == meta

@@ -296,7 +296,9 @@ def test_every_lane_event_is_replayed_on_resume() -> None:
 # ---------------------------------------------------------------------------
 
 _CAPTION = "Figure 7: Bias and MSE under a CEE-type VAR"
-_PROSE = "The estimated effect of the policy change on output is reported above."
+# #1244 C1: carries a number, so a model reading of it is CHECKED against the PDF's own layer
+# (a reading that ships no number is UNKNOWN, hence WARNING, hence a non-completed document).
+_PROSE = "The estimated effect of the policy change on output is reported above, 4.2."
 
 
 def _pdf_with_a_figure(path: Path, *, draw_figure: bool) -> Path:
@@ -1131,6 +1133,15 @@ def test_the_mark_says_what_actually_happened_to_this_figure() -> None:
     assert "ships a crop" in rendered and "cover every figure" in rendered
 
 
+def _page_words_entries(out_dir: Path) -> list[dict]:
+    """The page-scope ``text_layer_words`` entries of the run's one page sidecar's trace."""
+    import json
+
+    (sidecar,) = list(Path(out_dir).rglob("pages/00001.json"))
+    checks = json.loads(sidecar.read_text(encoding="utf-8")).get("checks") or []
+    return [e for e in checks if e["check"] == "text_layer_words" and e["scope"] == "page"]
+
+
 def test_the_document_status_turns_on_this_lane_alone(tmp_path: Path, monkeypatch) -> None:
     """Argon P0-2, pinned as the DIFFERENCE this lane makes.
 
@@ -1139,10 +1150,20 @@ def test_the_document_status_turns_on_this_lane_alone(tmp_path: Path, monkeypatc
     changing only whether the PDF holds a figure the page names, and requires the status to
     move with it.
     """
+    # #1251: both readings are judge-approved, and a judge's approval alone is not a check. Their
+    # independent check is the page's own layer, and it is the REAL words check (nothing here
+    # stubs it): each reading carries every word the layer prints (the prose six times, the
+    # caption's words once), so the check runs and passes in BOTH arms and cannot be what differs.
+    # The control reading carries the caption's words inside a sentence, so it names no figure.
+    layer_prose = "\n\n".join([_PROSE] * 6)
+    monkeypatch.setattr(_Engine, "BODY", f"{_CAPTION}\n\n{layer_prose}")
     _s1, _t1, with_fig, _o1 = _process(tmp_path, monkeypatch, "dirty", draw_figure=False)
-    clean_body = _PROSE  # names no figure at all, so the lane never fires
+    clean_body = f"As shown in {_CAPTION}\n\n{layer_prose}"  # no caption line: the lane never fires
     monkeypatch.setattr(_Engine, "BODY", clean_body)
     _s2, _t2, no_fig, _o2 = _process(tmp_path, monkeypatch, "clean", draw_figure=False)
+    for out_dir in (_o1, _o2):
+        words = _page_words_entries(out_dir)
+        assert [e["result"] for e in words] == ["PASS"], words
     # The root index uses its own vocabulary for status, so the pin is the DIFFERENCE between
     # two runs of the same document that differ only in whether its page names a figure.
     assert not no_fig.get("error"), "the control document, naming no figure, is clean"

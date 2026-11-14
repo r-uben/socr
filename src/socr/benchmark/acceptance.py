@@ -606,6 +606,8 @@ def _record_verdict(page: Page, v: Verdict, rep: Report) -> None:
 
 
 CANONICAL_PAGE_FILE_RE = re.compile(r"(\d{5})\.(json|md)")
+#: #1251: ``NNNNN.judge-calls``, the page judge's calls (``core.page_files``): not a page file.
+JUDGE_CALLS_FILE_RE = re.compile(r"\d{5}\.judge-calls(\.unrestored)?")
 
 
 @dataclass
@@ -631,6 +633,9 @@ def _terminal_pages(doc_dir: Path) -> DocPages:
         m = CANONICAL_PAGE_FILE_RE.fullmatch(f.name)
         if m:
             nums.add(int(m.group(1)))
+        elif JUDGE_CALLS_FILE_RE.fullmatch(f.name):
+            # #1251: the judge's replies for a page. A record, never read as a page.
+            continue
         else:
             out.noncanonical.append(f.name)
     for num in sorted(nums):
