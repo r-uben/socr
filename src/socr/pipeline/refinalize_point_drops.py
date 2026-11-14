@@ -224,6 +224,7 @@ def repair_page(
                 idx,
                 effective_outcome(result.outcome.value, bool(rows_data)),
                 row_evidence_dicts(result),
+                result=result,
             )
             if "withheld_markdown" in records[table_id]:
                 payload["withheld_markdown"] = records[table_id]["withheld_markdown"]

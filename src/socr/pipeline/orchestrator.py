@@ -9894,9 +9894,11 @@ class UnifiedPipeline:
             block_lines = _out_lines[_b.start : _b.end + 1]
             return reps if self._repairs_ship(reps, out, block_lines) else None
 
-        def _record(table_index: int, outcome: str, rows: list[dict], error: str = "") -> None:
+        def _record(
+            table_index: int, outcome: str, rows: list[dict], error: str = "", result=None
+        ) -> None:
             table_id = f"p{page_num}-t{table_index}"
-            payload = table_payload(page_num, table_index, outcome, rows, error)
+            payload = table_payload(page_num, table_index, outcome, rows, error, result)
             counts = payload["counts"]
             _repairs = _valid_repairs(table_index)
             if _repairs and outcome != TableOutcome.CONTRADICTED.value:
@@ -9981,7 +9983,7 @@ class UnifiedPipeline:
                 rows = row_evidence_dicts(result)
                 # #1282: a table with a repaired row is never recorded BOUND (no mark lifts)
                 outcome = effective_outcome(result.outcome.value, bool(_valid_repairs(idx)))
-                _record(idx, outcome, rows)
+                _record(idx, outcome, rows, result=result)
                 if outcome == TableOutcome.CONTRADICTED.value:
                     worst = TableOutcome.CONTRADICTED.value
                 elif (
