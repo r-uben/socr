@@ -156,6 +156,8 @@ def _page_state(sidecar: dict, pa):
             setattr(p, name, getattr(pa, name, "") or "")
         else:
             setattr(p, name, getattr(pa, name))
+    # #1270: tolerant of a stand-in analysis that predates the field; absent is "not shown".
+    p.layer_refused_for_shape_alone = bool(getattr(pa, "layer_refused_for_shape_alone", False))
     p.prior_ocr_layer_suspect = bool(
         sidecar.get("prior_ocr_layer_suspect")
     ) or _analysis_finds_prior_ocr(pa)

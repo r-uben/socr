@@ -1111,6 +1111,12 @@ NO_NUMBER_LAYER_HAS_SOME_REASON = (
     "reading drops are not checked: #1218)"
 )
 DAMAGED_LAYER_PREFIX = "this page's text layer is damaged, and it does not confirm: "
+#: #1270: a dispute with a layer the detector refused for its SHAPE alone (not damage). The
+#: layer is the page's own text and shown clean, but its shape is the kind that splits numbers.
+SHAPE_REFUSED_LAYER_PREFIX = (
+    "this page's text layer was refused as a scan for its shape (not found damaged), and the "
+    "reading disagrees with it, which may be the layer's fault: "
+)
 #: The reading agrees with a layer socr's page analysis refused or found damaged. Not a
 #: CHECK: the owner's ruling asks for the page's OWN born-digital text, and a refused layer
 #: may be an earlier OCR run's the analysis could not name (Argon, PR #1219 review: #961's
@@ -1146,6 +1152,28 @@ def _layer_is_damaged(p: Any) -> bool:
     # digit, a garbage ratio) or an earlier OCR run's; it is compared so a dispute is
     # NAMED, and the refusal is the damage finding either way.
     return not _flag(p, "is_born_digital") or any(_flag(p, f) for f in _DAMAGED_LAYER_FLAGS)
+
+
+def _layer_is_shape_refused(p: Any) -> bool:
+    """#1270 class 3: refused as a scan for a shape reason ONLY, shown clean, and carrying none
+    of the digit-damage findings.
+
+    ``layer_refused_for_shape_alone`` is set by the detector only after every check its early
+    return skipped has run and passed (:meth:`BornDigitalDetector._shape_refusal_layer_is_clean`:
+    #961 invisible text, digit and encoding corruption, minus-as-digit, control bytes, prior OCR).
+    ``_DAMAGED_LAYER_FLAGS`` are read again here, on the page state, so a flag set later (the
+    document-level symbol-font repair) still wins.
+
+    Scope: only the NUMBERS clause asks. ``_layer_is_damaged`` is unchanged on purpose, because
+    the drops and words checks also read it and a shape-refused layer is not shown to be the
+    right reference for COUNTING omissions; widening those would add marks this class does not
+    claim to remove.
+    """
+    return (
+        not _flag(p, "is_born_digital")
+        and _flag(p, "layer_refused_for_shape_alone")
+        and not any(_flag(p, f) for f in _DAMAGED_LAYER_FLAGS)
+    )
 
 
 #: How socr's OWN quoted notes open, exactly: every quote opener socr emits (marks.py,
@@ -1291,13 +1319,24 @@ def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | Non
             else NO_NUMBER_REASON
         )
         return VerdictClause(Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, SCOPE_PAGE, reason)
-    if _layer_is_damaged(p):
+    if _layer_is_damaged(p) and not _layer_is_shape_refused(p):
         reason = (
             DAMAGED_LAYER_PREFIX + describe_disputes(record)
             if record.disputed
             else DAMAGED_LAYER_AGREES_REASON
         )
         return VerdictClause(Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN, SCOPE_PAGE, reason)
+    if _layer_is_shape_refused(p) and record.disputed:
+        # #1270: AGREEMENT with a shape-refused, shown-clean layer is a check; a DISPUTE stays
+        # UNKNOWN (named), because the shape that made the detector refuse the layer (dot
+        # leaders, spaced digits) is also the shape that splits or fuses a number, so the
+        # layer may be the one that is wrong. Only the agreement side is claimed here.
+        return VerdictClause(
+            Check.TEXT_LAYER_NUMBERS,
+            CheckResult.UNKNOWN,
+            SCOPE_PAGE,
+            SHAPE_REFUSED_LAYER_PREFIX + describe_disputes(record),
+        )
     if record.disputed and any(_flag(p, f) for f in _COSMETIC_LAYER_FLAGS):
         return VerdictClause(
             Check.TEXT_LAYER_NUMBERS,

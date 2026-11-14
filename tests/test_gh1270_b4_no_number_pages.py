@@ -141,10 +141,12 @@ def _blank_pdf(path: Path) -> Path:
     return path
 
 
-def _run(tmp_path: Path, *, check_coverage: bool, providers: list):
+def _run(tmp_path: Path, *, check_coverage: bool, providers: list, resumed: bool = False):
     from socr.core.manifest import finalized_page_record
 
-    pdf = _blank_pdf(tmp_path / "doc.pdf")
+    pdf = tmp_path / "doc.pdf"
+    if not pdf.exists():
+        _blank_pdf(pdf)
     pipeline = UnifiedPipeline(
         PipelineConfig(
             primary_engine=EngineType.QWEN,
@@ -163,11 +165,13 @@ def _run(tmp_path: Path, *, check_coverage: bool, providers: list):
     pipeline._scan_root = pdf.parent
     state = DocumentState(handle=DocumentHandle.from_path(pdf))
     ps = state.pages[1]
-    ps.is_born_digital = False
-    ps.own_layer_text = BLANK
-    ps.own_layer_word_reference = BLANK
+    if not resumed:  # a resumed page's layer facts are NOT recomputed: only its sidecar speaks
+        ps.is_born_digital = False
+        ps.own_layer_text = BLANK
+        ps.own_layer_word_reference = BLANK
 
     def _route(page_num, *a, **kw):
+        assert not resumed, "a resumed terminal page must not be re-read"
         out = PageOutput(
             page_num=page_num,
             text=BLANK,
@@ -187,6 +191,7 @@ def _run(tmp_path: Path, *, check_coverage: bool, providers: list):
         )
         stack.enter_context(patch.object(pipeline, "_resolve_judge_model", return_value=""))
         pipeline._phase_agentic(state, tmp_path / "out")
+        pipeline._phase_assemble(state, tmp_path / "out")  # writes the terminal sidecar
     rec = finalized_page_record(state, 1)
     clauses = [(c.check.value, c.result.value) for c in rec.verdict.clauses]
     return rec.output.status, rec.output.text, clauses
@@ -206,3 +211,15 @@ def test_the_shipped_blank_page_differs_only_by_the_clause(tmp_path, providers):
     else:
         # no provider: the page is never read, so the evidence changes nothing
         assert with_evidence == without
+
+
+@pytest.mark.parametrize("providers", [[PROFILE_QWEN_LOCAL], []], ids=["provider", "no-provider"])
+def test_the_cleared_blank_page_stays_cleared_on_resume(tmp_path, providers):
+    """The page is SUCCESS, so run 2 skips it from its terminal sidecar; the restored page has
+    no layer facts and no coverage verdict, and must not gain the clause back."""
+    first = _run(tmp_path, check_coverage=True, providers=providers)
+    if not providers:
+        pytest.skip("no provider: the page is never read, so there is nothing to resume")
+    again = _run(tmp_path, check_coverage=True, providers=providers, resumed=True)
+    assert first[0] is PageStatus.SUCCESS and first[2] == []
+    assert again == first

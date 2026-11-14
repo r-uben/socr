@@ -2759,6 +2759,14 @@ class PageAssessment:
     needs_ocr_enhancement: bool = False  # native layer has a known deficiency
     #: #1267: refused only for excessive spacing, which dense number tables trigger on real layers.
     refused_for_spacing_alone: bool = False
+    #: #1270 class 3: refused as a scan for a SHAPE reason alone (too few characters, excessive
+    #: spacing, an average word length out of range: contents pages with dot leaders and page
+    #: numbers, blank pages) AND every damage check the refusal short-circuited was then run and
+    #: passed -- #961 invisible text over a raster, digit and encoding corruption, a minus read as
+    #: a digit, a control byte before a digit -- and the layer is not an earlier OCR run's. The
+    #: layer is then the page's own text and agreement with it is a check. False is "not shown",
+    #: never "damaged": every default and every other refusal leaves it False.
+    layer_refused_for_shape_alone: bool = False
     has_corrupt_math: bool = False  # font-map mojibake in math (needs region OCR -> LaTeX)
     has_unmapped_math_glyphs: bool = False  # PUA glyphs (weak ToUnicode) -> silent math-glyph loss
     #: #217: the page's symbol font had no ToUnicode map and at least one glyph
@@ -3765,6 +3773,47 @@ class BornDigitalDetector:
             assessment.notes.append(f"rotated text direction {direction}")
         return assessment
 
+    def _shape_refusal_layer_is_clean(
+        self,
+        page: fitz.Page,
+        raw_text: str,
+        prior_ocr: tuple[bool, bool],
+    ) -> bool:
+        """#1270 class 3: after a SHAPE refusal, did every check the refusal skipped pass?
+
+        ``_assess_page_signals`` returns early for a shape reason, before #961's invisible-text
+        scan, the digit and encoding corruption counts, the minus-as-digit and control-byte
+        scans, and the prior-OCR answer a page that reaches the end gets. Treating the
+        refusal itself as proof the layer is fine would re-open PR #1219: an earlier OCR run's
+        layer, or one with an eaten digit, would "confirm" a model reading. So this runs them
+        all, with the thresholds the born-digital path uses, and any doubt (a scan that raised
+        included) answers False.
+
+        The ``native_glyph`` flags a document-level repair pass sets later
+        (``has_unrecovered_symbol_glyphs``) are read by the verdict from the page state, as
+        for every page, and need no repeat here.
+        """
+        try:
+            if prior_ocr[0] or prior_ocr[1]:
+                return False
+            if re.search(r"\(cid:\d+\)", raw_text):
+                return False
+            if self._garbage_ratio(raw_text) > self.MAX_GARBAGE_RATIO:
+                return False
+            if count_digit_corruption(raw_text) >= self.MAX_DIGIT_CORRUPTION_HITS:
+                return False
+            if self._encoding_corruption_ratio(raw_text) > self.MAX_ENCODING_CORRUPTION:
+                return False
+            if self._has_invisible_text_over_raster(page):
+                return False
+            if "2" in raw_text and count_minus_as_digit_hits(page):
+                return False
+            return not count_control_byte_before_digit_hits(raw_text)
+        except Exception:
+            # Fail closed: an unreadable page is "unknown", not "clean".
+            logger.warning("#1270: shape-refusal layer scan failed", exc_info=True)
+            return False
+
     def _assess_page_signals(
         self, page: fitz.Page, page_num: int, direction: tuple[float, float]
     ) -> PageAssessment:
@@ -3852,6 +3901,9 @@ class BornDigitalDetector:
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
+                layer_refused_for_shape_alone=self._shape_refusal_layer_is_clean(
+                    page, raw_text, prior_ocr
+                ),
             )
 
         # Compute text quality signals before the word-count check so that
@@ -4003,6 +4055,9 @@ class BornDigitalDetector:
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
+                layer_refused_for_shape_alone=self._shape_refusal_layer_is_clean(
+                    page, raw_text, prior_ocr
+                ),
                 # The checks below this return would have passed: spacing is the only doubt.
                 refused_for_spacing_alone=(
                     self.MIN_AVG_WORD_LENGTH <= avg_word_len <= self.MAX_AVG_WORD_LENGTH
@@ -4028,6 +4083,9 @@ class BornDigitalDetector:
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
+                layer_refused_for_shape_alone=self._shape_refusal_layer_is_clean(
+                    page, raw_text, prior_ocr
+                ),
             )
 
         if avg_word_len > self.MAX_AVG_WORD_LENGTH:
@@ -4046,6 +4104,9 @@ class BornDigitalDetector:
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
+                layer_refused_for_shape_alone=self._shape_refusal_layer_is_clean(
+                    page, raw_text, prior_ocr
+                ),
             )
 
         # Encoding corruption: a broken font/ToUnicode map yields valid characters
