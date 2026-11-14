@@ -56,6 +56,7 @@ from socr.core.marks import (
     UNACCEPTED_OUTPUT_MARK_RE,
     UNVERIFIED_TABLE_MARK,
     UNVERIFIED_TABLE_MARK_RE,
+    row_binding_held_table_mark,
     row_binding_unverifiable_table_mark,
     Check,
     CheckResult,
@@ -6867,7 +6868,16 @@ def _apply_unverified_table_mark(output: PageOutput, p) -> PageOutput:
             continue
         _k = _md_index.get(start)
         if _k in _row_binding_unverifiable:
-            _mark = row_binding_unverifiable_table_mark(_k + 1)
+            # #1257: a table the check BOUND that is still listed is held by the page, not unsettled
+            _held = any(
+                isinstance(r, dict) and r.get("table_index") == _k and r.get("outcome") == "bound"
+                for r in (getattr(p, "row_binding", None) or {}).values()
+            )
+            _mark = (
+                row_binding_held_table_mark(_k + 1)
+                if _held
+                else row_binding_unverifiable_table_mark(_k + 1)
+            )
         elif _only_listed and _k is not None:
             continue
         else:

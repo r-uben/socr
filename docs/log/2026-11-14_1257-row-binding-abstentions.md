@@ -141,3 +141,68 @@ are defensive.
    about 30.
 4. `socr-refinalize-point-drops` rechecks tables with the new evidence too (it calls
    `check_page_row_binding`); old runs refinalized after this change may lose marks the same way.
+
+## Release rule (2026-11-14, after C2 #1332 and C3 #1338 merged)
+
+Coordinator ruling (`scratch/army/phaseBC/DECISIONS.md`, "B1 HOLD"): B1's evidence still moves a
+table's record from UNVERIFIABLE to BOUND, but the page's row-binding mark goes only when the page has
+independent page-scope evidence on the text that ships. The "Cost" section above is the reason: a table
+bound by exact evidence says its rows sit on the layer's lines, nothing about the rest of the page.
+
+Rule (`verdict.row_binding_release_evidence`, `page_row_binding_release`; applied in
+`_run_row_binding_check`):
+
+* model-read page: `independent_page_evidence(trace, text)` (C3): words check PASS at page scope,
+  numbers PASS or not applicable, no FAIL or UNKNOWN entry, every PASS digest-verified on the text.
+* native page (text = the layer, so the words check is circular): a digest-verified `native_coverage`
+  (ink vs layer, #1050) PASS at page scope and no FAIL or UNKNOWN entry. The words and numbers checks
+  are not consulted. Nothing emits a native_coverage PASS today, so no native page is released. The row
+  check itself never runs on a native engine's output (`layer_can_judge_tables`), so this branch is
+  reached only through the predicate.
+* without evidence: the table keeps its BOUND record (with its `evidence`) and stays in
+  `row_binding_unverifiable_tables`; the page keeps its WARNING and `table_unverified`. The mark is
+  reworded to what is true: `> [table unverified: table N rows bound to the page's text layer; page text
+  not independently confirmed; verify it against the page image before citing]`
+  (`marks.row_binding_held_table_mark`; still matches `UNVERIFIED_TABLE_MARK_RE`). No UNVERIFIABLE audit
+  event is written: the table is bound, so no new durable event kind and nothing for the resume restore
+  test to list. The sidecar's `row_binding_unverifiable_tables` and the record restore as before; the
+  mark is re-derived from them (record BOUND and listed = held wording). `socr-refinalize-point-drops`
+  never lifts a mark, so a bound record it rewrites that stays listed ships the held wording.
+
+Deviation from the ruling's wording: "its own clause scope" is not a new verdict `Check`. A new check
+cascades into the failure-mode chooser, the mark parser and every consumer; the held table is already
+surfaced by page status, failure mode, the table mark and the sidecar list. Owner call if a
+verdict clause is wanted.
+
+### Replay with the rule
+
+`docs/log/2026-11-14_1257-release-replay.py` (run after the replay above). Same 44 pages B1 alone frees;
+for each, the page analysis of its PDF supplies the layer, the cached text (banners and table marks
+removed, the check ran before them) the shipped text, and the trace is recomputed (the run predates
+C2). Provider state: with providers, as the run had.
+
+| pages | freed by B1 alone | freed with the rule | kept marked |
+| --- | --- | --- | --- |
+| all | 44 | 34 | 10 |
+| gold-clean (this exact markdown) | 10 | 10 | 0 |
+| gold-defective (12) | 12 | **9** | 3 |
+| no gold verdict (22) | 22 | 15 | 7 |
+
+Gold-defective freed is 9, not 0. The rule keeps 3 of the 12; the other 9 pass the words and numbers
+checks against their own layer, so the evidence the ruling names cannot see their defect (`lost_text`,
+`lost_content`; two are on the exact markdown: tealbook-partb 2012-10-24 p55 and 2011-09-21 p51). The
+words check compares the layer's words with the page; a defect that is not a missing layer word (the
+auditors' `lost_text` here) passes it. The rule is implemented as ruled and does not meet its own target;
+PR #1326 stays draft.
+
+### Tests and mutants
+
+`tests/test_gh1257_release_rule.py`: pipeline, both provider states, as a difference between two layers
+of one page (clean layer, and a layer with a word the model did not transcribe): freed with evidence
+(no mark, no list, words PASS in the sidecar trace), kept without (held mark, listed, page not SUCCESS,
+no UNVERIFIABLE event, same table bytes), the held mark survives a resumed run; the predicate for both
+page kinds (model: words and numbers, scope, digest, FAIL and UNKNOWN; native: coverage only, circular
+words refused, scope, digest, FAIL and UNKNOWN). `docs/log/2026-11-14_1257-release-mutants.py`: 6 of 6
+killed (release without evidence; native released on words alone; native released with a FAIL or
+UNKNOWN; native coverage at any scope; native coverage not digest-verified; held table with the
+unsettled wording). No existing test was changed.

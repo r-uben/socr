@@ -9665,6 +9665,38 @@ class UnifiedPipeline:
             bo.failure_mode = FailureMode.TABLE_UNVERIFIED
         ps.unchecked_table_kind = "unverified"
 
+    @staticmethod
+    def _row_binding_release(
+        state: DocumentState, page_num: int, ps: PageState, out: PageOutput
+    ) -> bool:
+        """#1257: does the page carry independent page-scope evidence on the text *out* ships?
+
+        The pass trace of *out* as the verdict seam states it (the page's own events, the provider
+        state of this run); see ``verdict.row_binding_release_evidence``.  Fails closed: a trace
+        that cannot be computed is no evidence."""
+        from socr.core.verdict import page_row_binding_release
+
+        kinds = frozenset(
+            getattr(ev, "kind", "")
+            for ev in state.events
+            if getattr(ev, "page_num", None) == page_num
+        )
+        try:
+            return page_row_binding_release(
+                out,
+                ps,
+                kinds,
+                providers_available=bool(getattr(state, "agentic_ladder", None)),
+            )
+        except Exception as exc:
+            logger.warning(
+                "row binding release check failed on p%d (%s: %s)",
+                page_num,
+                type(exc).__name__,
+                exc,
+            )
+            return False
+
     def _row_binding_applies(self, ps: PageState, out: PageOutput | None, page=None) -> bool:
         """``tables.row_binding_check.layer_can_judge_tables`` under this run's config: the ONE
         predicate the check (#1267), the repair (#1282) and the offline tool share."""
@@ -10065,6 +10097,23 @@ class UnifiedPipeline:
                     outcome == TableOutcome.UNVERIFIABLE.value
                     and worst != TableOutcome.CONTRADICTED.value
                 ):
+                    worst = TableOutcome.UNVERIFIABLE.value
+            # #1257: a table BOUND only by exact evidence (a row bound beyond the same-line rule)
+            # keeps its BOUND record, but the page's mark goes only with independent page-scope
+            # evidence on the text that ships.  Without it the table keeps a mark that says what
+            # is true: rows bound, page text not independently confirmed.
+            _held = [
+                idx
+                for idx, result in enumerate(results)
+                if result.outcome is TableOutcome.BOUND
+                and result.evidence_counts()
+                and ps.row_binding.get(f"p{page_num}-t{idx}", {}).get("outcome")
+                == TableOutcome.BOUND.value
+            ]
+            if _held and not self._row_binding_release(state, page_num, ps, out):
+                for idx in _held:
+                    ps.row_binding_unverifiable_tables.append(idx)
+                if worst == TableOutcome.BOUND.value:
                     worst = TableOutcome.UNVERIFIABLE.value
         except Exception as exc:
             logger.warning(
