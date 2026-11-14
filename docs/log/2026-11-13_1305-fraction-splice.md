@@ -174,3 +174,42 @@ was already not a plain word, so it is pinned as a regression row, not a mutant 
 Re-measured on the final rule: Fed lane 408 pages (81 docs): 403 leave, 5 stay (same 5, the
 2020-07-29 transcript-presentation-materials p23, p26-p29).
 References recall: 209,519 pages, 1751 old-flagged, 1750 still flagged (same single Spanish "7½ Hz" page leaves).
+
+## Follow-up: cubic review of PR #1322 (Unicode operators, `min`, `by`)
+
+- P1: `_OPERATOR_CHARS` now also holds the Unicode relations and signs: `≤ ≥ ≠ ≈ ≡ ≅ ∼ ∝ ∈ ∉ ⊂ ⊃ ⊆ ⊇ ∪ ∩ ∧ ∨`, `÷ ∗ ⋅ ∘`
+  (plus the existing `+ - − * / ^ = < > × · ±`). No existing set in the module covered
+  operators, so this one was extended. `2 ¼ xy ≤ 1` is operator.
+- P2: a function name after a number is an operand only with a math-shaped continuation
+  (`_is_math_continuation`): a bracket, digit or operator glued to the name (`min(x, y)`), or
+  a next token that is a one-letter or vowel-free variable, a number, an operator, a bracket
+  or non-Latin (Greek). A name at line end or before prose stays a printed fraction:
+  `2 ½ min`, `2 ½ min.`, `3 ¼ min later`, `2 ½ max of the two`. Operator: `2 ¼ min x`,
+  `2 ¼ min(x, y)`, `2 ¼ max 3`, `2 ¼ log α`.
+- P3: `_PROSE_FUNCTION_WORDS` (by to of or in on at per and with) never count as a
+  vowel-free compact variable: `2 ½ by 4`, `2 ½ by 4 inches`, `3 ¼ per 4` stay printed.
+  Cost: `2 ¼ xy by 4` now also reads as printed (an `=` damaged before `by` is not caught).
+- Bare `2 ¼ sin` at the end of a line is now prose (before it was operator). A line never
+  ends on the `=` of a mojibake equation in the corpora measured, and the rows above pin it.
+
+Mutants (copies of src and tests outside the repo, `socr.__file__` inside the copy, anchor
+count 1):
+
+| guard removed | result |
+|---|---|
+| Unicode operators dropped from `_OPERATOR_CHARS` | 3 failed (`xy ≤ 1`, `xy ≥ 1`, `xy ≠ z`) |
+| `_is_math_continuation` replaced by `True` | 4 failed (`2 ½ min`, `2 ½ min.`, `3 ¼ min later`, `2 ½ max of the two`) |
+| prose function words allowed as vowel-free variable | 2 failed (`2 ½ by 4`, `2 ½ by 4 inches`) |
+
+Measured (cached data, no OCR). Fed run `51270eb5_words`, all four shard dirs, 156 docs, text
+layer re-read from `central_banks/fed`: this re-measure scored every page of every doc with the
+old trigger (468 pages), not only the 408 event pages of the earlier table, and the 468 are
+a superset only if the doc-to-PDF name mapping matches (hash-suffixed docs may map to a
+different file). Result: 438 leave, 30 stay, identical to the pre-change code (HEAD) on the
+same population, so this change moves no page; the 2020-07-29 p23, p26-p29 pages are among
+the stays. The 403/5 figure itself was not re-derived on its exact 408-page set (the
+per-page event list is not recoverable from the page JSONs); the claim is "unchanged versus
+HEAD on a superset".
+
+References recall on the final rule: 209,519 pages, 1751 old-flagged, 1750 still flagged (same
+single page leaves: the Spanish "EL ARCO IRIS INVISIBLE" p68, "7½ Hz").

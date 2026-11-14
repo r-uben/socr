@@ -216,8 +216,16 @@ _ARTICLE = "a"
 #: side of '=' ("2 = sin x"), never prose: "2 ¼ sin x" must not read as a printed fraction.
 #: A fixed list of standard function names, not corpus-tuned.
 _MATH_FUNCTIONS = frozenset({"sin", "cos", "tan", "log", "ln", "exp", "max", "min", "lim", "det"})
-#: Characters of a bare operator token ("x ¼ y + z", "x ¼ y 2").
-_OPERATOR_CHARS = frozenset("+-−*/^=<>×·±")
+#: Characters of a bare operator token ("x ¼ y + z", "x ¼ y 2"): ASCII arithmetic and
+#: relations, the Unicode relations (<= >= != ~= ==) and arithmetic signs (minus, times,
+#: divide, dot, plus-minus, asterisk and dot operators), and the set/logic relations.
+_OPERATOR_CHARS = frozenset("+-−*/^=<>×÷·±≤≥≠≈≡≅∼∝∗⋅∘∈∉⊂⊃⊆⊇∪∩∧∨")
+#: Short English words that are vowel-free or one-syllable connectives. They are prose in
+#: "2 ½ by 4" (dimensions), never a compact variable.
+_PROSE_FUNCTION_WORDS = frozenset({"by", "to", "of", "or", "in", "on", "at", "per", "and", "with"})
+#: A math function counts as an operand only with a math-shaped continuation. "min" is
+#: also minutes: "2 ½ min", "3 ¼ min later" stay printed.
+_FUNCTION_HEAD = re.compile(r"([A-Za-z]+)(.*)", re.DOTALL)
 
 
 def _is_plain_word(token: str) -> bool:
@@ -279,14 +287,47 @@ def _is_math_operand(right: list[str]) -> bool:
     if not right:
         return False
     word = _edge_piece(right[0], last=False).strip(_WORD_EDGE_PUNCT)
-    if word.lower() in _MATH_FUNCTIONS:
-        return True
+    head = _FUNCTION_HEAD.match(right[0].lstrip(_OPENERS))
+    if head and head.group(1).lower() in _MATH_FUNCTIONS:
+        return _is_math_continuation(head.group(2), right[1:])
     if len(word) == 1 and _is_latin_word(word):
         return True
-    if not (_is_compact_variable(word) and _is_vowel_free(word)) or len(right) < 2:
+    if (
+        word.lower() in _PROSE_FUNCTION_WORDS
+        or not (_is_compact_variable(word) and _is_vowel_free(word))
+        or len(right) < 2
+    ):
         return False
     nxt = right[1].strip(_WORD_EDGE_PUNCT)
     return _is_number(nxt) or bool(nxt) and set(nxt) <= _OPERATOR_CHARS
+
+
+def _is_math_continuation(rest: str, after: list[str]) -> bool:
+    """True if what follows a function name is math-shaped: ``min(x, y)``, ``sin x``.
+
+    ``rest`` is the remainder of the function's own token; ``after`` the tokens behind
+    it. A bracket, digit or operator glued to the name, or a next token that is a variable,
+    number, operator, bracketed or non-Latin (Greek) is math. A name at the end of the
+    line, or before prose ("min later", "min."), is not.
+    """
+    if rest and rest[0] in _OPENERS + "".join(_OPERATOR_CHARS) + "0123456789":
+        return True
+    if rest.strip(_WORD_EDGE_PUNCT) or not after:
+        return False
+    nxt = after[0].strip(_WORD_EDGE_PUNCT)
+    if not nxt:
+        return after[0][0] in _OPENERS
+    return (
+        after[0][0] in _OPENERS
+        or _is_number(nxt)
+        or set(nxt) <= _OPERATOR_CHARS
+        or not _is_latin_word(nxt.translate({ord(h): None for h in _HYPHENS}))
+        or (
+            _is_compact_variable(nxt)
+            and nxt.lower() not in _PROSE_FUNCTION_WORDS
+            and (len(nxt) == 1 or _is_vowel_free(nxt))
+        )
+    )
 
 
 def _is_number(token: str) -> bool:

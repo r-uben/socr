@@ -106,6 +106,25 @@ _VERDICTS = [
     ("3 ¼ log y", False),
     ("1 ¼ x + y", False),
     ("2 ¼ xy + 1", False),
+    # Unicode operators after a vowel-free variable (cubic P1)
+    ("2 ¼ xy ≤ 1", False),
+    ("2 ¼ xy ≥ 1", False),
+    ("2 ¼ xy ≠ z", False),
+    ("2 ¼ xy × 3", False),
+    ("2 ¼ xy − 1", False),
+    # math function: operand only with a math-shaped continuation (cubic P2)
+    ("2 ¼ min x", False),
+    ("2 ¼ min(x, y)", False),
+    ("2 ¼ max 3", False),
+    ("2 ¼ log α", False),
+    ("2 ½ min", True),
+    ("2 ½ min.", True),
+    ("3 ¼ min later", True),
+    ("2 ½ max of the two", True),
+    # prose function words are not compact variables (cubic P3)
+    ("2 ½ by 4", True),
+    ("2 ½ by 4 inches", True),
+    ("3 ¼ per 4", True),
 ]
 _PRINTED = [line for line, printed in _VERDICTS if printed]
 _OPERATOR = [line for line, printed in _VERDICTS if not printed]
