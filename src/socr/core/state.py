@@ -269,7 +269,7 @@ class PageState:
     #: #1251: every page-judge call made for this page, in the order they happened (dicts of
     #: ``judge.judge.judge_call_record``). Appended by the judge itself, possibly from the deadline
     #: worker's thread; a resumed page holds the list its original run wrote. Written to
-    #: ``pages/NNNNN.judge.json`` by the sidecar writer and NOT part of the run fingerprint.
+    #: ``pages/NNNNN.judge-calls`` by the sidecar writer and NOT part of the run fingerprint.
     judge_calls: list[dict] = field(default_factory=list)
     #: GH-271: the corrupt-equation lane (default on) produced a region hybrid
     #: that must ship even though it remains WARNING/audit_passed=False (syntax

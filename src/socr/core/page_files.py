@@ -1,7 +1,7 @@
 """Names of the files a document's ``pages/`` folder holds beside the per-page sidecars (#1251).
 
 ``pages/NNNNN.json`` is a page SIDECAR and ``pages/NNNNN.md`` its fragment. A judge's replies sit
-in ``pages/NNNNN.judge.json``: a JSON list, not a sidecar. Every reader that globs ``*.json`` for
+in ``pages/NNNNN.judge-calls``: a JSON list, not a sidecar. Every reader that globs ``*.json`` for
 sidecars goes through :func:`page_sidecar_paths`, so the companion is never read as one (it would
 count as an unreadable sidecar, or as a page called ``00001.judge``).
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-JUDGE_CALLS_SUFFIX = ".judge.json"
+JUDGE_CALLS_SUFFIX = ".judge-calls"
 
 
 def judge_calls_path(pages_dir: Path, page_num: int) -> Path:

@@ -207,7 +207,7 @@ def judge_call_record(
     verdict: JudgeVerdict | None = None,
     error: BaseException | None = None,
 ) -> dict:
-    """One page-judge call, for ``pages/NNNNN.judge.json`` (#1251).
+    """One page-judge call, for ``pages/NNNNN.judge-calls`` (#1251).
 
     Holds what a later reader needs to audit the call without re-running it: the digest of the
     prompt template and of the reading it was shown, the model and backend, the FULL reply as the

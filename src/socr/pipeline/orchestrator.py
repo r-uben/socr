@@ -17315,7 +17315,7 @@ class UnifiedPipeline:
 
     @staticmethod
     def _record_page_judge_call(state: DocumentState, record: dict) -> None:
-        """#1251: keep one page-judge call on its page, for ``pages/NNNNN.judge.json``."""
+        """#1251: keep one page-judge call on its page, for ``pages/NNNNN.judge-calls``."""
         ps = state.pages.get(int(record.get("page") or 0))
         if ps is None:
             logger.warning("page-judge call for unknown page %r not recorded", record.get("page"))
@@ -18344,7 +18344,7 @@ class UnifiedPipeline:
                 },
             }
 
-        # #1251: the page judge's calls live in ``pages/NNNNN.judge.json``; the sidecar keeps the
+        # #1251: the page judge's calls live in ``pages/NNNNN.judge-calls``; the sidecar keeps the
         # file's name, digest and call count. Sparse (absent on a page no model judged), and not
         # part of the run fingerprint, so no other sidecar changes by a byte.
         judge_calls_ref = self._write_page_judge_calls(ps, sidecar_path.parent, page_num)
@@ -18358,7 +18358,7 @@ class UnifiedPipeline:
 
     @staticmethod
     def _write_page_judge_calls(ps, pages_dir: Path, page_num: int) -> dict | None:
-        """#1251: write ``pages/NNNNN.judge.json`` (a JSON list of every page-judge call of this
+        """#1251: write ``pages/NNNNN.judge-calls`` (a JSON list of every page-judge call of this
         page, in order) and return the reference the sidecar keeps, or ``None`` when the page has
         no call.
 
@@ -18379,7 +18379,7 @@ class UnifiedPipeline:
             path.unlink(missing_ok=True)
             return None
         body = json.dumps(calls, indent=2, ensure_ascii=False)
-        tmp = path.with_suffix(".json.tmp")
+        tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(body, encoding="utf-8")
         tmp.rename(path)
         return {"path": path.name, "sha256": sha256_text(body), "count": len(calls)}

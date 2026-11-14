@@ -4,7 +4,7 @@ A model-read page the page judge accepted stays SUCCESS only when the pass trace
 independent confirmation on the shipped text: the words check passed at page scope, the numbers
 check passed (or does not apply), and no entry of any check is a FAIL or UNKNOWN. Otherwise the
 page ships under ``page_judge=UNKNOWN`` (a WARNING) in a mode a resume restores instead of
-re-reading. Every judge call leaves ``pages/NNNNN.judge.json``.
+re-reading. Every judge call leaves ``pages/NNNNN.judge-calls``.
 
 Per ``CLAUDE.md`` the run-level tests pin a DIFFERENCE between two arms of one process (only the
 independent evidence differs), with the provider ladder in both states, and never an absolute
@@ -445,7 +445,7 @@ def _judged_run(out: Path, pdf: Path, monkeypatch, fake: _FakeVLM, pages_read: l
 
 def _calls(out: Path, n: int = 1):
     pages = next(out.rglob("pages"))
-    path = pages / f"{n:05d}.judge.json"
+    path = pages / f"{n:05d}.judge-calls"
     return path, json.loads(path.read_text()) if path.exists() else None
 
 
@@ -554,12 +554,12 @@ def test_an_altered_side_file_is_not_restored_and_says_so(
 ) -> None:
     from socr.pipeline.orchestrator import UnifiedPipeline
 
-    (tmp_path / "00001.judge.json").write_text('[{"outcome": "verdict"}]', encoding="utf-8")
-    ref = {"path": "00001.judge.json", "sha256": "sha256:other", "count": 1}
+    (tmp_path / "00001.judge-calls").write_text('[{"outcome": "verdict"}]', encoding="utf-8")
+    ref = {"path": "00001.judge-calls", "sha256": "sha256:other", "count": 1}
     with caplog.at_level("WARNING"):
         got = UnifiedPipeline._load_page_judge_calls(tmp_path, 1, ref)
     assert got == [] and "could not be restored" in caplog.text
-    good = {"path": "00001.judge.json", "sha256": sha256_text('[{"outcome": "verdict"}]')}
+    good = {"path": "00001.judge-calls", "sha256": sha256_text('[{"outcome": "verdict"}]')}
     assert UnifiedPipeline._load_page_judge_calls(tmp_path, 1, good) == [{"outcome": "verdict"}]
     assert UnifiedPipeline._load_page_judge_calls(tmp_path, 2, good) == []
 
@@ -586,7 +586,7 @@ def test_readers_of_the_pages_folder_do_not_take_the_side_file_for_a_sidecar(
         json.dumps({"page_num": 1, "status": "success", "engine": "qwen"})
     )
     (pages / "00001.md").write_text("x")
-    (pages / "00001.judge.json").write_text("[]")
+    (pages / "00001.judge-calls").write_text("[]")
     assert [p.name for p in page_sidecar_paths(pages)] == ["00001.json"]
     counts = scoreboard.count_document(doc)
     assert counts["coverage.pages"] == 1 and not counts["coverage.unreadable_sidecars"]

@@ -45,7 +45,7 @@ Decisions taken in code, each open to the coordinator:
 
 ## Judge reply persistence
 
-`pages/NNNNN.judge.json`: a JSON list, one record per page-judge call, in the order they
+`pages/NNNNN.judge-calls`: a JSON list, one record per page-judge call, in the order they
 happened. Record: `page`, `outcome` (`verdict`, `timeout`, `error`, `deadline_exceeded`),
 `judge_model`, `judge_backend`, `prompt_sha256` (the digest the run manifest also records),
 `reading_sha256`, and for a verdict the full `reply`, `reply_chars` and the `parsed` verdict; for a
@@ -165,7 +165,7 @@ judge-only page. Either the tools apply it too, or the equality tests exempt it.
 
 Group 2, the side-file name. `test_gh987_judge_breaker_e2e.py` (6 tests: wedged judge, breaker
 surfaced once, raising probe, vLLM probe, short-circuited resume, breaker event on resume) reads
-`out_dir.rglob("pages/*.json")` and does `int(path.stem)`, which fails on `00001.judge.json`. The
+`out_dir.rglob("pages/*.json")` and does `int(path.stem)`, which fails on `00001.judge-calls`. The
 brief fixes the name; moving the file out of `pages/` (for example `judge/NNNNN.json`) or
 filtering the helper are the two ways out.
 
