@@ -121,6 +121,15 @@ def test_the_real_detector_calls_this_fixture_damaged(tmp_path: Path, monkeypatc
 
         def fake_get_text(*args, _text=text, **kwargs):
             mode = args[0] if args else kwargs.get("option", "text")
+            if mode == "dict":
+                # #1270: the flag follows the span-level maths count, so a private-use glyph
+                # must sit in a span of a font that owns it (UniMath, as #92 measured).
+                spans = [
+                    {"font": "ABCDEF+UniMath", "text": c, "bbox": (0, 0, 1, 1)}
+                    for c in _text
+                    if count_pua_chars(c)
+                ]
+                return {"blocks": [{"type": 0, "lines": [{"spans": spans}]}]}
             return _text if mode == "text" else original(*args, **kwargs)
 
         monkeypatch.setattr(page, "get_text", fake_get_text)

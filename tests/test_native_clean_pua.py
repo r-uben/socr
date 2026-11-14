@@ -124,6 +124,13 @@ class TestAssessPageWiring:
             mode = args[0] if args else kwargs.get("option", "text")
             if mode == "text":
                 return crafted
+            if mode == "dict":
+                # #1270: the flag follows the span-level maths count, so the glyph must sit
+                # in a span of a font that owns it (UniMath script-T, as #92 measured).
+                spans = [
+                    {"font": "ABCDEF+UniMath", "text": f"{PUA_F766}o(T)", "bbox": (0, 0, 1, 1)}
+                ]
+                return {"blocks": [{"type": 0, "lines": [{"spans": spans}]}]}
             return orig_get_text(*args, **kwargs)
 
         monkeypatch.setattr(page, "get_text", fake_get_text)
@@ -143,9 +150,9 @@ class TestAssessPageWiring:
         assert any("unmapped math glyphs" in n for n in pa.notes)
         assert any("native layer cleaned" in n for n in pa.notes)
         # #960: whether a private-use glyph re-routes the page depends on the font of the
-        # span carrying it (math vs dingbat/bullet; see test_gh960_garbled_math). This fixture
-        # fakes only the "text" layer, so no span carries the glyph and nothing re-routes.
-        assert pa.needs_ocr_enhancement is False
+        # span carrying it (math vs dingbat/bullet; see test_gh960_garbled_math). UniMath is
+        # a measured math family, so this page is re-routed to a whole-page read.
+        assert pa.needs_ocr_enhancement is True
 
     def test_clean_page_has_no_flag(self, tmp_path: Path) -> None:
         pdf = tmp_path / "clean.pdf"

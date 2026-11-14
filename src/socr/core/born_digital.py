@@ -3795,6 +3795,12 @@ class BornDigitalDetector:
         raw_text = page.get_text("text")
         raw_text, _zw_stripped, _spaces_normalized = clean_native_text(raw_text)
         pua_count = count_pua_chars(raw_text)
+        # #1270: ``pua_count`` is every private-use codepoint, font-blind: a Wingdings or
+        # SymbolMT list bullet (U+F0B7, U+F0A7, U+F074, U+F06E) counts as one. It stays the
+        # figure the audit note reports. The FLAG that becomes the page's ``native_glyphs``
+        # mark is set below from the span-level maths count (``_math_private_use_count``,
+        # the #960 predicate that already exempts dingbat fonts and Symbol non-math codes).
+        # Measured on run 51270eb5: 292 of 298 marked pages had no maths glyph at all.
         has_unmapped_math_glyphs = pua_count > 0
         char_count = len(raw_text)
         words = raw_text.split()
@@ -4199,6 +4205,13 @@ class BornDigitalDetector:
             # Fail closed: an unreadable page is "unknown", not "clean".
             logger.warning("#960: garbled-math scan failed", exc_info=True)
             garbled_math_scan_failed = True
+        # #1270: the flag follows the span-level maths count. A scan that FAILED keeps the
+        # font-blind answer: an unreadable page is "unknown", not "clean" (fail closed).
+        has_unmapped_math_glyphs = (
+            pua_count > 0
+            if garbled_math_scan_failed
+            else bool(garbled_math_signals.get("private_use", 0))
+        )
         if garbled_math_signals or garbled_math_scan_failed:
             needs_ocr_enhancement = True
             notes.append(
@@ -4395,6 +4408,13 @@ class BornDigitalDetector:
             notes.append(
                 f"unmapped math glyphs ({pua_count} private-use codepoint(s)); math symbols "
                 "are font-private (weak ToUnicode)"
+            )
+        elif pua_count:
+            # #1270: private-use codepoints that are list bullets / dingbats / Symbol
+            # non-math marks. Reported (never silent) but not a math-glyph loss, so no mark.
+            notes.append(
+                f"{pua_count} private-use codepoint(s) are list bullets or dingbats, "
+                "not mathematics"
             )
 
         return PageAssessment(
