@@ -19,6 +19,7 @@ import logging
 import math
 import re
 import statistics
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -183,8 +184,18 @@ _MATH_CORRUPTION_GLYPHS = _MATH_MOJIBAKE_CHARS | _C0_CONTROL_CHARS
 #: Glyphs that count wherever they appear (everything except the fraction glyphs).
 _ALWAYS_CORRUPT_GLYPHS = _MATH_DELIMITER_MOJIBAKE_CHARS | _C0_CONTROL_CHARS
 
-#: Letters a token needs to count as a plain word (one letter is a variable).
+#: Letters a token needs to count as a plain word (one letter is a variable). Fixed, not
+#: corpus-tuned: one letter is the smallest token that can be a variable name, and the only
+#: one-letter English word ("a") is handled by name below.
 _PLAIN_WORD_MIN_LETTERS = 2
+#: A compact variable has at most this many letters ("yy", "ax", "xy") or no vowel
+#: ("xyz", "ps"). Fixed, not corpus-tuned: two letters is a product of single-letter
+#: variables; longer tokens with a vowel are words. Counts only when BOTH sides are
+#: compact and one of them is vowel-free.
+_VARIABLE_MAX_LETTERS = 2
+_VOWELS = frozenset("aeiouAEIOU")
+#: Signs that may precede a number ("-2 ½ percent", "−2 ½ percent").
+_NUMBER_SIGNS = "+-−"
 _WORD_EDGE_PUNCT = ".,;:!?()[]{}\"'‘’“”"
 #: Hyphens and dashes. They join words ("state-of-the-art", "percent—is") and sit against a
 #: fraction as punctuation ("quarter—½ point"), never as an operand.
@@ -210,13 +221,46 @@ def _is_plain_word(token: str) -> bool:
     if not word or any(ch in _MATH_CORRUPTION_GLYPHS for ch in word):
         return False
     parts = word.translate({ord(h): " " for h in _HYPHENS}).split(" ")
-    return all(part.isalpha() for part in parts) and any(
+    return all(_is_latin_word(part) for part in parts) and any(
         len(part) >= _PLAIN_WORD_MIN_LETTERS for part in parts
     )
 
 
-def _is_number(token: str) -> bool:
+def _is_latin_word(part: str) -> bool:
+    """Letters only, all Latin script: Greek (``αx``) is a math symbol, not prose."""
+    return part.isalpha() and all("LATIN" in unicodedata.name(ch, "") for ch in part)
+
+
+def _is_compact_variable(token: str) -> bool:
+    """A compact Latin token that can be a variable name: <= two letters, or no vowel."""
     word = token.strip(_WORD_EDGE_PUNCT)
+    if not _is_latin_word(word):
+        return False
+    return len(word) <= _VARIABLE_MAX_LETTERS or _is_vowel_free(word)
+
+
+def _is_vowel_free(word: str) -> bool:
+    return not any(ch in _VOWELS for ch in word)
+
+
+def _is_operator_shape(left_tok: str, right_tok: str) -> bool:
+    """Both sides compact variables, at least one of them vowel-free (``yy ¼ ax``).
+
+    Two short English words ("at ½] to", "up ¼ of") each carry a vowel, so they stay
+    prose. A vowel-free side ("yy", "xy", "x") is not a word.
+    """
+    return (
+        _is_compact_variable(left_tok)
+        and _is_compact_variable(right_tok)
+        and (
+            _is_vowel_free(left_tok.strip(_WORD_EDGE_PUNCT))
+            or _is_vowel_free(right_tok.strip(_WORD_EDGE_PUNCT))
+        )
+    )
+
+
+def _is_number(token: str) -> bool:
+    word = token.strip(_WORD_EDGE_PUNCT).lstrip(_NUMBER_SIGNS)
     return bool(word) and all(ch.isdigit() or ch in ".," for ch in word)
 
 
@@ -246,9 +290,11 @@ def _is_printed_fraction(line: str, i: int) -> bool:
     The rule, by neighbours (L = token before, R = token after, brackets and a ``%``
     skipped, a neighbouring fraction of the same series skipped):
 
-    * glued after a digit and NOT followed by a digit: printed (``2¾``, ``2¾%``).
-      Followed by a digit it is the '=' of ``10¼5``: operator.
-    * glued before a hyphenated word (``¼-point``): printed.
+    * glued after a digit: the digit is L, and the glyph must not touch an operand on its
+      right (``2¾``, ``2¾%``, ``2¾ percent`` are printed; ``10¼5``, ``10¼x`` and
+      ``10¼ 5+5`` are operator).
+    * glued before a hyphenated word after a space or line start (``¼-point``): printed.
+      ``x¼-y`` is the '=' of ``x = -y``.
     * R is a number: operator (``x ¼ 0``, ``2 ¼ 4``, ``log likelihood ¼ 0``): a
       fraction is never followed by a bare number in prose.
     * L is a number: printed iff a ``%``, a word or the end of the line follows
@@ -256,6 +302,8 @@ def _is_printed_fraction(line: str, i: int) -> bool:
       the '=' of ``2 ¼``: mojibake '=' sits between two operands.
     * L is the article "a": printed iff a word follows and the word after that is a word
       or absent (``a ¼ point cut``). ``a ¼ sin x`` ends on a variable: operator.
+    * L and R are both compact (at most two letters, or no vowel) and one is vowel-free
+      (``yy ¼ ax``, ``xy ¼ z``): operator. ``at ½] to`` has a vowel on each side: prose.
     * L and R are each a plain word or missing: printed (``the ½ share``, ``raised it
       ¼ point``).
     * anything else is operator: a variable, a closing bracket or a math glyph on either
@@ -266,13 +314,18 @@ def _is_printed_fraction(line: str, i: int) -> bool:
     """
     before = line[i - 1] if i else ""
     after = line[i + 1] if i + 1 < len(line) else ""
-    if before.isdigit():
-        return not after.isdigit()
-    if after and after in _HYPHENS and i + 2 < len(line) and line[i + 2].isalpha():
-        return True
+    glued_digit = before.isdigit()
+    if (
+        after
+        and after in _HYPHENS
+        and i + 2 < len(line)
+        and line[i + 2].isalpha()
+        and (not before or before.isspace())
+    ):
+        return True  # "¼-point"; "x¼-y" is the '=' of x = -y
     # Neighbouring brackets, dashes, a sign and a trailing '%' are punctuation around the
     # glyph, not operands: "[at ½] to 3/4", "an 8 ½% rate", "quarter—½ point", "-¼ percent".
-    if (before and not before.isspace() and before not in _GLUE_PUNCT) or (
+    if (before and not glued_digit and not before.isspace() and before not in _GLUE_PUNCT) or (
         after and not after.isspace() and after not in _GLUE_PUNCT
     ):
         return False
@@ -290,6 +343,8 @@ def _is_printed_fraction(line: str, i: int) -> bool:
         return percent or not right_tok or _is_plain_word(right_tok)
     if left_tok.lower() == _ARTICLE:
         return _is_plain_word(right_tok) and (len(right) < 2 or _is_plain_word(right[1]))
+    if _is_operator_shape(left_tok, right_tok):
+        return False  # "yy ¼ ax": compact variables on both sides are an equation
     return (not left_tok or _is_plain_word(left_tok)) and (
         not right_tok or _is_plain_word(right_tok)
     )

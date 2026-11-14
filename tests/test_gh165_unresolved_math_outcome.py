@@ -361,7 +361,8 @@ def test_complete_aligned_recovery_clears_this_warning_only(tmp_path: Path) -> N
     assert "unrecovered math glyphs" in (result.error or "")
 
     body = result.pages[0].text
-    assert count_pua_chars(body) > 0
+    assert DAMAGED_EQUATION in body
+    assert count_pua_chars(body) >= count_pua_chars(DAMAGED_EQUATION) > 0
     assert r"\hat{T} = f_o(T)" in body
 
     # The existing, separate uncertainty survives untouched.

@@ -52,23 +52,30 @@ Two independent guards, because either alone leaves a hole.
    detector, the line selector and `_numbered_math_groups`). Rule by neighbours, L the token
    before, R the token after (brackets, dashes, a sign and `%` skipped; a neighbouring
    fraction of the same series skipped; for a dash compound, the piece against the glyph):
-   - glued after a digit and not followed by a digit: printed (`2¾`, `2¾%`). Followed by a
-     digit: operator (`10¼5`).
-   - glued before a hyphenated word (`¼-point`): printed.
+   - glued after a digit: the digit is L and the glyph must not touch an operand on its right
+     (`2¾`, `2¾%`, `2¾ percent` printed; `10¼5`, `10¼x`, `10¼ 5+5`, `2¼x` operator).
+   - glued before a hyphenated word after a space or line start (`¼-point`): printed.
+     `x¼-y` is the '=' of `x = -y`: operator.
    - R is a number: operator (`x ¼ 0`, `2 ¼ 4`, `log likelihood ¼ 0`). Prose does not put a
      bare number after a fraction.
-   - L is a number: printed iff `%`, a word or the end of the line follows (`1 ¼ percent`,
+   - L is a number (an optional leading sign, `-` or U+2212, is stripped: `−2 ½ percent`,
+     `-2½`): printed iff `%`, a word or the end of the line follows (`1 ¼ percent`,
      `8 ½%`, a wrapped `is 2 ½`). A line never ends on the '=' of `2 ¼`: mojibake '=' sits
      between two operands.
    - L is the article "a": printed iff R is a word and the token after R is a word or absent
      (`a ¼ point cut`). `a ¼ sin x` ends on a variable: operator.
+   - both sides compact (at most two letters, or no vowel) with one side vowel-free: operator
+     (`yy ¼ ax`, `xy ¼ z`). Two short words each carry a vowel (`at ½] to`) and stay prose.
    - both sides plain words, or missing: printed (`the ½ share`, `GDP ½ percentage point`).
    - everything else is operator: a variable, closing bracket or math glyph on a side
      (`x ¼ y`, `y ¼ αx`, `P ¼ NP`, `f(x) ¼ 1`).
    A plain word is letters only with hyphen compounds allowed (`state-of-the-art`), at least
-   two letters in some piece. No new numeric threshold: the rule counts "a number", "a word"
-   and "the next token", nothing tuned. Ties go to operator: a false operator costs a crop,
-   a false fraction ships '=' as '¼' silently.
+   two letters in some piece, and Latin script (`αx` is a symbol). Two constants, both fixed
+   and not corpus-tuned: `_PLAIN_WORD_MIN_LETTERS = 2` (one letter is a variable; the only
+   one-letter word, "a", is handled by name) and `_VARIABLE_MAX_LETTERS = 2` (two letters is
+   a product of single-letter variables). Everything else counts "a number", "a word" and "the
+   next token". Ties go to operator: a false operator costs a crop, a false fraction ships
+   '=' as '¼' silently.
    Every verdict is a row of `_VERDICTS` in `tests/test_gh1305_fraction_splice.py`.
    ð Þ þ Ð and C0 controls still count wherever they stand.
 3. No font test: `is_math_font` does not cover AdvP4C4E74/AdvOT*/MTSYN/Symbol, and a TeX
@@ -87,7 +94,7 @@ predicate against the 408 pages that carried `corrupt_math_region_recovery`:
 | the 5 staying pages | the real-mojibake pages (2020-07-29 transcript-presentation-materials p23, p26-p29) |
 
 Intermediate versions of the rule, on the same pages: the first review-round rule kept 17
-(12 printed fractions: `GDP ½ percentage point`, `4½ percent ... mid-2018—about ½`, a wrapped
+(12 printed fractions: `GDP ½ percentage point`, `4½ percent ... mid-2018—about ½` (the table is representative, not exhaustive; the exact `4½ percent` case is the row `inflation of 4½ percent`), a wrapped
 `2 ½ `, `-¼ percent`, `percent—is`); each is now a row in `_VERDICTS`. A literal `^{n/m}`
 count over the leaving pages is 219 on the same regex family as before (216 in the first
 count; the pattern differs slightly), none of which ships from the lane any more.
@@ -112,11 +119,10 @@ Elsevier-font population itself beyond what that library holds; the unit tests p
 
 ## Residual risks
 
-- `where yy ¼ ax and the model holds`: two-letter variables on both sides read as words, so
-  the line reads as a printed fraction and is not detected. Single-letter variables, the
-  normal case, are detected.
+- `by ½ of` (two short words, one vowel-free because `y` is not a vowel here) reads as an
+  operator: a false operator costs a crop, no content. `total cost ¼ price quantity` below
+  is the opposite error.
 - `total cost ¼ price quantity` (words on both sides of a spaced '=') reads as printed.
-- `2¼x` (digit-glued, then a letter) reads as a mixed number.
 - A mojibake '=' that ends a wrapped line after a number (`... 2 ¼`) reads as printed.
 
 ## Guards seen to fail (mutant copies of src and tests outside the repo)
@@ -128,9 +134,17 @@ editing, then ran `tests/test_gh1305_fraction_splice.py`.
 |---|---|
 | a resolved region replaces its native line again (deletion restored) | 9 failed |
 | glued digit then a digit counted as a fraction (`return True` for a digit-glued glyph) | 1 failed (`10¼5`) |
+| operator-shape guard removed (round 3) | 3 failed (`yy ¼ ax`, its sentence form, `xyz ¼ xy`) |
+| the glued-digit skip of the glue check removed (the astra recheck fix) | 6+ failed (`4½ percent`, `8 ½%`, ...) |
+| hyphen shortcut no longer requires a space before the glyph | 1 failed (`x¼-y`) |
+| leading sign no longer stripped in `_is_number` (round 3) | 2 failed (`−2 ½ percent` rows) |
 
 Tests: `tests/test_gh1305_fraction_splice.py` (the `_VERDICTS` table; splice over
 `Real GDP ðx`, `The state-of-the-art model PðAÞ ¼ 1`, `ðxÞ ¼ y`, the mixed line, and the
 pure mojibake line; real-page recover-then-splice; shared page/line/numbered agreement;
 `process()` pair fraction line vs mojibake line in both provider states and flag on/off;
 resume of a fraction-only page).
+
+
+Round 3 (cubic + astra recheck): Fed lane re-measured on the final rule: 403 leave, 5 stay
+(same 5). References recall on the final rule: 209,519 pages, 1751 old-flagged, 1750 still flagged (same single Spanish "7½ Hz" page leaves).

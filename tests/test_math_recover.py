@@ -574,6 +574,11 @@ def test_identical_source_occurrences_align_and_replace_independently():
     assert "![Corrupt equation crop](equations/first.png)" in out
     assert "![Corrupt equation crop](equations/second.png)" in out
     assert out.count(_EQ) == 2  # #1305: both native lines are kept
+    # each native occurrence precedes its OWN crop
+    first_native = out.index(_EQ)
+    second_native = out.index(_EQ, out.index("intervening prose"))
+    assert first_native < out.index("equations/first.png") < out.index("intervening prose")
+    assert second_native < out.index("equations/second.png")
     # Round 3 regression: each duplicate source consumes its OWN occurrence,
     # in page order -- not both matching str.replace's first occurrence.
     assert (
