@@ -2844,8 +2844,26 @@ class PageAssessment:
     needs_ocr_enhancement: bool = False  # native layer has a known deficiency
     #: #1267: refused only for excessive spacing, which dense number tables trigger on real layers.
     refused_for_spacing_alone: bool = False
+    #: #1270 class 3: refused as a scan for a SHAPE reason alone (too few characters, excessive
+    #: spacing, an average word length out of range: contents pages with dot leaders and page
+    #: numbers, blank pages) AND every damage check the refusal short-circuited was then run and
+    #: passed -- #961 invisible text over a raster, digit and encoding corruption, a minus read as
+    #: a digit, a control byte before a digit -- and the layer is not an earlier OCR run's. The
+    #: layer is then the page's own text and agreement with it is a check. False is "not shown",
+    #: never "damaged": every default and every other refusal leaves it False.
+    layer_refused_for_shape_alone: bool = False
+    #: #1270 (review): the page's layer shows NONE of the glyph-level damage signals -- garbage
+    #: ratio over bound, any font-map mojibake glyph (``corrupt_math_glyph_count``), the #960
+    #: garbled-math scan, a U+FFFD -- and the scans could run. Stamped for EVERY page at the one
+    #: stamping point in ``_assess_page`` (the signals body has early returns that never compute
+    #: them). False is "not shown", never "damaged": every default, a restored page, and a scan
+    #: that raised leave it False, and the no-number clearance (class 2) requires True.
+    layer_glyphs_undamaged: bool = False
     has_corrupt_math: bool = False  # font-map mojibake in math (needs region OCR -> LaTeX)
     has_unmapped_math_glyphs: bool = False  # PUA glyphs (weak ToUnicode) -> silent math-glyph loss
+    #: #1270 class 1: ``has_unmapped_math_glyphs`` holds and NO private-use codepoint is
+    #: mathematics (no span in a maths font; the garbled-math scan ran). False is "not shown".
+    private_use_bullets_only: bool = False
     #: #217: the page's symbol font had no ToUnicode map and at least one glyph
     #: it draws is not in the verified recovery table, so those characters are
     #: still whatever the extractor produced. Set for every page of an affected
@@ -3878,6 +3896,7 @@ class BornDigitalDetector:
             assessment.own_layer_figure_words,
         ) = self._own_layer_word_reference(page)
         assessment.painted_layer_text = self._painted_layer_text(page)
+        assessment.layer_glyphs_undamaged = self._layer_glyphs_are_undamaged(page)
         # #1144 round 4: the page's /Rotate value, needed by the prose-recovery
         # floor. ``get_text("words")`` reports UNROTATED coordinates while
         # ``find_tables()`` reports rotated ones, so on a /Rotate 90 page the two
@@ -3891,6 +3910,86 @@ class BornDigitalDetector:
         if text_direction_is_rotated(direction):
             assessment.notes.append(f"rotated text direction {direction}")
         return assessment
+
+    def _layer_glyphs_are_undamaged(self, page: fitz.Page, raw_text: str | None = None) -> bool:
+        """#1270 (review): no glyph-level damage signal fires on this page's layer, and the
+        scans that look for it ran.
+
+        The early returns of ``_assess_page_signals`` skip the garbled-math scan and the
+        corrupt-math count, so a short or sparse layer that a model reads could carry a
+        SymbolMT private-use minus, a ``PðAÞ ¼ 2`` mojibake or a U+FFFD and still look "clean".
+        Any one of them, or a scan that raised, answers False (fail closed).
+        """
+        try:
+            if raw_text is None:
+                raw_text, _zw, _sp = clean_native_text(page.get_text("text"))
+            if self._garbage_ratio(raw_text) > self.MAX_GARBAGE_RATIO:
+                return False
+            if "\ufffd" in raw_text:
+                return False
+            # ANY mojibake glyph, not the page-level floor ``_detect_corrupt_math`` applies:
+            # one eaten sign is a wrong number on a page with two.
+            if corrupt_math_glyph_count(raw_text) > 0:
+                return False
+            return not detect_garbled_math(page, raw_text).fired
+        except Exception:
+            logger.warning("#1270: layer glyph-damage scan failed", exc_info=True)
+            return False
+
+    def _shape_refusal_layer_is_clean(
+        self,
+        page: fitz.Page,
+        raw_text: str,
+        prior_ocr: tuple[bool, bool],
+    ) -> bool:
+        """#1270 class 3: after a SHAPE refusal, did every check the refusal skipped pass?
+
+        ``_assess_page_signals`` returns early for a shape reason, before #961's invisible-text
+        scan, the digit and encoding corruption counts, the minus-as-digit and control-byte
+        scans, and the prior-OCR answer a page that reaches the end gets. Treating the
+        refusal itself as proof the layer is fine would re-open PR #1219: an earlier OCR run's
+        layer, or one with an eaten digit, would "confirm" a model reading. So this runs them
+        all, with the thresholds the born-digital path uses, and any doubt (a scan that raised
+        included) answers False.
+
+        The checks the early return also skipped and that this adds on top (review of PR #1325):
+        raster dominance (GH-35-FU), a page with no font, and the glyph-level damage scan
+        (:meth:`_layer_glyphs_are_undamaged`: #960 garbled math incl. private-use glyphs, any
+        font-map mojibake glyph, U+FFFD).
+
+        The ``native_glyph`` flags a document-level repair pass sets later
+        (``has_unrecovered_symbol_glyphs``) are read by the verdict from the page state, as
+        for every page, and need no repeat here.
+        """
+        try:
+            if prior_ocr[0] or prior_ocr[1]:
+                return False
+            # A scan is a raster that fills the page and a layer baked over it (GH-35-FU): the
+            # layer is an earlier OCR's, whatever its shape.
+            if self._raster_coverage(page) >= self.RASTER_DOMINANCE_RATIO:
+                return False
+            # No font at all: no real text layer (the ``text_layer_is_clean`` condition).
+            if self._count_fonts(page) == 0:
+                return False
+            if not self._layer_glyphs_are_undamaged(page, raw_text):
+                return False
+            if re.search(r"\(cid:\d+\)", raw_text):
+                return False
+            if self._garbage_ratio(raw_text) > self.MAX_GARBAGE_RATIO:
+                return False
+            if count_digit_corruption(raw_text) >= self.MAX_DIGIT_CORRUPTION_HITS:
+                return False
+            if self._encoding_corruption_ratio(raw_text) > self.MAX_ENCODING_CORRUPTION:
+                return False
+            if self._has_invisible_text_over_raster(page):
+                return False
+            if "2" in raw_text and count_minus_as_digit_hits(page):
+                return False
+            return not count_control_byte_before_digit_hits(raw_text)
+        except Exception:
+            # Fail closed: an unreadable page is "unknown", not "clean".
+            logger.warning("#1270: shape-refusal layer scan failed", exc_info=True)
+            return False
 
     def _assess_page_signals(
         self, page: fitz.Page, page_num: int, direction: tuple[float, float]
@@ -3922,6 +4021,11 @@ class BornDigitalDetector:
         raw_text = page.get_text("text")
         raw_text, _zw_stripped, _spaces_normalized = clean_native_text(raw_text)
         pua_count = count_pua_chars(raw_text)
+        # #1270: ``pua_count`` is every private-use codepoint, font-blind: a Wingdings or
+        # SymbolMT list bullet (U+F0B7, U+F0A7, U+F074, U+F06E) counts as one. The flag stays
+        # font-blind too (routing and the maths accounting read it); ``private_use_bullets_only``
+        # below says when no private-use codepoint is mathematics, and the VERDICT then rewords
+        # the mark, or lifts it only on independent page-scope evidence (the release rule).
         has_unmapped_math_glyphs = pua_count > 0
         char_count = len(raw_text)
         words = raw_text.split()
@@ -3973,6 +4077,9 @@ class BornDigitalDetector:
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
+                layer_refused_for_shape_alone=self._shape_refusal_layer_is_clean(
+                    page, raw_text, prior_ocr
+                ),
             )
 
         # Compute text quality signals before the word-count check so that
@@ -4124,6 +4231,9 @@ class BornDigitalDetector:
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
+                layer_refused_for_shape_alone=self._shape_refusal_layer_is_clean(
+                    page, raw_text, prior_ocr
+                ),
                 # The checks below this return would have passed: spacing is the only doubt.
                 refused_for_spacing_alone=(
                     self.MIN_AVG_WORD_LENGTH <= avg_word_len <= self.MAX_AVG_WORD_LENGTH
@@ -4149,6 +4259,9 @@ class BornDigitalDetector:
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
+                layer_refused_for_shape_alone=self._shape_refusal_layer_is_clean(
+                    page, raw_text, prior_ocr
+                ),
             )
 
         if avg_word_len > self.MAX_AVG_WORD_LENGTH:
@@ -4167,6 +4280,9 @@ class BornDigitalDetector:
                 has_equations=has_equations,
                 has_math_font_typesetting=has_math_font_typesetting,
                 notes=notes,
+                layer_refused_for_shape_alone=self._shape_refusal_layer_is_clean(
+                    page, raw_text, prior_ocr
+                ),
             )
 
         # Encoding corruption: a broken font/ToUnicode map yields valid characters
@@ -4326,6 +4442,15 @@ class BornDigitalDetector:
             # Fail closed: an unreadable page is "unknown", not "clean".
             logger.warning("#960: garbled-math scan failed", exc_info=True)
             garbled_math_scan_failed = True
+        # #1270: every private-use codepoint on the page is a list bullet, dingbat or Symbol
+        # non-maths mark: the span-level maths count (``_math_private_use_count``, the #960
+        # predicate that exempts dingbat fonts and Symbol non-maths codes) found none. A scan
+        # that FAILED shows nothing (fail closed): False, the font-blind claim stands.
+        private_use_bullets_only = (
+            pua_count > 0
+            and not garbled_math_scan_failed
+            and not garbled_math_signals.get("private_use", 0)
+        )
         if garbled_math_signals or garbled_math_scan_failed:
             needs_ocr_enhancement = True
             notes.append(
@@ -4523,6 +4648,13 @@ class BornDigitalDetector:
                 f"unmapped math glyphs ({pua_count} private-use codepoint(s)); math symbols "
                 "are font-private (weak ToUnicode)"
             )
+            if private_use_bullets_only:
+                # #1270 class 1: the note above is the font-blind finding; this says what the
+                # span-level scan found, so the page's notes never claim mathematics alone.
+                notes.append(
+                    "no private-use codepoint is in a maths-font span: they are list bullets or "
+                    "dingbats, and the page is not otherwise checked"
+                )
 
         return PageAssessment(
             page_num=page_num,
@@ -4540,6 +4672,7 @@ class BornDigitalDetector:
             needs_ocr_enhancement=needs_ocr_enhancement,
             has_corrupt_math=has_corrupt_math,
             has_unmapped_math_glyphs=has_unmapped_math_glyphs,
+            private_use_bullets_only=private_use_bullets_only,
             minus_as_digit_hits=minus_as_digit_hits,
             minus_as_digit_scan_failed=minus_as_digit_scan_failed,
             control_byte_digit_hits=control_byte_digit_hits,

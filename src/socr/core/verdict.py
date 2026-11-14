@@ -700,8 +700,100 @@ def _unshipped_figure_clauses(p: Any) -> list[VerdictClause]:
     return clauses
 
 
+#: #1270 class 1: the mark of a page whose private-use codepoints are all bullets or dingbats and
+#: that no independent page-scope evidence covers. It does not claim the page's mathematics is
+#: damaged (no codepoint is mathematics); it says what is true: the page is not otherwise checked.
+BULLET_GLYPHS_REASON = (
+    "private-use bullet glyphs (no span in a maths font) in this page's native text; "
+    "the page is not otherwise checked"
+)
+NATIVE_COVERAGE_PASS_REASON = (
+    "no text-like ink on this page is missing from its text layer (#1050 ink-vs-layer check)"
+)
+NATIVE_COVERAGE_NOT_PASSED_REASON = (
+    "the ink-vs-layer check (#1050) did not pass on this page: flagged, unknown, or not run"
+)
+
+
+def native_coverage_outcome(
+    output: PageOutput, p: Any, providers_available: bool = True
+) -> CheckOutcome:
+    """#1270: the ink-vs-layer check (#1050) as a trace entry, for a page that ships NATIVE text.
+    Not part of :func:`pass_trace_outcomes` (see :func:`private_use_bullets_released`).
+
+    PASS only for the verdict ``passed`` (text-like ink with no layer word under it is
+    ``flagged``). A model reading is not a native page (NOT_APPLICABLE; with no provider, NOT_RUN as
+    for the other model-reading checks). Anything but ``passed`` is NOT_RUN here: the finding of
+    a flagged page is its own clause (``text_ink_unread``), not an entry this function invents."""
+    from socr.core.manifest import is_page_failed_marker
+
+    check = Check.NATIVE_COVERAGE
+    if _is_model_reading(output):
+        return _not_applicable(check, "this page ships a model's reading, not its native text")
+    text = output.text or ""
+    if not text.strip():
+        return _not_applicable(check, NO_TEXT_REASON)
+    if is_page_failed_marker(text):
+        return _not_run(check, FAILED_MARKER_REASON)
+    coverage = getattr(p, "text_coverage_verdict", "")
+    if isinstance(coverage, str) and coverage == _COVERAGE_PASSED:
+        return _passed(check, reason=NATIVE_COVERAGE_PASS_REASON)
+    return _not_run(check, NATIVE_COVERAGE_NOT_PASSED_REASON)
+
+
+def independent_native_evidence(entries: Iterable[TraceEntry], text: str) -> bool:
+    """Does a pass trace hold an independent confirmation of the NATIVE page text *text*?
+
+    Yes only when, after every PASS not computed on *text* is dropped
+    (:func:`verify_pass_digests`), the ink-vs-layer check (#1050) passed at page scope and no
+    entry of any check is a FAIL or UNKNOWN. The ink check compares what is printed with what the
+    layer holds: neither is a model reading. Pure over the entries."""
+    checked = verify_pass_digests(entries, text)
+    if any(e.result in (TraceResult.FAIL, TraceResult.UNKNOWN) for e in checked):
+        return False
+    return any(
+        e.check == Check.NATIVE_COVERAGE.value
+        and e.scope == SCOPE_PAGE
+        and e.result is TraceResult.PASS
+        for e in checked
+    )
+
+
+def private_use_bullets_released(
+    output: PageOutput, p: Any, event_kinds: frozenset[str] = frozenset()
+) -> bool:
+    """#1270 class 1, under the RELEASE RULE: may this page's private-use mark be lifted?
+
+    Only when every private-use codepoint on it is a bullet or dingbat
+    (``private_use_bullets_only``) AND the page has independent page-scope evidence on the text it
+    ships: a model reading, :func:`independent_page_evidence`; a native page,
+    :func:`independent_native_evidence`; and no private-use codepoint may ship (below). Without
+    them the mark stays, reworded (:data:`BULLET_GLYPHS_REASON`), and so does the page's
+    demotion."""
+    if not (_flag(p, "has_unmapped_math_glyphs") and _flag(p, "private_use_bullets_only")):
+        return False
+    text = output.text or ""
+    from socr.core.born_digital import count_pua_chars
+
+    # The damage the mark names is in the bytes: a private-use codepoint that still ships is a
+    # glyph a reader cannot see (#1005's rule: a body that still carries them shipped the damage,
+    # whoever wrote it). Measured on run 51270eb5 with the evidence rule alone: 195 pages released,
+    # 4 of them hand-graded defective (tealbook-partb 2018-05-02 p28, whose layer repeats a
+    # paragraph four times, and three tealbook-parta pages), every one shipping its raw bullets.
+    if count_pua_chars(text):
+        return False
+    outcomes = pass_trace_outcomes(output, p, event_kinds, providers_available=True)
+    if _is_model_reading(output):
+        return independent_page_evidence([stamp_text_digest(o.entry, text) for o in outcomes], text)
+    # The ink-vs-layer entry is stated HERE and not added to the persisted trace: it would change
+    # the sidecar of every native page (the P6 byte-identity oracles), for a question only this
+    # release asks.
+    outcomes.append(native_coverage_outcome(output, p))
+    return independent_native_evidence([stamp_text_digest(o.entry, text) for o in outcomes], text)
+
+
 def _native_glyph_clause(
-    p: Any, output: PageOutput, provenance: Any = None
+    p: Any, output: PageOutput, provenance: Any = None, event_kinds: frozenset[str] = frozenset()
 ) -> VerdictClause | None:
     """``native_glyphs=FAIL`` from the PUA class -- and NOT from the math-font class.
 
@@ -738,6 +830,14 @@ def _native_glyph_clause(
         # so it errs toward keeping the warning. Measured: 7 corpus pages with a qwen winner
         # were being told their mathematics is unrecovered PUA while a model reading ships.
         return None
+    if _flag(p, "private_use_bullets_only"):
+        # #1270 class 1: no codepoint is mathematics, so the claim "unrecovered mathematics" is
+        # false. Lifted only with independent page-scope evidence; otherwise the true wording.
+        if private_use_bullets_released(output, p, event_kinds):
+            return None
+        return VerdictClause(
+            Check.NATIVE_GLYPHS, CheckResult.UNKNOWN, SCOPE_PAGE, BULLET_GLYPHS_REASON
+        )
     return VerdictClause(
         Check.NATIVE_GLYPHS,
         CheckResult.FAIL,
@@ -1423,6 +1523,27 @@ NO_NUMBER_LAYER_HAS_SOME_REASON = (
     "reading drops are not checked: #1218)"
 )
 DAMAGED_LAYER_PREFIX = "this page's text layer is damaged, and it does not confirm: "
+#: #1270 class 3: the layer the detector refused for its SHAPE alone (a contents page's dot
+#: leaders, spaced digits, few characters) after every damage check it skipped had run and
+#: passed. Its wording is the TRUE one: not damaged, not shown to be the whole page.
+SHAPE_REFUSED_LAYER_PREFIX = (
+    "this page's text layer was refused as a scan for its shape (not found damaged), and the "
+    "reading disagrees with it, which may be the layer's fault: "
+)
+#: Agreement with that layer. Reworded, never removed: the words check does not accept a layer the
+#: page analysis refused, so no independent page-scope evidence exists for such a page, and agreement
+#: on the numbers the reading kept says nothing about the ones it dropped (#1270, Astra and Carbon).
+SHAPE_REFUSED_LAYER_AGREES_REASON = (
+    "the reading's numbers agree with this page's text layer, which was refused as a scan for its "
+    "shape (not found damaged); no check covers what the reading omits, so the page is not "
+    "otherwise checked"
+)
+#: #1270 class 2: the numbers entry of a page with no number on either side, when independent
+#: page-scope evidence shows the reading ships what the layer prints.
+NO_NUMBER_EITHER_SIDE_REASON = (
+    "neither the page's text layer nor the reading holds a number, and the page's own words and "
+    "ink coverage show the reading ships what the layer prints: nothing to compare"
+)
 #: The reading agrees with a layer socr's page analysis refused or found damaged. Not a
 #: CHECK: the owner's ruling asks for the page's OWN born-digital text, and a refused layer
 #: may be an earlier OCR run's the analysis could not name (Argon, PR #1219 review: #961's
@@ -1458,6 +1579,22 @@ def _layer_is_damaged(p: Any) -> bool:
     # digit, a garbage ratio) or an earlier OCR run's; it is compared so a dispute is
     # NAMED, and the refusal is the damage finding either way.
     return not _flag(p, "is_born_digital") or any(_flag(p, f) for f in _DAMAGED_LAYER_FLAGS)
+
+
+def _layer_is_shape_refused(p: Any) -> bool:
+    """#1270 class 3: refused as a scan for a shape reason ONLY, shown clean, and carrying none
+    of the digit-damage findings.
+
+    ``layer_refused_for_shape_alone`` is set by the detector only after every check its early
+    return skipped has run and passed (:meth:`BornDigitalDetector._shape_refusal_layer_is_clean`).
+    ``_DAMAGED_LAYER_FLAGS`` are read again here, on the page state, so a flag set later (the
+    document-level symbol-font repair) still wins. Used for WORDING only: it never removes a mark.
+    """
+    return (
+        not _flag(p, "is_born_digital")
+        and _flag(p, "layer_refused_for_shape_alone")
+        and not any(_flag(p, f) for f in _DAMAGED_LAYER_FLAGS)
+    )
 
 
 #: How socr's OWN quoted notes open, exactly: every quote opener socr emits (marks.py,
@@ -1504,6 +1641,90 @@ def reading_numbers_text(text: str, page_num: int) -> str:
             continue
         kept.append(line.lstrip("> ") if stripped.startswith(">") else line)
     return "\n".join(kept)
+
+
+#: #1270 class 2: the ``#1050`` ink-vs-layer verdict that says "no text-like ink on this page is
+#: missing from its layer". The value ``core.text_coverage`` writes; compared as a string so a
+#: stand-in page state (a bare ``Mock``) cannot satisfy it.
+_COVERAGE_PASSED = "passed"
+_LAYER_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def _every_layer_token_is_shipped(output: PageOutput, p: Any) -> bool:
+    """Every word of the page's own layer, of ANY length, occurs in the shipped reading.
+
+    The words check (#1294) compares only words of four letters or more, so a reading that
+    drops ``not`` from ``does not permit`` passes it (Astra, re-check of PR #1325). A page with no
+    number on either side can only be cleared on a stricter test: the layer's tokens, counted
+    with multiplicity and ignoring case, must all be in the reading. A reading that rewraps a
+    hyphenated word fails it, and the page keeps its mark: conservative by design."""
+    layer = getattr(p, "own_layer_text", "")
+    if not isinstance(layer, str) or not layer.strip():
+        return False
+    shipped = _HTML_COMMENT_RE.sub(" ", _IMAGE_LINK_RE.sub(" ", output.text or ""))
+    reading = Counter(
+        t.casefold()
+        for t in _LAYER_TOKEN_RE.findall(reading_numbers_text(shipped, output.page_num))
+    )
+    owed = Counter(t.casefold() for t in _LAYER_TOKEN_RE.findall(layer))
+    return bool(owed) and not (owed - reading)
+
+
+def _layer_is_clean_for_no_number_release(p: Any) -> bool:
+    """The page's own layer shows no sign of damage and no sign that it is not the whole page.
+
+    A born-digital, undamaged layer (a refused one, shape or not, is never the reference here:
+    the words check does not accept it either); the detector's glyph-level scans ran and found
+    nothing (``layer_glyphs_undamaged``: False is "not shown", also for a restored page); no
+    unmapped or corrupt maths on the page state; the #1050 ink check PASSED, which is the only
+    check that sees a raster chart whose layer holds just a running header; and the page holds
+    no embedded raster image."""
+    if _layer_is_damaged(p):
+        return False
+    if _flag(p, "has_unmapped_math_glyphs") or _flag(p, "has_corrupt_math"):
+        return False
+    if _flag(p, "has_figures") or not _flag(p, "layer_glyphs_undamaged"):
+        return False
+    coverage = getattr(p, "text_coverage_verdict", "")
+    return isinstance(coverage, str) and coverage == _COVERAGE_PASSED
+
+
+def _no_number_release(output: PageOutput, p: Any) -> CheckOutcome | None:
+    """#1270 class 2, under the RELEASE RULE: the numbers outcome of a page with no number on
+    either side, or ``None`` when the page keeps its UNKNOWN.
+
+    A mark may be removed only when the page has independent page-scope evidence on the text it
+    ships: :func:`independent_page_evidence` over the trace this page would carry, with the
+    numbers entry stated as the release would state it (NOT_APPLICABLE). That needs the words
+    check to have PASSED at page scope and no entry anywhere to be a FAIL or UNKNOWN. On top of
+    it, the layer must be clean and every one of its tokens shipped
+    (:func:`_every_layer_token_is_shipped`, because the words check ignores short words). A
+    page the words check recorded nothing on (a blank or divider page whose only line sits at the
+    page edge) has no such evidence and keeps its mark, which is true: it ships no number."""
+    if not _layer_is_clean_for_no_number_release(p):
+        return None
+    if not _every_layer_token_is_shipped(output, p):
+        return None
+    text = output.text or ""
+    candidate = _not_applicable(Check.TEXT_LAYER_NUMBERS, NO_NUMBER_EITHER_SIDE_REASON)
+    entries = [
+        stamp_text_digest(o.entry, text)
+        for o in (
+            candidate,
+            text_layer_drops_outcome(output, p),
+            text_layer_words_outcome(output, p),
+            control_bytes_outcome(output, p),
+            _prior_ocr_layer_outcome(output, p),
+        )
+    ]
+    return candidate if independent_page_evidence(entries, text) else None
+
+
+def numbers_clause_released(output: PageOutput, p: Any) -> bool:
+    """True when the numbers clause of this page is absent ONLY because class 2 released it
+    (:func:`_no_number_release`): the one place a page loses the mark it used to carry."""
+    outcome = text_layer_numbers_outcome(output, p)
+    return outcome.clause is None and outcome.entry.reason == NO_NUMBER_EITHER_SIDE_REASON
 
 
 def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | None:
@@ -1592,6 +1813,10 @@ def text_layer_numbers_outcome(
     )
     if record.compared == 0:
         layer_count = record.reference_only
+        if not layer_count:
+            released = _no_number_release(output, p)
+            if released is not None:
+                return released
         reason = (
             NO_NUMBER_LAYER_HAS_SOME_REASON.format(count=layer_count)
             if layer_count
@@ -1599,11 +1824,20 @@ def text_layer_numbers_outcome(
         )
         return _found(VerdictClause(check, CheckResult.UNKNOWN, SCOPE_PAGE, reason))
     if _layer_is_damaged(p):
-        reason = (
-            DAMAGED_LAYER_PREFIX + describe_disputes(record)
-            if record.disputed
-            else DAMAGED_LAYER_AGREES_REASON
-        )
+        if _layer_is_shape_refused(p):
+            # #1270 class 3: the TRUE wording for a layer refused for its shape alone. Reworded,
+            # never removed (see SHAPE_REFUSED_LAYER_AGREES_REASON).
+            reason = (
+                SHAPE_REFUSED_LAYER_PREFIX + describe_disputes(record)
+                if record.disputed
+                else SHAPE_REFUSED_LAYER_AGREES_REASON
+            )
+        else:
+            reason = (
+                DAMAGED_LAYER_PREFIX + describe_disputes(record)
+                if record.disputed
+                else DAMAGED_LAYER_AGREES_REASON
+            )
         return _found(VerdictClause(check, CheckResult.UNKNOWN, SCOPE_PAGE, reason))
     if record.disputed and any(_flag(p, f) for f in _COSMETIC_LAYER_FLAGS):
         return _found(
@@ -2019,6 +2253,82 @@ def control_bytes_outcome(output: PageOutput, p: Any) -> CheckOutcome:
     return _passed(Check.CONTROL_BYTES, reason=CONTROL_BYTES_PASS_REASON)
 
 
+_HTML_TABLE_RE = re.compile(r"<table\b", re.IGNORECASE)
+
+#: #1270: a table that ships with no table-ladder disposition at all.
+UNCHECKED_TABLE_REASON = (
+    "this table has no table-ladder verdict (not verified, unverified or withheld), "
+    "so nothing checked its cells"
+)
+
+
+def _page_has_table_ladder_terminal(
+    output: PageOutput, p: Any, event_kinds: frozenset[str]
+) -> bool:
+    """True when the table ladder recorded ANY disposition for this page.
+
+    The same three sources ``orchestrator._table_ladder_terminal`` reads (the page state's
+    disposition, the shipped attempt's mode) plus the page's terminal audit events, which is
+    the only place an ACCEPTED table is recorded (it sets no disposition). Page-level on
+    purpose: the seam sees event KINDS, not table ids. A page with one terminal and one
+    unwitnessed table is caught by the assemble backfill, which stamps the missing one.
+    """
+    from socr.judge.table_verdict import TABLE_LADDER_EVENT_KINDS
+
+    terminals = {
+        FailureMode.TABLE_REJECTED,
+        FailureMode.TABLE_UNVERIFIED,
+        FailureMode.TABLE_WITHHELD,
+    }
+    return (
+        getattr(p, "table_ladder_disposition", None) in terminals
+        or output.failure_mode in terminals
+        or bool(event_kinds & TABLE_LADDER_EVENT_KINDS)
+    )
+
+
+def unchecked_table_clauses(
+    output: PageOutput, p: Any, event_kinds: frozenset[str] = frozenset()
+) -> tuple[VerdictClause, ...]:
+    """#1270: one ``source_evidence`` UNKNOWN per table that was never checked.
+
+    A table that shipped and has no ladder terminal of any kind (the assemble backfill that
+    stamps ``TABLE_UNVERIFIED`` was skipped, or the ladder never ran) was not checked by
+    anything. Its mark must not depend on another clause happening to be present: the
+    numbers clause's shape and no-number clearances (class 2 and 3) removed the mark such a
+    page used to carry by accident. Scope is ``table:N``, N the ordinal of the table block in
+    the shipped text, so a mark never impugns a sibling table.
+
+    Emitted only on a page whose numbers clause was RELEASED by class 2 (see
+    :func:`numbers_clause_released`): every other page keeps the marks it already had, and
+    the rest of the suite and corpus see no change. A page with a table the ladder never ran
+    on for another reason is a pre-existing question, not one B4 opened.
+
+    Nothing is claimed for a failed-marker page or one whose table was withheld (no table
+    block ships there).
+    """
+    from socr.core.manifest import is_page_failed_marker
+    from socr.tables.reconcile import find_table_blocks
+
+    text = output.text or ""
+    if not text.strip() or is_page_failed_marker(text):
+        return ()
+    if _page_has_table_ladder_terminal(output, p, event_kinds):
+        return ()
+    # Pipe tables and HTML ``<table>`` blocks (a model may ship either; the ladder's witness and
+    # the assemble backfill read pipe tables only). Ordinals are 1-based, as everywhere else.
+    count = len(find_table_blocks(text)) + len(_HTML_TABLE_RE.findall(text))
+    return tuple(
+        VerdictClause(
+            Check.SOURCE_EVIDENCE,
+            CheckResult.UNKNOWN,
+            region_scope("table", ordinal),
+            UNCHECKED_TABLE_REASON,
+        )
+        for ordinal in range(1, count + 1)
+    )
+
+
 def text_layer_words_clause(output: PageOutput, p: Any) -> VerdictClause | None:
     """#1294: FAIL naming the words when :func:`page_missing_words` finds any (UNKNOWN on a
     damaged layer, :func:`_word_layer_is_damaged`); else nothing."""
@@ -2049,6 +2359,8 @@ _SILENT_SUCCESS_ORDER: tuple[tuple[Check, str], ...] = (
     (Check.TEXT_LAYER_WORDS, SCOPE_PAGE),
     # #1306: last again, for the same reason.
     (Check.CONTROL_BYTES, SCOPE_PAGE),
+    # #1270: last again.
+    (Check.SOURCE_EVIDENCE, "table"),
 )
 
 
@@ -2091,12 +2403,18 @@ def silent_success_clauses(
     drops = text_layer_drops_clause(output, p)
     words = text_layer_words_clause(output, p)
     control = control_bytes_clause(output, p)
+    # Only a page whose numbers clause is None can have been released; asking again costs one
+    # more comparison on those pages and none on the pages that carry the clause.
+    released = numbers is None and numbers_clause_released(output, p)
     clauses = (
         *_clauses_ahead_of_text_layer_numbers(output, p, event_kinds),
         *((numbers,) if numbers is not None else ()),
         *((drops,) if drops is not None else ()),
         *((words,) if words is not None else ()),
         *((control,) if control is not None else ()),
+        # #1270: last, outside the "ahead of the numbers clause" tuple, so a re-finalize tool's
+        # slot count for the numbers clause is unchanged.
+        *(unchecked_table_clauses(output, p, event_kinds) if released else ()),
     )
     # #1251: LAST, and only on a page the other checks leave SUCCESS: a page that already carries
     # a clause is already demoted and marked, and a second line would say nothing new.
@@ -2714,7 +3032,7 @@ def derive_clauses(
         _mode_clause(output),
         _corrupt_math_hybrid_clause(output),
         _judge_refusal_clause(output, provenance),
-        _native_glyph_clause(p, output, provenance),
+        _native_glyph_clause(p, output, provenance, event_kinds),
         _chart_region_clause(p),
         _table_label_clause(output),
         _scanned_figure_clause(p),
@@ -2867,6 +3185,12 @@ def _status_is_explained(
     # first. Each asks about its own clause, so neither lane's answer depends on the other's.
     check = LAYER_CHECK_MODES.get(output.failure_mode)
     if check is not None and any(c.check is check for c in clauses):
+        return True
+    # #1270: ``numbers_unchecked`` is also the mode of a page whose numbers clause class 2 released
+    # and whose table no ladder terminal covers; its clause is the table's own.
+    if output.failure_mode is FailureMode.NUMBERS_UNCHECKED and any(
+        c.check is Check.SOURCE_EVIDENCE and c.reason == UNCHECKED_TABLE_REASON for c in clauses
+    ):
         return True
     status_free = set(silent_success_clauses(output, p, event_kinds))
     return bool([c for c in clauses if c not in status_free])
