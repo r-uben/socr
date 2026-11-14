@@ -10,6 +10,7 @@ from socr.core.config import (
 )
 from socr.core.providers import (
     DEFAULT_PROVIDERS,
+    GEMINI_COST_PER_PAGE_USD,
     PROFILE_GEMINI,
     PROFILE_NOUGAT,
     PROFILE_QWEN_CLOUD,
@@ -27,9 +28,9 @@ def test_ladder_is_cheapest_first():
         include_ineligible=True,
     )
     engines = [p.engine for p in ladder]
-    # GLM (free) before GEMINI ($0.0002) before MISTRAL ($0.001)
-    assert engines == [EngineType.GLM, EngineType.GEMINI, EngineType.MISTRAL]
-    assert [p.cost_per_page_usd for p in ladder] == [0.0, 0.0002, 0.001]
+    # GLM (free) before MISTRAL ($0.001) before GEMINI (measured, #1343)
+    assert engines == [EngineType.GLM, EngineType.MISTRAL, EngineType.GEMINI]
+    assert [p.cost_per_page_usd for p in ladder] == [0.0, 0.001, GEMINI_COST_PER_PAGE_USD]
 
 
 def test_free_engines_tie_broken_by_priority():
@@ -112,7 +113,7 @@ def test_per_page_only_filter():
 
 def test_cost_of():
     assert cost_of(EngineType.GLM, 10) == 0.0
-    assert cost_of(EngineType.GEMINI, 5) == 0.0002 * 5
+    assert cost_of(EngineType.GEMINI, 5) == GEMINI_COST_PER_PAGE_USD * 5
     assert cost_of(EngineType.MISTRAL, 3) == 0.001 * 3
     assert cost_of(EngineType.AUTO, 10) == 0.0  # unknown -> 0
 
