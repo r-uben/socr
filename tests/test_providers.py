@@ -59,14 +59,14 @@ def test_none_available_means_all_known():
 
 
 def test_max_cost_per_page_cap():
-    # Cap below Mistral's price drops it; include_ineligible so Mistral is considered.
+    # Cap below Gemini's measured price drops it; include_ineligible so Mistral is considered.
     ladder = provider_ladder(
         {EngineType.GLM, EngineType.GEMINI, EngineType.MISTRAL},
-        max_cost_per_page=0.0005,
+        max_cost_per_page=GEMINI_COST_PER_PAGE_USD / 2,
         include_ineligible=True,
     )
-    assert EngineType.MISTRAL not in [p.engine for p in ladder]
-    assert EngineType.GEMINI in [p.engine for p in ladder]
+    assert EngineType.GEMINI not in [p.engine for p in ladder]
+    assert EngineType.MISTRAL in [p.engine for p in ladder]
 
 
 def test_gh154_zero_cap_pinned_excludes_zero_priced_cloud():
@@ -93,7 +93,7 @@ def test_gh154_zero_cap_pinned_is_inert_above_zero():
     # pinned flag only changes behaviour at the exact 0 sentinel.
     ladder = provider_ladder(
         [PROFILE_QWEN_LOCAL, PROFILE_QWEN_CLOUD, PROFILE_GEMINI],
-        max_cost_per_page=0.001,
+        max_cost_per_page=GEMINI_COST_PER_PAGE_USD * 2,
         zero_cap_pinned=True,
     )
     assert PROFILE_QWEN_CLOUD in ladder

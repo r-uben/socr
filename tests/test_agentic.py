@@ -15,7 +15,7 @@ import pytest
 
 from socr.core.audit_log import AuditEvent
 from socr.core.config import EngineType
-from socr.core.providers import provider_ladder
+from socr.core.providers import GEMINI_COST_PER_PAGE_USD, provider_ladder
 from socr.core.result import PageOutput, PageStatus
 from socr.pipeline.agentic import (
     DEFAULT_PROVIDER_TIMEOUTS,
@@ -30,7 +30,7 @@ LADDER = provider_ladder(
     {EngineType.GLM, EngineType.GEMINI, EngineType.MISTRAL},
     include_ineligible=True,
 )
-# -> [GLM(free), GEMINI(0.0002), MISTRAL(0.001)]
+# -> [GLM(free), MISTRAL(0.001), GEMINI(measured, #1343)]
 
 
 def _run(audit=None, conf=None, text=None):
@@ -76,19 +76,19 @@ def test_accepts_cheapest_no_escalation():
 
 
 def test_escalates_to_next_when_cheap_rejected():
-    d = route_page(2, LADDER, _run(), _StubJudge({EngineType.GEMINI}))
+    d = route_page(2, LADDER, _run(), _StubJudge({EngineType.MISTRAL}))
     assert d.accepted
-    assert d.winning_engine == "gemini"
-    assert [a.engine for a in d.attempts] == [EngineType.GLM, EngineType.GEMINI]
+    assert d.winning_engine == "mistral"
+    assert [a.engine for a in d.attempts] == [EngineType.GLM, EngineType.MISTRAL]
     assert d.escalations == 1
-    assert d.total_cost_usd == pytest.approx(0.0002)  # free GLM + gemini
+    assert d.total_cost_usd == pytest.approx(0.001)  # free GLM + mistral
 
 
 def test_climbs_full_ladder_then_accepts_priciest():
-    d = route_page(3, LADDER, _run(), _StubJudge({EngineType.MISTRAL}))
-    assert d.accepted and d.winning_engine == "mistral"
+    d = route_page(3, LADDER, _run(), _StubJudge({EngineType.GEMINI}))
+    assert d.accepted and d.winning_engine == "gemini"
     assert d.escalations == 2
-    assert d.total_cost_usd == pytest.approx(0.0012)
+    assert d.total_cost_usd == pytest.approx(0.001 + GEMINI_COST_PER_PAGE_USD)
 
 
 def test_all_rejected_keeps_best_audit_passed():
@@ -132,11 +132,11 @@ def test_provider_exception_is_recorded_and_skipped():
             audit_passed=True,
         )
 
-    d = route_page(7, LADDER, run, _StubJudge({EngineType.GEMINI}))
-    assert d.accepted and d.winning_engine == "gemini"
+    d = route_page(7, LADDER, run, _StubJudge({EngineType.MISTRAL}))
+    assert d.accepted and d.winning_engine == "mistral"
     assert d.attempts[0].engine == EngineType.GLM
     assert d.attempts[0].output.status == PageStatus.ERROR  # recorded the failure
-    assert d.attempts[1].engine == EngineType.GEMINI
+    assert d.attempts[1].engine == EngineType.MISTRAL
 
 
 def test_empty_ladder_yields_error():
