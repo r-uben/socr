@@ -50,4 +50,7 @@ Yes, by default, with these conditions:
 
 The ladder is sorted by cost. At $0.0207 Gemini is no longer cheaper than Mistral ($0.001) in any
 ladder that includes both; Mistral is `auto_eligible=False`, so the default ladder is unaffected.
-Nine existing tests pin the old 0.0002 ordering and fail; see the PR description.
+Twelve existing tests pinned the old 0.0002 price or the GLM, GEMINI, MISTRAL order; they now use
+`GEMINI_COST_PER_PAGE_USD` and the order GLM, MISTRAL, GEMINI (stand-in engines swapped where a test
+needed a cheap paid rung). Full suite green (10761 passed). The coordinator should confirm that
+Gemini sitting above Mistral in an include_ineligible ladder is intended.
