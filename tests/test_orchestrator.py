@@ -20,7 +20,7 @@ from socr.core.result import (
     PageOutput,
     PageStatus,
 )
-from socr.core.providers import PROFILE_QWEN_LOCAL
+from socr.core.providers import GEMINI_COST_PER_PAGE_USD, PROFILE_QWEN_LOCAL
 from socr.core.state import DocumentState, PageState
 from socr.figures.extractor import ExtractionResult, ExtractedFigure
 from socr.math.recover import CORRUPT_MATH_PROMPT, CorruptMathRegion
@@ -1410,8 +1410,8 @@ class TestAgenticIntegration:
             result = pipeline.process(pdf, tmp_path)
 
         assert_clean_or_only_unchecked(result, pages=(1,))  # #1244 C1: see c1_support
-        # Gemini is $0.0002/page and one page was routed -> cost recorded.
-        assert result.cost == pytest.approx(0.0002)
+        # Gemini is measured price/page and one page was routed -> cost recorded.
+        assert result.cost == pytest.approx(GEMINI_COST_PER_PAGE_USD)
         # agentic mode writes a replayable manifest by default.
         doc_dir = tmp_path / "paper"
         assert (doc_dir / "manifest.json").exists()
@@ -1438,8 +1438,8 @@ class TestAgenticIntegration:
             result = pipeline.process(pdf, tmp_path)
 
         assert_clean_or_only_unchecked(result, pages=(1,))  # #1244 C1: see c1_support
-        # GLM (free) was tried and rejected, escalated to Gemini ($0.0002).
-        assert result.cost == pytest.approx(0.0002)
+        # GLM (free) was tried and rejected, escalated to Gemini (measured price).
+        assert result.cost == pytest.approx(GEMINI_COST_PER_PAGE_USD)
         assert _good_text()[:25] in result.markdown  # gemini's output won
 
     def test_agentic_corrupt_math_flag_uses_region_recovery_not_whole_page(self, tmp_path):
@@ -2107,8 +2107,8 @@ class TestAgenticIntegration:
             result = pipeline.process(pdf, tmp_path)
 
         # Because native-first is off, the prose page was OCR'd via the ladder
-        # (Gemini, $0.0002) rather than served free from native text.
-        assert result.cost == pytest.approx(0.0002)
+        # (Gemini, measured price) rather than served free from native text.
+        assert result.cost == pytest.approx(GEMINI_COST_PER_PAGE_USD)
         assert _good_text()[:25] in result.markdown
 
 
@@ -2242,7 +2242,7 @@ class TestNativeOnlyRouting:
         with patch("socr.pipeline.orchestrator.get_engine", return_value=eng):
             result = pipeline.process(pdf, tmp_path)
 
-        assert result.cost == pytest.approx(0.0002)
+        assert result.cost == pytest.approx(GEMINI_COST_PER_PAGE_USD)
         assert "Native text for page 1" in result.markdown
         assert _good_text() in result.markdown
         assert eng.process_pages.call_args.kwargs["page_nums"] == [2]
@@ -2414,8 +2414,8 @@ class TestNativeOnlyRouting:
         with patch("socr.pipeline.orchestrator.get_engine", return_value=eng):
             result = pipeline.process(pdf, tmp_path)
 
-        # Page 2 (scan) must be OCR'd via Gemini ($0.0002).
-        assert result.cost == pytest.approx(0.0002), (
+        # Page 2 (scan) must be OCR'd via Gemini (measured price).
+        assert result.cost == pytest.approx(GEMINI_COST_PER_PAGE_USD), (
             "scans must still be OCR'd even under native_only"
         )
 

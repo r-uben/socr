@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 from socr.audit.heuristics import HeuristicsChecker
 from socr.audit.scorer import FailureModeScorer
 from socr.core.config import EngineType, PipelineConfig
-from socr.core.providers import provider_ladder
+from socr.core.providers import GEMINI_COST_PER_PAGE_USD, PROFILE_MISTRAL, provider_ladder
 from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.pipeline.agentic import AcceptDecision, route_page
 
@@ -68,7 +68,7 @@ class TestPaidRungsReachable:
         assert d.accepted
         assert d.winning_engine == "gemini"
         # All five free rungs were genuinely tried first
-        assert len(d.attempts) == 6
+        assert len(d.attempts) == len(FULL_LADDER)
 
     def test_explicit_max_attempts_still_caps(self) -> None:
         d = route_page(1, FULL_LADDER, _run(), _AcceptOnly({EngineType.GEMINI}), max_attempts=2)
@@ -86,7 +86,7 @@ class TestBudgetPreCheck:
             FULL_LADDER,
             _run(),
             _AcceptOnly({EngineType.GEMINI}),  # only gemini would pass
-            remaining_budget=0.0001,  # < gemini's 0.0002
+            remaining_budget=0.0001,  # < every paid rung's price
         )
         assert not d.accepted
         # Skipped rungs now appear as stub attempts with reason="budget exceeded".
@@ -101,20 +101,23 @@ class TestBudgetPreCheck:
         assert d.total_cost_usd == 0.0
 
     def test_budget_covers_first_paid_rung_only(self) -> None:
-        """Within one page the budget decrements: with $0.0011, mistral
-        ($0.001) would fit BEFORE gemini spends $0.0002 but must not fit
-        after — only the decrement makes it skipped."""
+        """Within one page the budget decrements: the budget covers gemini
+        on its own, but not after mistral (the cheaper paid rung, tried first)
+        has spent its price, so only the decrement makes gemini skipped."""
+        mistral_price = PROFILE_MISTRAL.cost_per_page_usd
+        budget = GEMINI_COST_PER_PAGE_USD + mistral_price / 2
+        assert GEMINI_COST_PER_PAGE_USD <= budget < GEMINI_COST_PER_PAGE_USD + mistral_price
         d = route_page(
             1,
             FULL_LADDER,
             _run(),
             _AcceptOnly(set()),  # nothing accepted -> walk the whole ladder
-            remaining_budget=0.0011,
+            remaining_budget=budget,
         )
         skipped = {a.engine for a in d.attempts if a.reason == "budget exceeded"}
         ran = {a.engine for a in d.attempts if a.reason != "budget exceeded"}
-        assert EngineType.GEMINI in ran  # gemini ran (fits budget)
-        assert EngineType.MISTRAL in skipped  # mistral skipped after gemini decrements budget
+        assert EngineType.MISTRAL in ran  # mistral ran (fits budget)
+        assert EngineType.GEMINI in skipped  # skipped only because mistral decremented it
 
     def test_budget_exactly_covering_a_rung_runs_it(self) -> None:
         """Boundary: a rung that exactly fits the remaining budget runs
@@ -124,10 +127,10 @@ class TestBudgetPreCheck:
             FULL_LADDER,
             _run(),
             _AcceptOnly(set()),
-            remaining_budget=0.0002,  # == gemini's price
+            remaining_budget=0.001,  # == mistral's price, first paid rung on the ladder
         )
-        tried = {a.engine for a in d.attempts}
-        assert EngineType.GEMINI in tried
+        ran = {a.engine for a in d.attempts if a.reason != "budget exceeded"}
+        assert EngineType.MISTRAL in ran
 
     def test_no_budget_means_whole_ladder(self) -> None:
         d = route_page(1, FULL_LADDER, _run(), _AcceptOnly(set()))

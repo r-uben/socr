@@ -10,6 +10,7 @@ from socr.core.config import (
 )
 from socr.core.providers import (
     DEFAULT_PROVIDERS,
+    GEMINI_COST_PER_PAGE_USD,
     PROFILE_GEMINI,
     PROFILE_NOUGAT,
     PROFILE_QWEN_CLOUD,
@@ -27,9 +28,9 @@ def test_ladder_is_cheapest_first():
         include_ineligible=True,
     )
     engines = [p.engine for p in ladder]
-    # GLM (free) before GEMINI ($0.0002) before MISTRAL ($0.001)
-    assert engines == [EngineType.GLM, EngineType.GEMINI, EngineType.MISTRAL]
-    assert [p.cost_per_page_usd for p in ladder] == [0.0, 0.0002, 0.001]
+    # GLM (free) before MISTRAL ($0.001) before GEMINI (measured, #1343)
+    assert engines == [EngineType.GLM, EngineType.MISTRAL, EngineType.GEMINI]
+    assert [p.cost_per_page_usd for p in ladder] == [0.0, 0.001, GEMINI_COST_PER_PAGE_USD]
 
 
 def test_free_engines_tie_broken_by_priority():
@@ -58,14 +59,14 @@ def test_none_available_means_all_known():
 
 
 def test_max_cost_per_page_cap():
-    # Cap below Mistral's price drops it; include_ineligible so Mistral is considered.
+    # Cap below Gemini's measured price drops it; include_ineligible so Mistral is considered.
     ladder = provider_ladder(
         {EngineType.GLM, EngineType.GEMINI, EngineType.MISTRAL},
-        max_cost_per_page=0.0005,
+        max_cost_per_page=GEMINI_COST_PER_PAGE_USD / 2,
         include_ineligible=True,
     )
-    assert EngineType.MISTRAL not in [p.engine for p in ladder]
-    assert EngineType.GEMINI in [p.engine for p in ladder]
+    assert EngineType.GEMINI not in [p.engine for p in ladder]
+    assert EngineType.MISTRAL in [p.engine for p in ladder]
 
 
 def test_gh154_zero_cap_pinned_excludes_zero_priced_cloud():
@@ -92,7 +93,7 @@ def test_gh154_zero_cap_pinned_is_inert_above_zero():
     # pinned flag only changes behaviour at the exact 0 sentinel.
     ladder = provider_ladder(
         [PROFILE_QWEN_LOCAL, PROFILE_QWEN_CLOUD, PROFILE_GEMINI],
-        max_cost_per_page=0.001,
+        max_cost_per_page=GEMINI_COST_PER_PAGE_USD * 2,
         zero_cap_pinned=True,
     )
     assert PROFILE_QWEN_CLOUD in ladder
@@ -112,7 +113,7 @@ def test_per_page_only_filter():
 
 def test_cost_of():
     assert cost_of(EngineType.GLM, 10) == 0.0
-    assert cost_of(EngineType.GEMINI, 5) == 0.0002 * 5
+    assert cost_of(EngineType.GEMINI, 5) == GEMINI_COST_PER_PAGE_USD * 5
     assert cost_of(EngineType.MISTRAL, 3) == 0.001 * 3
     assert cost_of(EngineType.AUTO, 10) == 0.0  # unknown -> 0
 
@@ -178,7 +179,7 @@ def test_direct_profile_list_makes_qwen_local_cloud_distinct_rungs():
 
 
 def test_gemini_profile_model_matches_engine_default():
-    assert DEFAULT_GEMINI_MODEL == "gemini-3.8-flash"
+    assert DEFAULT_GEMINI_MODEL == "gemini-4-hydrogen"
     assert PROFILE_GEMINI.model == DEFAULT_GEMINI_MODEL == PipelineConfig().gemini_model
 
 
