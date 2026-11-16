@@ -606,14 +606,24 @@ def _glyph_bbox_has_ink(
     *,
     page_pix=None,
 ) -> bool:
-    """True when the glyph box contains a non-white pixel on a white-backed render."""
+    """True when the glyph box contains a non-white pixel on a white-backed render.
+
+    *bbox* is a ``rawdict`` char box, which MuPDF reports in the page's UNROTATED
+    coordinate space. ``get_pixmap(clip=...)`` and a full-page render both work in the
+    ROTATED space (``page.rect``, with ``/Rotate`` already applied). On a page with
+    ``/Rotate`` 90 or 270 the raw box therefore lands on the wrong part of the render
+    and most glyphs read as inkless (#1350). ``page.rotation_matrix`` maps one space
+    to the other; it is the identity at rotation 0 and is skipped there.
+    """
     import fitz
 
     rect = fitz.Rect(bbox)
     if rect.is_empty or rect.get_area() <= 0:
         return False
+    if page.rotation:
+        rect = rect * page.rotation_matrix
     if page_pix is not None:
-        device = fitz.Rect(bbox) * mat
+        device = rect * mat
         x0 = max(0, int(device.x0))
         y0 = max(0, int(device.y0))
         x1 = min(page_pix.width, int(device.x1))
