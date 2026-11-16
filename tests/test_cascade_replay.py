@@ -45,7 +45,11 @@ def test_replay_blocks_gemini_after_source_evidence(tmp_path: Path) -> None:
             {"engine": "gemini", "accepted": False, "reason": "heuristics failed"},
         ],
     )
-    rep = replay_manifest(path, ReplayRules())
+    # #1346: the block is opt-in now; the default projection keeps the paid rung.
+    default = replay_manifest(path, ReplayRules())
+    assert default.new_gemini_pages == 1
+    assert not default.block_reasons
+    rep = replay_manifest(path, ReplayRules(block_paid_on_source_evidence=True))
     assert rep.recorded_gemini_pages == 1
     assert rep.new_gemini_pages == 0
     assert rep.block_reasons["source_evidence_table"] == 1

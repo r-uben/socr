@@ -148,7 +148,11 @@ from socr.judge.table_verdict import (
     TABLE_WRAPPED_LABEL_MERGED_KIND,
     rung_kind,
 )
-from socr.routing.cascade_policy import sparse_signals_from_page_assessment
+from socr.routing.cascade_policy import (
+    blocks_paid_escalation,
+    is_paid_profile,
+    sparse_signals_from_page_assessment,
+)
 from socr.pipeline.agentic import (
     REASON_PROVIDER_TIMEOUT,
     REJUDGE_ACCEPTED,
@@ -8429,6 +8433,15 @@ class UnifiedPipeline:
                 )
                 return False, bo
 
+            # #1346: this paid reading was taken after the image check disputed an earlier
+            # reading of the page's table, when any attempt this page already holds was refuted
+            # by it. ``route_page`` stamps the readings it runs; this reading is a fresh
+            # output, so it is stamped here or it would ship the unmarked SUCCESS the owner
+            # ruled out.
+            if is_paid_profile(profile) and any(
+                blocks_paid_escalation(getattr(a, "judge_reason", "") or "") for a in ps.attempts
+            ):
+                out.paid_after_witness_dispute = True
             out.escalated_from = bo.engine
             out.cost_usd = profile.cost_per_page_usd
             out.provider_id = profile.id
@@ -18371,6 +18384,13 @@ class UnifiedPipeline:
                     "provider_model": _timed_out.provider_model or "",
                     "provider_backend": _timed_out.provider_backend or "",
                     "figures": [f.to_dict() for f in (_timed_out.figures or [])],
+                    # #1346: omit-when-unset; it travels with the bytes so a resume's
+                    # re-judge does not ship a paid-after-dispute reading unmarked.
+                    **(
+                        {"paid_after_witness_dispute": True}
+                        if _timed_out.paid_after_witness_dispute
+                        else {}
+                    ),
                 },
             }
 
@@ -18555,6 +18575,7 @@ class UnifiedPipeline:
                     ) = self._load_page_judge_calls(
                         doc_dir / "pages", page_num, meta["judge_calls"]
                     )
+            ps.rejudge_candidate_after_dispute = cand.get("paid_after_witness_dispute") is True
             return text, judge_model, figures, prof
         except Exception:
             logger.debug("#1013: p%d kept candidate unreadable; reprocessing", page_num)
@@ -18614,6 +18635,7 @@ class UnifiedPipeline:
                 provider_backend=backend,
                 provider_model=model,
                 figures=list(figures),
+                paid_after_witness_dispute=state.pages[page_num].rejudge_candidate_after_dispute,
             )
 
         current = state.agentic_judge_model or JUDGE_IDENTITY_HEURISTIC
@@ -19114,7 +19136,9 @@ class UnifiedPipeline:
                     _mode = None
                 # #1251: this mode too is written only by the verdict demotion of a SUCCESS page.
                 if (
-                    _mode in LAYER_CHECK_MODES or _mode is _FM.READING_UNCORROBORATED
+                    _mode in LAYER_CHECK_MODES
+                    or _mode is _FM.READING_UNCORROBORATED
+                    or _mode is _FM.PAID_READING_AFTER_DISPUTE
                 ) and winning.get("status") != PageStatus.WARNING.value:
                     is_permanently_unverifiable = False
 

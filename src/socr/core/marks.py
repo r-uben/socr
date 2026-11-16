@@ -269,6 +269,11 @@ class Check(str, Enum):
     EQUATION_FIDELITY = "equation_fidelity"
     TABLE_LABEL = "table_label"
     PAGE_PROCESSED = "page_processed"
+    #: #1346: the shipped reading was taken from a paid reader after the image check disputed
+    #: an earlier reader's table. Not ``SOURCE_EVIDENCE``: the legacy table marks cover that
+    #: check page-wide and a mode clause on the same (check, scope) would replace this one, and
+    #: this fact is about which READING shipped, not about one table's cells.
+    READING_DISPUTE = "reading_dispute"
     #: #1156: the page's text layer is an earlier OCR run, not the document's own
     #: characters, and nothing independent has read the page to compare it with.
     PRIOR_OCR_LAYER = "prior_ocr_layer"

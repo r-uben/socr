@@ -204,7 +204,7 @@ The record is a per-page **verdict** (`core/verdict.py`), written to the page si
 `clauses` empty means CHECKED. `check` names what did not pass (`page_judge`,
 `source_evidence`, `native_table_verifier`, `native_coverage`, `figure_text`,
 `chart_region`, `table_structure`, `native_glyphs`, `equation_fidelity`, `table_label`,
-`page_processed`, `unreadable_input`, or `unknown`). `result` is `FAIL` (the check ran and
+`page_processed`, `reading_dispute`, `unreadable_input`, or `unknown`). `result` is `FAIL` (the check ran and
 the page did not pass) or `UNKNOWN` (the check could not decide, or never ran). `scope` is
 `page`, `document`, or a region such as `table:2`.
 
@@ -377,6 +377,7 @@ in the Markdown.
 | Value | What happened | What the reader should do |
 | --- | --- | --- |
 | `reading_uncorroborated` | A model reading the page judge accepted, and no independent check confirmed it (#1251). The judge is a model call on the same page, so its acceptance is not a check. The page stays SUCCESS only when the words check passed at page scope, the numbers check passed (or has no numbers to check) and no check found anything, all on the shipped text. Ships under a `page_judge=UNKNOWN` mark; the text is untouched. A resume restores it instead of re-reading it. | Verify the page against the image before citing. |
+| `paid_reading_after_dispute` | The shipped reading came from a paid reader called after the image check disputed an earlier reader's table (#1346). It ships marked even when it passes every check: the checks compare it with a witness that was already wrong about this page, so which reading is right was not independently confirmed. Ships under a `reading_dispute=UNKNOWN` mark added beside the page's other marks (it never replaces one, and the recorded mode is the other mark's when there is one); the text is untouched; the sidecar's `winning_output.paid_after_witness_dispute` is `true`. Never applied to an ERROR page (there the paid reading did not ship). A resume restores it instead of paying the reader again. | Verify the page against the image before citing. |
 | `model_output_flagged` | A model produced the page, no ladder rung accepted it, and the native table carries a distrust flag. The model output ships, flagged. | Verify table numbers. |
 | `model_table_over_failed_floor` | The native table failed its geometry check and a model attempt authored a grid. The model's grid ships instead of the failed-table marker. A stronger warning than `model_output_flagged`. | Verify the whole table against the PDF. |
 | `table_rejected` | The table judge ladder ran out of rungs on a corroborated FAIL. The table text ships, demoted under a warning. | Do not quote its numbers without checking. |

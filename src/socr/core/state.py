@@ -284,6 +284,10 @@ class PageState:
     #: #1251: the note a sidecar's ``judge_calls`` reference carried about an earlier unreadable
     #: history (``prior_unavailable``), carried forward so a later flush does not drop it.
     judge_calls_prior_unavailable: dict | None = None
+    #: #1346: the kept judge-timeout candidate a resume re-judges was a paid reading taken after
+    #: a witness dispute (its sidecar says so). Set by ``_load_rejudge_candidate``, read by
+    #: ``_rejudge_kept_candidate`` so the re-judged output carries the flag its first run had.
+    rejudge_candidate_after_dispute: bool = False
     #: GH-271: the corrupt-equation lane (default on) produced a region hybrid
     #: that must ship even though it remains WARNING/audit_passed=False (syntax
     #: is not a mathematical-fidelity oracle). Read only by final winner selection.

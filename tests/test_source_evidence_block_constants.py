@@ -48,7 +48,18 @@ def test_witnessed_contradiction_uses_shared_prefix() -> None:
         paid_gemini_block_after_reject,
     )
 
+    # #1346: the predicate still recognises the dispute, but the default policy no
+    # longer turns it into a paid block; the explicit flag does.
     assert (
         paid_gemini_block_after_reject(decision.reason, SparsePageSignals(), audit_min_words=40)
+        == ""
+    )
+    assert (
+        paid_gemini_block_after_reject(
+            decision.reason,
+            SparsePageSignals(),
+            audit_min_words=40,
+            block_paid_on_source_evidence=True,
+        )
         == PAID_BLOCK_REASON_SOURCE_EVIDENCE
     )

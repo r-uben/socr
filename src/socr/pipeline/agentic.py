@@ -125,6 +125,11 @@ class ProviderAttempt:
     provider_id: str = ""
     model: str = ""
     backend: str = ""
+    #: #1346: a paid rung that ran only because the block was lifted, after a free rung
+    #: the witness had refuted. When it is not accepted, its reading is a record, never a
+    #: candidate: it cannot win ``_best_effort`` and cannot be promoted, so the page ends
+    #: as it did when this rung was a zero-text stub.
+    paid_after_witness_dispute: bool = False
 
 
 @dataclass
@@ -426,6 +431,7 @@ def settle_scanned_table_decision(
         for att in decision.attempts
         if (att.output.table_disputed or att.output.table_unverifiable)
         and (att.output.text or "").strip()
+        and not att.paid_after_witness_dispute
     ]
     if not marked:
         return None
@@ -473,12 +479,17 @@ def promote_unchecked_table_attempt(
         # #1125-r5: promotion requires an inner chain; peeling to nothing is fail-closed.
         for att in reversed(decision.attempts):
             out = att.output
+            if att.paid_after_witness_dispute:
+                continue
             if not ((out.table_disputed or out.table_unverifiable) and (out.text or "").strip()):
                 continue
             _note_promotion_failure(att, "promotion refused: no inner judge chain")
         return None
     for att in reversed(decision.attempts):
         out = att.output
+        # #1346: a paid reading run after a witness dispute is never promoted.
+        if att.paid_after_witness_dispute:
+            continue
         if not ((out.table_disputed or out.table_unverifiable) and (out.text or "").strip()):
             continue
         from types import SimpleNamespace
@@ -549,6 +560,15 @@ def is_failed_candidate(output: PageOutput) -> bool:
     return output.status == PageStatus.ERROR or output.failure_mode == FailureMode.CLI_ERROR
 
 
+def _provider_call_never_ran(output: PageOutput) -> bool:
+    """An ERROR with no text and MODEL_UNAVAILABLE: the provider was not called (cap, quota)."""
+    return (
+        output.status == PageStatus.ERROR
+        and output.failure_mode == FailureMode.MODEL_UNAVAILABLE
+        and not (output.text or "").strip()
+    )
+
+
 def _best_effort(attempts: list[ProviderAttempt], page_num: int) -> ProviderAttempt:
     """When nothing was accepted, keep the most trustworthy attempt.
 
@@ -557,7 +577,9 @@ def _best_effort(attempts: list[ProviderAttempt], page_num: int) -> ProviderAtte
     non-empty attempt exists.
     """
     # The pre-GH-1020 selection, byte for byte: non-empty attempts, else all attempts.
-    usable = [a for a in attempts if a.output.text.strip()]
+    # #1346: a paid reading that ran after a witness dispute and was not accepted is a
+    # journal entry, not a candidate (it stood in as an empty stub while the rung was blocked).
+    usable = [a for a in attempts if a.output.text.strip() and not a.paid_after_witness_dispute]
     pool = usable or attempts
     # GH-1020: the only change. A failed candidate can never beat a usable one; when
     # every attempt failed, ``pool`` above is exactly what it always was.
@@ -669,7 +691,7 @@ def route_page(
     on_candidate: Callable[[int, PageOutput], None] | None = None,
     sparse_signals: "SparsePageSignals | None" = None,
     audit_min_words: int = 40,
-    block_paid_on_source_evidence: bool = True,
+    block_paid_on_source_evidence: bool | None = None,
     sparse_word_count_exempt: bool = True,
 ) -> PageDecision:
     """Route one page: cheapest provider first, escalate until the judge accepts.
@@ -702,21 +724,29 @@ def route_page(
             provider is treated like a raised exception: an ERROR attempt is
             recorded and the loop escalates to the next rung.
             ``None`` (the default) disables all timeouts (backward-compatible).
+        block_paid_on_source_evidence: ``None`` takes
+            ``BLOCK_PAID_ON_SOURCE_EVIDENCE_DEFAULT`` (#1346: a witness-refuted free
+            rung does not stop the paid rung). ``True`` restores the old block.
     """
     if not ladder:
         return PageDecision(page_num, _error_output(page_num, "no providers available"))
 
     from socr.routing.cascade_policy import (
+        BLOCK_PAID_ON_SOURCE_EVIDENCE_DEFAULT,
         SparsePageSignals,
+        blocks_paid_escalation,
         is_paid_profile,
         paid_gemini_block_after_reject,
     )
 
+    if block_paid_on_source_evidence is None:
+        block_paid_on_source_evidence = BLOCK_PAID_ON_SOURCE_EVIDENCE_DEFAULT
     limit = len(ladder) if max_attempts <= 0 else min(max_attempts, len(ladder))
     attempts: list[ProviderAttempt] = []
     tried = 0
     paid_escalation_blocked = False
     paid_block_tag = ""
+    witness_disputed = False
     sig = sparse_signals or SparsePageSignals()
 
     for prof in ladder:
@@ -825,8 +855,16 @@ def route_page(
             )
             continue
 
+        # A call that never went out (the paid-page cap, the quota circuit) returns an
+        # ERROR with no text; it costs nothing and spends none of the budget.
+        charge = 0.0 if _provider_call_never_ran(output) else prof.cost_per_page_usd
+        after_dispute = witness_disputed and is_paid_profile(prof)
+        if after_dispute:
+            # #1346: the flag travels with the bytes, so the verdict can mark the page
+            # whenever this reading ships (see ``verdict._paid_after_dispute_clause``).
+            output.paid_after_witness_dispute = True
         if remaining_budget is not None:
-            remaining_budget -= prof.cost_per_page_usd
+            remaining_budget -= charge
 
         # #688 -- THE candidate boundary. This is where a provider's proposed
         # ``PageOutput.text`` becomes the candidate everything downstream
@@ -867,12 +905,13 @@ def route_page(
                 ProviderAttempt(
                     engine=prof.engine,
                     output=output,
-                    cost_usd=prof.cost_per_page_usd,
+                    cost_usd=charge,
                     accepted=False,
                     reason=f"judge raised: {exc}",
                     provider_id=prof.id,
                     model=prof.model,
                     backend=prof.backend,
+                    paid_after_witness_dispute=after_dispute,
                 )
             )
             continue
@@ -936,13 +975,14 @@ def route_page(
             ProviderAttempt(
                 engine=prof.engine,
                 output=output,
-                cost_usd=prof.cost_per_page_usd,
+                cost_usd=charge,
                 accepted=decision.accept,
                 reason=decision.reason,
                 raw_verdict=decision.raw_verdict,
                 provider_id=prof.id,
                 model=prof.model,
                 backend=prof.backend,
+                paid_after_witness_dispute=after_dispute,
             )
         )
         if decision.accept:
@@ -954,6 +994,8 @@ def route_page(
             block_paid_on_source_evidence=block_paid_on_source_evidence,
             sparse_word_count_exempt=sparse_word_count_exempt,
         )
+        if blocks_paid_escalation(decision.reason):
+            witness_disputed = True
         if tag:
             paid_escalation_blocked = True
             paid_block_tag = tag

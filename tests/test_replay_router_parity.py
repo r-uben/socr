@@ -55,7 +55,7 @@ FIXTURES: list[tuple[str, _FixturePage, str, str]] = [
         "source_evidence_table",
         _FixturePage(5, False, 200, has_figures=True),
         "source_evidence_table: numeric tokens unsupported",
-        PAID_BLOCK_REASON_SOURCE_EVIDENCE,
+        "",  # #1346: no longer a paid block by default
     ),
     (
         "table_structure_still_escalates",
@@ -112,6 +112,67 @@ def test_live_and_replay_share_block_tag(
         judge_reason, replay_signals, audit_min_words=audit_min_words
     )
     assert replay_tag == live_tag == expected_tag, name
+
+
+@pytest.mark.parametrize("block", [None, False, True], ids=["default", "off", "on"])
+def test_live_and_replay_agree_on_paid_rung_after_witness_reject(
+    block: bool | None, tmp_path: Path
+) -> None:
+    """#1346: ladder qwen (witness reject) -> marker ('empty/error output') -> gemini.
+
+    The live router's journal is fed to ``replay_manifest``; both must agree whether the
+    paid rung was allowed, for the default and for an explicit flag. ``None`` means each
+    side takes its own default (route_page's and ReplayRules'), which is the parity claim.
+    """
+    import json
+    from unittest.mock import MagicMock
+
+    from socr.core.config import EngineType
+    from socr.core.providers import PROFILE_GEMINI, PROFILE_MARKER, PROFILE_QWEN_LOCAL
+    from socr.core.result import PageOutput, PageStatus
+    from socr.pipeline.agentic import AcceptDecision, route_page
+    from socr.routing.cascade_replay import ReplayRules, replay_manifest
+
+    witness = "source_evidence_table: numeric tokens unsupported by page evidence: ['1']"
+    judge = MagicMock()
+    judge.assess.side_effect = [
+        AcceptDecision(accept=False, reason=witness),
+        AcceptDecision(accept=False, reason="empty/error output"),
+        AcceptDecision(accept=True, reason="ok"),
+    ]
+    kwargs = {} if block is None else {"block_paid_on_source_evidence": block}
+    decision = route_page(
+        1,
+        [PROFILE_QWEN_LOCAL, PROFILE_MARKER, PROFILE_GEMINI],
+        lambda prof, n: PageOutput(
+            page_num=n, text="x", status=PageStatus.SUCCESS, engine=prof.engine.value
+        ),
+        judge,
+        **kwargs,
+    )
+    gemini = next(a for a in decision.attempts if a.engine is EngineType.GEMINI)
+    live_blocked = gemini.reason.startswith("paid escalation blocked")
+
+    journal = [
+        {"engine": a.engine.value, "accepted": a.accepted, "reason": a.reason}
+        for a in decision.attempts
+    ]
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "entries": {
+                    "1": {"page_num": 1, "fingerprint": {"engine": "gemini"}, "journal": journal}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    rules = ReplayRules() if block is None else ReplayRules(block_paid_on_source_evidence=block)
+    row = replay_manifest(manifest, rules).rows[0]
+    assert row.would_gemini_new is (not live_blocked)
+    # Both default to "not blocked" (#1346); explicit True blocks on both sides.
+    assert live_blocked is (block is True)
 
 
 def test_scanned_photo_page_heuristic_judge_not_sparse(tmp_path: Path) -> None:

@@ -6929,6 +6929,7 @@ _VERDICT_DERIVED_MODES: frozenset[FailureMode] = frozenset(
         FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
         FailureMode.MODEL_OUTPUT_UNJUDGED,
         FailureMode.READING_UNCORROBORATED,
+        FailureMode.PAID_READING_AFTER_DISPUTE,
         FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
         FailureMode.FIGURE_NOT_SHOWN,
         FailureMode.FIGURE_RENDER_FAILED,
@@ -7081,9 +7082,16 @@ def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
         for clause in clauses:
             if clause.result is not wanted:
                 continue
+            if clause.check is Check.READING_DISPUTE:
+                continue
             mode = _mode_of(clause)
             if mode is not None:
                 return mode
+    # #1346: the reading-dispute clause records which READING shipped, not why the text is
+    # unchecked, so it names the mode only when no other clause does: it never replaces a
+    # mode a page would have carried without it.
+    if any(c.check is Check.READING_DISPUTE for c in clauses):
+        return FailureMode.PAID_READING_AFTER_DISPUTE
     return FailureMode.NONE
 
 

@@ -299,6 +299,13 @@ class FailureMode(str, Enum):
     #: of re-reading it on every run. Kept apart from ``MODEL_OUTPUT_UNJUDGED``, whose pages a
     #: later judge can resolve and must stay reprocessable.
     READING_UNCORROBORATED = "reading_uncorroborated"
+    #: #1346 (owner ruling 2026-11-16): the shipped reading came from a paid reader called
+    #: AFTER the image check disputed an earlier reader's table. It passed every check, and it
+    #: still ships under a ``reading_dispute=UNKNOWN`` mark: which of the two readings is right
+    #: was never independently confirmed. In ``PERMANENTLY_UNRESOLVABLE_MODES``: re-reading
+    #: would pay the reader again for a reading that may differ, and no check that could settle
+    #: it exists.
+    PAID_READING_AFTER_DISPUTE = "paid_reading_after_dispute"
     #: #658: a scanned table page failed the source-evidence gate because this
     #: host has NO classical OCR backend, so the gate never read the pixels and
     #: holds no evidence about the table at all.
@@ -670,6 +677,11 @@ class PageOutput:
     #: ``", "``-joined form for sidecar / mark-text compat; the mark counts
     #: THIS, never by splitting that string.
     table_disputed_values: tuple[str, ...] = ()
+    #: #1346: this output was read by a paid rung that ran after the image check disputed an
+    #: earlier rung's table (``ProviderAttempt.paid_after_witness_dispute``, copied here at the
+    #: attempt boundary so it travels with the bytes). The verdict derives a mark from it
+    #: whenever this output ships, accepted or not; see ``verdict._paid_after_dispute_clause``.
+    paid_after_witness_dispute: bool = False
     #: #625: ditto marks (`"`, `''`, `”`, `″`, `〃`) detected verbatim in this
     #: winning candidate's shipped table cells. Owner ruling (2026-09-08,
     #: option 3): the mark is NOT resolved into the value it stands for --
@@ -790,6 +802,10 @@ class PageOutput:
             d["table_disputed"] = self.table_disputed
         if self.table_disputed_values:
             d["table_disputed_values"] = list(self.table_disputed_values)
+        # #1346: omit-when-unset, like every field above: it postdates every sidecar, and an
+        # unconditional key would change the fingerprint of pages that never had a dispute.
+        if self.paid_after_witness_dispute:
+            d["paid_after_witness_dispute"] = True
         # #625: same omit-when-empty convention, same reason -- this field
         # postdates every already-terminal page's sidecar; emitting it
         # unconditionally would change the content-addressed fingerprint of
@@ -855,6 +871,7 @@ class PageOutput:
             table_disputed_values=tuple(
                 str(v) for v in d.get("table_disputed_values", ()) if str(v)
             ),
+            paid_after_witness_dispute=d.get("paid_after_witness_dispute") is True,
             table_ditto_columns=list(d.get("table_ditto_columns", [])),
             # #713: a sidecar is parsed JSON, so both are read defensively --
             # a non-string outcome is no outcome, and a non-dict credential is

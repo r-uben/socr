@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from socr.routing.cascade_policy import (
+    BLOCK_PAID_ON_SOURCE_EVIDENCE_DEFAULT,
     classify_escalation_reason,
     is_word_count_rejection,
     paid_gemini_block_after_reject,
@@ -20,7 +21,7 @@ from socr.routing.cascade_policy import (
 class ReplayRules:
     """Policy toggles for NEW routing relative to recorded manifests."""
 
-    block_paid_on_source_evidence: bool = True
+    block_paid_on_source_evidence: bool = BLOCK_PAID_ON_SOURCE_EVIDENCE_DEFAULT
     sparse_word_count_exempt: bool = True
     audit_min_words: int = 40
 
@@ -56,6 +57,14 @@ def _last_reason_before_engine(journal: list[dict], engine: str) -> str:
         if not entry.get("accepted"):
             return str(entry.get("reason") or "")
     return ""
+
+
+def _rejected_reasons_before_engine(journal: list[dict], engine: str) -> list[str]:
+    """Every rejected rung's reason before ``engine`` first appears, in ladder order."""
+    idx = next((i for i, e in enumerate(journal) if e.get("engine") == engine), None)
+    if idx is None:
+        return []
+    return [str(e.get("reason") or "") for e in journal[:idx] if not e.get("accepted")]
 
 
 @dataclass(frozen=True)
@@ -210,13 +219,20 @@ def replay_manifest(path: Path, rules: ReplayRules | None = None) -> ManifestRep
         block_reason = ""
         if gemini_attempted:
             signals = sparse_signals_from_manifest_entry(entry, journal)
-            block_reason = paid_gemini_block_after_reject(
-                qwen_reason,
-                signals,
-                audit_min_words=rules.audit_min_words,
-                block_paid_on_source_evidence=rules.block_paid_on_source_evidence,
-                sparse_word_count_exempt=rules.sparse_word_count_exempt,
-            )
+            # Live ``route_page`` latches the block on ANY earlier reject (the latest
+            # non-empty tag wins), not only the one directly before the paid rung.
+            block_reason = ""
+            for reason in _rejected_reasons_before_engine(journal, "gemini"):
+                block_reason = (
+                    paid_gemini_block_after_reject(
+                        reason,
+                        signals,
+                        audit_min_words=rules.audit_min_words,
+                        block_paid_on_source_evidence=rules.block_paid_on_source_evidence,
+                        sparse_word_count_exempt=rules.sparse_word_count_exempt,
+                    )
+                    or block_reason
+                )
             if block_reason:
                 would_new = False
         if would_new:
