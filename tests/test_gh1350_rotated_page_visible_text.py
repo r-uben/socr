@@ -102,3 +102,57 @@ def test_unprinted_and_hidden_numbers_still_fail_on_rotated_page(rotation: int) 
     for bogus in ("3141", HIDDEN_WHITE, HIDDEN_ALPHA, HIDDEN_UNDER_IMAGE):
         result = _evidence_and_verdict(rotation, (*VISIBLE[:2], bogus))
         assert not result.passed, (rotation, bogus)
+
+
+# --- per-glyph clip branch: sideways text on a /Rotate page (upright rotation != 0) ---
+
+
+def _sideways_page(page_rotation: int, text_rotation: int):
+    """Text drawn with ``rotate=text_rotation`` so ``upright_rotation_for`` can be non-zero."""
+    doc = fitz.open()
+    blank = fitz.open()
+    page = doc.new_page(width=500, height=700)
+    blank_page = blank.new_page(width=200, height=60)
+    kw = {"fontsize": 14, "rotate": text_rotation}
+    for i, value in enumerate(VISIBLE):
+        page.insert_text((200, 150 + 90 * i), f"item {value}", **kw)
+    page.insert_text((400, 150), HIDDEN_WHITE, color=(1, 1, 1), **kw)
+    page.insert_text((400, 300), HIDDEN_ALPHA, render_mode=3, **kw)
+    page.insert_text((400, 450), HIDDEN_UNDER_IMAGE, **kw)
+    page.insert_image(
+        fitz.Rect(330, 380, 470, 520),
+        pixmap=blank_page.get_pixmap(),
+        keep_proportion=False,
+    )
+    page.set_rotation(page_rotation)
+    blank.close()
+    return doc, page
+
+
+@pytest.mark.parametrize("text_rotation", ROTATIONS)
+@pytest.mark.parametrize("page_rotation", ROTATIONS)
+def test_sideways_text_on_rotated_page(page_rotation: int, text_rotation: int) -> None:
+    doc, page = _sideways_page(page_rotation, text_rotation)
+    try:
+        surviving = _numbers(page)
+        for value in VISIBLE:
+            assert surviving[value] == 1, (page_rotation, text_rotation, value)
+        for hidden in (HIDDEN_WHITE, HIDDEN_ALPHA, HIDDEN_UNDER_IMAGE):
+            assert surviving[hidden] == 0, (page_rotation, text_rotation, hidden)
+    finally:
+        doc.close()
+
+
+def test_sideways_grid_reaches_the_per_glyph_clip_branch() -> None:
+    """Guard the guard: some grid cells must have upright != 0 on a /Rotate page."""
+    from socr.core.born_digital import upright_rotation_for
+
+    uprights = []
+    for page_rotation in (90, 270):
+        for text_rotation in ROTATIONS:
+            doc, page = _sideways_page(page_rotation, text_rotation)
+            try:
+                uprights.append(upright_rotation_for(page))
+            finally:
+                doc.close()
+    assert any(u != 0 for u in uprights), uprights
