@@ -31,6 +31,14 @@ PAID_BLOCK_REASON_SOURCE_EVIDENCE = SOURCE_EVIDENCE_MARKER
 PAID_BLOCK_REASON_SPARSE_WORD_COUNT = "sparse_word_count"
 # Load-bearing prefix in ``SourceEvidenceTableJudge`` reject reasons (#658).
 _NO_WITNESS_CAUSE = "no_witness_backend"
+
+#: #1346: whether a witness-backed table dispute on a free rung stops the paid rung.
+#: It does not. The paid reading is judged by the same ``judge.assess`` chain (source-
+#: evidence gate included) and shipped only through the same final withhold gate, so a
+#: paid table the witness also refutes ends the page exactly as it ended when the rung was
+#: skipped. The block (cost control from the Flash era) stays available as an explicit
+#: ``block_paid_on_source_evidence=True`` for replay comparisons and the difference tests.
+BLOCK_PAID_ON_SOURCE_EVIDENCE_DEFAULT = False
 _WORD_COUNT_RE = re.compile(r"^Word count\b", re.IGNORECASE)
 
 # ONNX / thread-pool noise that prefixes real Gemini CLI errors in batch logs.
@@ -162,7 +170,7 @@ def paid_gemini_block_after_reject(
     signals: SparsePageSignals,
     *,
     audit_min_words: int,
-    block_paid_on_source_evidence: bool = True,
+    block_paid_on_source_evidence: bool = BLOCK_PAID_ON_SOURCE_EVIDENCE_DEFAULT,
     sparse_word_count_exempt: bool = True,
 ) -> str:
     """Return a block-reason tag when Gemini must not run, else ``""``.

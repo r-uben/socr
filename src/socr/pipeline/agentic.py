@@ -669,7 +669,7 @@ def route_page(
     on_candidate: Callable[[int, PageOutput], None] | None = None,
     sparse_signals: "SparsePageSignals | None" = None,
     audit_min_words: int = 40,
-    block_paid_on_source_evidence: bool = True,
+    block_paid_on_source_evidence: bool | None = None,
     sparse_word_count_exempt: bool = True,
 ) -> PageDecision:
     """Route one page: cheapest provider first, escalate until the judge accepts.
@@ -702,16 +702,22 @@ def route_page(
             provider is treated like a raised exception: an ERROR attempt is
             recorded and the loop escalates to the next rung.
             ``None`` (the default) disables all timeouts (backward-compatible).
+        block_paid_on_source_evidence: ``None`` takes
+            ``BLOCK_PAID_ON_SOURCE_EVIDENCE_DEFAULT`` (#1346: a witness-refuted free
+            rung does not stop the paid rung). ``True`` restores the old block.
     """
     if not ladder:
         return PageDecision(page_num, _error_output(page_num, "no providers available"))
 
     from socr.routing.cascade_policy import (
+        BLOCK_PAID_ON_SOURCE_EVIDENCE_DEFAULT,
         SparsePageSignals,
         is_paid_profile,
         paid_gemini_block_after_reject,
     )
 
+    if block_paid_on_source_evidence is None:
+        block_paid_on_source_evidence = BLOCK_PAID_ON_SOURCE_EVIDENCE_DEFAULT
     limit = len(ladder) if max_attempts <= 0 else min(max_attempts, len(ladder))
     attempts: list[ProviderAttempt] = []
     tried = 0

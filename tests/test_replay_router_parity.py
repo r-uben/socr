@@ -55,7 +55,7 @@ FIXTURES: list[tuple[str, _FixturePage, str, str]] = [
         "source_evidence_table",
         _FixturePage(5, False, 200, has_figures=True),
         "source_evidence_table: numeric tokens unsupported",
-        PAID_BLOCK_REASON_SOURCE_EVIDENCE,
+        "",  # #1346: no longer a paid block by default
     ),
     (
         "table_structure_still_escalates",
@@ -112,6 +112,57 @@ def test_live_and_replay_share_block_tag(
         judge_reason, replay_signals, audit_min_words=audit_min_words
     )
     assert replay_tag == live_tag == expected_tag, name
+
+
+@pytest.mark.parametrize("block", [False, True])
+def test_live_and_replay_agree_on_source_evidence_block_flag(block: bool) -> None:
+    """#1346: live router and replay take the same default and the same explicit flag."""
+    from socr.routing.cascade_policy import BLOCK_PAID_ON_SOURCE_EVIDENCE_DEFAULT, SparsePageSignals
+    from socr.routing.cascade_replay import ReplayRules
+
+    reason = "source_evidence_table: numeric tokens unsupported by page evidence: ['1']"
+    assert ReplayRules().block_paid_on_source_evidence is BLOCK_PAID_ON_SOURCE_EVIDENCE_DEFAULT
+    live = paid_gemini_block_after_reject(
+        reason, SparsePageSignals(), audit_min_words=40, block_paid_on_source_evidence=block
+    )
+    replay = paid_gemini_block_after_reject(
+        reason,
+        SparsePageSignals(),
+        audit_min_words=40,
+        block_paid_on_source_evidence=ReplayRules(
+            block_paid_on_source_evidence=block
+        ).block_paid_on_source_evidence,
+    )
+    assert live == replay == (PAID_BLOCK_REASON_SOURCE_EVIDENCE if block else "")
+
+
+def test_route_page_default_matches_policy_default() -> None:
+    """The live router with no flag behaves as the policy default (replay's default)."""
+    from unittest.mock import MagicMock
+
+    from socr.core.providers import PROFILE_GEMINI, PROFILE_QWEN_LOCAL
+    from socr.core.result import PageOutput, PageStatus
+    from socr.pipeline.agentic import AcceptDecision, route_page
+    from socr.routing.cascade_replay import ReplayRules
+
+    judge = MagicMock()
+    judge.assess.side_effect = [
+        AcceptDecision(
+            accept=False,
+            reason="source_evidence_table: numeric tokens unsupported by page evidence: ['1']",
+        ),
+        AcceptDecision(accept=True, reason="ok"),
+    ]
+    decision = route_page(
+        1,
+        [PROFILE_QWEN_LOCAL, PROFILE_GEMINI],
+        lambda prof, n: PageOutput(
+            page_num=n, text="x", status=PageStatus.SUCCESS, engine=prof.engine.value
+        ),
+        judge,
+        block_paid_on_source_evidence=ReplayRules().block_paid_on_source_evidence,
+    )
+    assert decision.accepted is True
 
 
 def test_scanned_photo_page_heuristic_judge_not_sparse(tmp_path: Path) -> None:

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from socr.routing.cascade_policy import (
+    BLOCK_PAID_ON_SOURCE_EVIDENCE_DEFAULT,
     classify_escalation_reason,
     is_word_count_rejection,
     paid_gemini_block_after_reject,
@@ -20,7 +21,7 @@ from socr.routing.cascade_policy import (
 class ReplayRules:
     """Policy toggles for NEW routing relative to recorded manifests."""
 
-    block_paid_on_source_evidence: bool = True
+    block_paid_on_source_evidence: bool = BLOCK_PAID_ON_SOURCE_EVIDENCE_DEFAULT
     sparse_word_count_exempt: bool = True
     audit_min_words: int = 40
 
