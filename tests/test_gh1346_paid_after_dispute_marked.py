@@ -37,6 +37,10 @@ PAID_BODY = (
 )
 
 
+#: An engine label that is not a model reading, so the dispute clause is the page's only clause.
+_NOT_A_MODEL = "native"
+
+
 def test_loaded_source_is_this_checkout() -> None:
     assert Path(socr.__file__).resolve().is_relative_to(Path(__file__).resolve().parents[1] / "src")
 
@@ -44,13 +48,16 @@ def test_loaded_source_is_this_checkout() -> None:
 class _Reader:
     """A reader for both rungs: the free one and the paid one read the same words."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, calls: list | None = None) -> None:
         self.name = name
+        self.calls = calls
 
     def is_available(self) -> bool:
         return True
 
     def process_pages(self, pdf_path, page_nums, config, dpi, subprocess_timeout=None, **_kw):
+        if self.calls is not None:
+            self.calls.append((self.name, tuple(page_nums)))
         return [
             PageOutput(
                 page_num=n,
@@ -76,14 +83,39 @@ class _LadderJudge:
         return AcceptDecision(accept=False, reason=self._free_reason)
 
 
-def _run(out_dir: Path, pdf: Path, monkeypatch, *, free_reason: str):
+def _run(
+    out_dir: Path,
+    pdf: Path,
+    monkeypatch,
+    *,
+    free_reason: str,
+    calls: list | None = None,
+    reprocess: bool = False,
+    lane_forced: bool = False,
+):
     from socr.core.config import EngineType, PipelineConfig
     from socr.core.providers import PROFILE_GEMINI, PROFILE_QWEN_LOCAL
     from socr.pipeline import orchestrator as orch
     from socr.pipeline.orchestrator import UnifiedPipeline
 
     with monkeypatch.context() as m:
-        m.setattr(orch, "get_engine", lambda engine_type: _Reader(engine_type.value))
+        m.setattr(orch, "get_engine", lambda engine_type: _Reader(engine_type.value, calls))
+        if lane_forced:
+            # The table-escalation lane's two decisions, forced: whether to re-read the page
+            # and whether the re-read wins. What they decide is not under test, what the lane
+            # does to the flag of the reading it promotes is.
+            from socr.tables import escalation_decision as ed
+
+            m.setattr(
+                orch.UnifiedPipeline, "_table_page_needs_escalation", lambda self, *a, **k: True
+            )
+            m.setattr(
+                ed,
+                "decide_escalation",
+                lambda page, inc, cand: ed.EscalationDecision(
+                    accepted=True, gate="exactness", reason="forced"
+                ),
+            )
         pipe = UnifiedPipeline(
             PipelineConfig(
                 agentic=True,
@@ -93,6 +125,7 @@ def _run(out_dir: Path, pdf: Path, monkeypatch, *, free_reason: str):
                 enabled_engines=[EngineType.QWEN, EngineType.GEMINI],
                 native_first=True,
                 write_manifest=True,
+                reprocess=reprocess,
                 judge_backend="heuristic",
                 dual_pass_tables=False,
                 detect_equations=False,
@@ -162,15 +195,81 @@ def test_the_document_rollup_reflects_the_marked_page(arms) -> None:
     assert doc_status(control) != doc_status(disputed)
 
 
+def _pages_bytes(out: Path) -> dict[str, bytes]:
+    return {p.name: p.read_bytes() for p in (_doc_dir(out) / "pages").glob("*")}
+
+
 def test_a_resumed_run_restores_the_marked_page_byte_for_byte(
-    arms, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Resume must restore the marked page (no second paid call) and write the same bytes."""
-    pdf, disputed, _control = arms
-    before = {p.name: p.read_bytes() for p in (_doc_dir(disputed) / "pages").glob("*")}
-    _run(disputed, pdf, monkeypatch, free_reason=WITNESS_DISPUTE)
-    after = {p.name: p.read_bytes() for p in (_doc_dir(disputed) / "pages").glob("*")}
-    assert before == after
+    """The PER-PAGE resume gate restores the marked page: no reader is called, same bytes.
+
+    ``reprocess=True`` defeats the document-level skip, so the gate under test is the one that
+    reads each page's sidecar. The first run's calls are the control: they prove the readers
+    would have been called had the gate not restored the page.
+    """
+    pdf = _rotated_pdf(tmp_path / "doc.pdf")
+    out = tmp_path / "out"
+    first_calls: list = []
+    _run(out, pdf, monkeypatch, free_reason=WITNESS_DISPUTE, calls=first_calls)
+    before = _pages_bytes(out)
+    second_calls: list = []
+    _run(out, pdf, monkeypatch, free_reason=WITNESS_DISPUTE, calls=second_calls, reprocess=True)
+    assert [c for c in first_calls if c[0] == "gemini"], "the first run paid the reader"
+    assert second_calls == []
+    assert _pages_bytes(out) == before
+
+
+def test_the_resume_gate_reprocesses_an_error_page_that_carries_the_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mode is restored on the strength of a WARNING demotion only.
+
+    A sidecar carrying the mode with any other status was not demoted by this run, so doubt
+    reprocesses it. Pinned as a difference: the same sidecar with its status left WARNING is
+    restored (no calls), with it edited to ERROR the page is read again.
+    """
+    pdf = _rotated_pdf(tmp_path / "doc.pdf")
+    out = tmp_path / "out"
+    _run(out, pdf, monkeypatch, free_reason=WITNESS_DISPUTE)
+    side_path = _doc_dir(out) / "pages" / "00001.json"
+    side = json.loads(side_path.read_text())
+    assert side["winning_output"]["failure_mode"] == FailureMode.PAID_READING_AFTER_DISPUTE.value
+    kept_calls: list = []
+    _run(out, pdf, monkeypatch, free_reason=WITNESS_DISPUTE, calls=kept_calls, reprocess=True)
+    side["winning_output"]["status"] = PageStatus.ERROR.value
+    side_path.write_text(json.dumps(side))
+    edited_calls: list = []
+    _run(out, pdf, monkeypatch, free_reason=WITNESS_DISPUTE, calls=edited_calls, reprocess=True)
+    assert kept_calls == []
+    assert 1 in [n for _name, pages in edited_calls for n in pages]
+
+
+def test_the_escalation_lane_marks_the_paid_reading_it_promotes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The table-escalation lane re-reads with a paid reader AFTER ``route_page`` and promotes
+    that fresh output, which ``route_page`` never stamped. After a witness dispute the promoted
+    reading is marked too; the control (no dispute) is not."""
+    pdf = _rotated_pdf(tmp_path / "doc.pdf")
+    arms = {}
+    for name, reason in (("disputed", WITNESS_DISPUTE), ("control", NO_DISPUTE)):
+        out = tmp_path / name
+        _run(out, pdf, monkeypatch, free_reason=reason, lane_forced=True)
+        arms[name] = out
+    d_side, d_body = _page(arms["disputed"], 1)
+    c_side, c_body = _page(arms["control"], 1)
+    # the lane promoted the paid reading in both arms
+    assert d_side["winning_output"]["escalated_from"] == c_side["winning_output"]["escalated_from"]
+    assert d_side["winning_output"]["escalated_from"]
+    assert d_side["winning_output"]["engine"] == c_side["winning_output"]["engine"] == "gemini"
+    assert d_side["winning_output"]["paid_after_witness_dispute"] is True
+    assert "paid_after_witness_dispute" not in c_side["winning_output"]
+    assert len(_clauses(d_side, Check.READING_DISPUTE.value)) == 1
+    assert _clauses(c_side, Check.READING_DISPUTE.value) == []
+    assert d_side["status"] != c_side["status"]
+    assert _is_marked(d_body) and "reading_dispute" not in c_body
+    assert PAID_BODY in d_body
 
 
 def test_the_mode_is_one_a_resume_restores() -> None:
@@ -227,7 +326,7 @@ def test_refinalizing_a_restored_page_writes_the_same_banner_and_is_idempotent()
     from socr.core.manifest import apply_verdict_marks
     from socr.core.verdict import PageVerdict
 
-    first, verdict = apply_verdict_marks(_output(), _p(), 1)
+    first, verdict = apply_verdict_marks(_output(engine=_NOT_A_MODEL), _p(), 1)
     assert first.status is PageStatus.WARNING
     assert first.failure_mode is FailureMode.PAID_READING_AFTER_DISPUTE
     assert first.text.startswith("> [page 1 unchecked: reading_dispute=UNKNOWN; scope=page;")
@@ -240,6 +339,71 @@ def test_refinalizing_a_restored_page_writes_the_same_banner_and_is_idempotent()
     # and from the flag alone, with no published verdict (the verdict is derived again)
     third, _ = apply_verdict_marks(restored, _p(), 1)
     assert third.text == first.text
+
+
+# --- the clause adds to the page's other marks and never replaces one ----------------------
+
+
+def _check_set(verdict) -> set[Check]:
+    return {c.check for c in verdict.clauses}
+
+
+def test_the_clause_leaves_the_numbers_mode_and_clause_in_place() -> None:
+    """A true scan has no layer to check the reading's numbers against. Flag on versus off:
+    the same failure mode, and the clause set grows by exactly the dispute clause."""
+    from socr.core.manifest import apply_verdict_marks
+
+    on, on_verdict = apply_verdict_marks(_output(), _p(), 1)
+    off, off_verdict = apply_verdict_marks(_output(paid_after_witness_dispute=False), _p(), 1)
+    assert Check.TEXT_LAYER_NUMBERS in _check_set(off_verdict)
+    assert on.status is off.status is PageStatus.WARNING
+    assert on.failure_mode is off.failure_mode
+    assert _check_set(on_verdict) == _check_set(off_verdict) | {Check.READING_DISPUTE}
+    # re-finalizing the demoted page keeps the same mode (the mode chooser is stable)
+    again, _ = apply_verdict_marks(PageOutput.from_dict(on.to_dict()), _p(), 1)
+    assert again.failure_mode is on.failure_mode
+
+
+def test_a_stale_dispute_only_mode_follows_the_full_clause_set() -> None:
+    """A page already demoted with the dispute mode, then given another clause, takes the mode a
+    fresh run gives that clause set (the ``_VERDICT_DERIVED_MODES`` row)."""
+    from socr.core.manifest import apply_verdict_marks
+
+    fresh, _ = apply_verdict_marks(_output(), _p(), 1)
+    stale = _output(status=PageStatus.WARNING, failure_mode=FailureMode.PAID_READING_AFTER_DISPUTE)
+    out, _ = apply_verdict_marks(stale, _p(), 1)
+    assert out.failure_mode is fresh.failure_mode
+    assert fresh.failure_mode is not FailureMode.PAID_READING_AFTER_DISPUTE
+
+
+def test_a_recorded_mode_without_its_flag_still_names_its_clause() -> None:
+    """The mode alone, flag absent (the ``_MODE_CLAUSES`` row): the clause is derived from the
+    mode, and the fail-closed fallback does not add an ``unknown`` clause beside it."""
+    from socr.core.manifest import apply_verdict_marks
+
+    bare = _output(
+        engine=_NOT_A_MODEL,
+        status=PageStatus.WARNING,
+        failure_mode=FailureMode.PAID_READING_AFTER_DISPUTE,
+        paid_after_witness_dispute=False,
+    )
+    _out, verdict = apply_verdict_marks(bare, _p(), 1)
+    assert _check_set(verdict) == {Check.READING_DISPUTE}
+
+
+def test_the_dispute_clause_does_not_hide_the_judge_only_clause_offline() -> None:
+    """``with_judge_only_clause`` (the re-finalize tools) keeps #1251's clause beside the dispute
+    clause instead of dropping it as 'another clause already marks the page'."""
+    from socr.core.manifest import apply_verdict_marks
+    from socr.core.marks import SCOPE_PAGE
+    from socr.core.verdict import JUDGE_ONLY_REASON, VerdictClause, with_judge_only_clause
+
+    out, verdict = apply_verdict_marks(_output(engine=_NOT_A_MODEL), _p(), 1)
+    dispute = next(c for c in verdict.clauses if c.check is Check.READING_DISPUTE)
+    judge_only = VerdictClause(Check.PAGE_JUDGE, CheckResult.UNKNOWN, SCOPE_PAGE, JUDGE_ONLY_REASON)
+    both = replace(verdict, clauses=(judge_only, dispute))
+    kept = with_judge_only_clause(both, out, None)
+    assert set(kept.clauses) == {judge_only, dispute}
 
 
 def test_an_error_page_stays_error_and_gains_no_text() -> None:

@@ -7029,8 +7029,6 @@ def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
         # would need its own key, not this row.
         Check.PAGE_JUDGE: FailureMode.MODEL_OUTPUT_UNJUDGED,
         Check.PRIOR_OCR_LAYER: FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
-        # #1346: the paid reading taken after a witness dispute.
-        Check.READING_DISPUTE: FailureMode.PAID_READING_AFTER_DISPUTE,
         # #1218: FAIL is the only result the clause emits, so the check alone maps it.
         Check.TEXT_LAYER_DROPS: FailureMode.NUMBERS_DROPPED_FROM_READING,
         # #1294: FAIL and UNKNOWN both say words are missing; one mode.
@@ -7084,9 +7082,16 @@ def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
         for clause in clauses:
             if clause.result is not wanted:
                 continue
+            if clause.check is Check.READING_DISPUTE:
+                continue
             mode = _mode_of(clause)
             if mode is not None:
                 return mode
+    # #1346: the reading-dispute clause records which READING shipped, not why the text is
+    # unchecked, so it names the mode only when no other clause does: it never replaces a
+    # mode a page would have carried without it.
+    if any(c.check is Check.READING_DISPUTE for c in clauses):
+        return FailureMode.PAID_READING_AFTER_DISPUTE
     return FailureMode.NONE
 
 

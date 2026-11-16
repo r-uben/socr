@@ -105,8 +105,8 @@ JUDGE_ONLY_REASON = (
 #: earlier reader's table. UNKNOWN, not FAIL: nothing was refuted about the shipped reading.
 PAID_AFTER_DISPUTE_REASON = (
     "an earlier reading of this page's table was disputed by the image check; this reading "
-    "was taken from a paid reader afterwards and passed the checks, so which reading is right "
-    "was not independently confirmed"
+    "was taken from a paid reader afterwards, so which reading is right was not independently "
+    "confirmed"
 )
 
 #: Failure modes that name their own failed check. A mode absent from this map falls to
@@ -1214,7 +1214,7 @@ def _paid_after_dispute_clause(output: PageOutput) -> VerdictClause | None:
     Keyed on the typed flag the paid attempt carries onto its output, so it is derived again on
     every later pass and after a sidecar round trip. Not fired on an ERROR page: there the paid
     reading did not ship (the table was withheld or the page failed), the page is already
-    marked, and the clause's claim that the reading passed the checks would be false.
+    marked, and a clause there would describe a reading that did not ship.
     """
     if not output.paid_after_witness_dispute:
         return None
@@ -2189,7 +2189,14 @@ def silent_success_clauses(
     )
     # #1251: LAST, and only on a page the other checks leave SUCCESS: a page that already carries
     # a clause is already demoted and marked, and a second line would say nothing new.
-    judge_only = () if clauses else _judge_only_clauses(output, p, event_kinds)
+    # #1346: the reading-dispute clause does not count as "already marked" here. It says which
+    # READING shipped, and says nothing about whether the page text was independently checked,
+    # so it must not hide #1251's clause on a page that has no such evidence.
+    judge_only = (
+        _judge_only_clauses(output, p, event_kinds)
+        if all(c.check is Check.READING_DISPUTE for c in clauses)
+        else ()
+    )
     return (*clauses, *judge_only)
 
 
@@ -2207,7 +2214,14 @@ def independent_page_evidence(entries: Iterable[TraceEntry], text: str) -> bool:
     NOT_RUN is an absence of evidence, so neither counts. Pure over the entries: it reads no
     judge field, so a reworded judge reason cannot move it."""
     checked = verify_pass_digests(entries, text)
-    if any(e.result in (TraceResult.FAIL, TraceResult.UNKNOWN) for e in checked):
+    # #1346: the reading-dispute entry says which READING shipped, not whether the page text was
+    # compared with anything, so it is no evidence either way and must not erase the words and
+    # numbers passes that are.
+    if any(
+        e.result in (TraceResult.FAIL, TraceResult.UNKNOWN)
+        for e in checked
+        if e.check != Check.READING_DISPUTE.value
+    ):
         return False
 
     def at_page(check: Check, *wanted: TraceResult) -> bool:
@@ -2290,13 +2304,19 @@ def with_judge_only_clause(
     """
     text = output.text or ""
     others = tuple(c for c in published.clauses if not is_judge_only_clause(c))
-    if others:
+    # #1346: a reading-dispute clause is not a reason to drop (or to withhold) the judge-only one.
+    if any(c.check is not Check.READING_DISPUTE for c in others):
         if len(others) == len(published.clauses):
             return published
         return replace(published, clauses=others)
-    if published.clauses:  # only the judge-only clause: already there
+    if len(others) != len(published.clauses):  # the judge-only clause: already there
         return published
-    if output.status is not PageStatus.SUCCESS:
+    # A page the dispute clause alone demoted is WARNING, but is what a fresh run would still
+    # have checked for #1251's clause while it was SUCCESS.
+    demoted_by_dispute = (
+        bool(others) and output.failure_mode is FailureMode.PAID_READING_AFTER_DISPUTE
+    )
+    if output.status is not PageStatus.SUCCESS and not demoted_by_dispute:
         return published
     if not _is_model_reading(output):
         return published
@@ -2318,7 +2338,7 @@ def with_judge_only_clause(
     clauses = _judge_only_clause_on(entries, text)
     if not clauses:
         return published
-    return replace(published, clauses=clauses)
+    return replace(published, clauses=tuple(in_fresh_run_order((*others, *clauses))))
 
 
 def resumed_verdict_with_judge_only_clause(
