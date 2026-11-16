@@ -60,6 +60,7 @@ from socr.core.marks import (
     Check,
     CheckResult,
     is_canonical_mark,
+    page_unchecked_clause_mark,
     parse_canonical_mark,
 )
 from socr.core.result import (
@@ -7101,6 +7102,28 @@ def apply_verdict_marks(
     return _apply_verdict_marks(output, p, page_num, published, provenance, event_kinds)
 
 
+def restate_legacy_banners(text: str, verdict: PageVerdict, page_num: int) -> str:
+    """*text* with each leading canonical line that is a clause's mark rendered from the FULL
+    reason put in the clause's banner form (#1347); every other line is left as it is.
+
+    Only a line that equals that exact legacy render is replaced, so a line a different
+    reason wrote, or one whose result has since changed, is never touched. Idempotent: the
+    banner form is not the full-reason render of its own clause unless the two are equal.
+    """
+    banners, body = _split_page_top_banners(text)
+    swaps: dict[str, str] = {}
+    for clause in verdict.clauses:
+        if clause.banner_reason() == clause.reason:
+            continue
+        legacy = page_unchecked_clause_mark(
+            page_num, clause.check, clause.result, clause.scope, clause.reason
+        )
+        swaps[legacy] = clause.mark(page_num)
+    if not any(b.strip() in swaps for b in banners):
+        return text
+    return _with_page_top_banners(body, [swaps.get(b.strip(), b) for b in banners])
+
+
 def _apply_verdict_marks(
     output: PageOutput,
     p,
@@ -7132,6 +7155,14 @@ def _apply_verdict_marks(
         provenance=provenance,
         event_kinds=event_kinds,
     )
+    # #1347: a page stored by a run from before the banner counted its layer-silent entries
+    # carries the clause's line in the long form; the coverage rule would keep it, so the line
+    # is restated here, and a refinalize gives what a live run gives.
+    restated = restate_legacy_banners(text, verdict, page_num)
+    if restated != text:
+        output = replace(output, text=restated)
+        text = restated
+        leading, _ = _split_page_top_banners(text)
     # #1145 slice 3: a clause on a SUCCESS page DEMOTES it.
     #
     # Only ``silent_success_clauses`` can produce one -- ``derive_clauses`` returns before
