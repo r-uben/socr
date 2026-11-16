@@ -859,6 +859,10 @@ def route_page(
         # ERROR with no text; it costs nothing and spends none of the budget.
         charge = 0.0 if _provider_call_never_ran(output) else prof.cost_per_page_usd
         after_dispute = witness_disputed and is_paid_profile(prof)
+        if after_dispute:
+            # #1346: the flag travels with the bytes, so the verdict can mark the page
+            # whenever this reading ships (see ``verdict._paid_after_dispute_clause``).
+            output.paid_after_witness_dispute = True
         if remaining_budget is not None:
             remaining_budget -= charge
 

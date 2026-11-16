@@ -100,6 +100,15 @@ JUDGE_ONLY_REASON = (
     "before citing"
 )
 
+#: #1346 (owner ruling 2026-11-16): the reason of the ``reading_dispute=UNKNOWN`` clause on a page
+#: whose shipped reading came from a paid reader called after the image check disputed an
+#: earlier reader's table. UNKNOWN, not FAIL: nothing was refuted about the shipped reading.
+PAID_AFTER_DISPUTE_REASON = (
+    "an earlier reading of this page's table was disputed by the image check; this reading "
+    "was taken from a paid reader afterwards and passed the checks, so which reading is right "
+    "was not independently confirmed"
+)
+
 #: Failure modes that name their own failed check. A mode absent from this map falls to
 #: ``_fallback_clause`` rather than being guessed at.
 #: #1156 / #1262: why a page whose text layer is an earlier OCR run is never CHECKED. The
@@ -257,6 +266,12 @@ _MODE_CLAUSES: dict[FailureMode, tuple[Check, CheckResult, str]] = {
         Check.PAGE_JUDGE,
         CheckResult.UNKNOWN,
         JUDGE_ONLY_REASON,
+    ),
+    #: #1346: same purpose as the rows above, for the paid reading taken after a dispute.
+    FailureMode.PAID_READING_AFTER_DISPUTE: (
+        Check.READING_DISPUTE,
+        CheckResult.UNKNOWN,
+        PAID_AFTER_DISPUTE_REASON,
     ),
     FailureMode.EQUATION_FIDELITY_UNVERIFIED: (
         Check.EQUATION_FIDELITY,
@@ -973,6 +988,8 @@ PERMANENTLY_UNRESOLVABLE_MODES: frozenset[FailureMode] = frozenset(
         # #1251: re-reading cannot produce an independent check the layer does not offer, and
         # the reading is not deterministic, so re-reading would only change shipped text.
         FailureMode.READING_UNCORROBORATED,
+        # #1346: re-reading would pay the paid reader again for a reading that may differ.
+        FailureMode.PAID_READING_AFTER_DISPUTE,
     }
 )
 
@@ -1182,6 +1199,29 @@ def _exact_pass_unjudged_outcome(output: PageOutput, event_kinds: frozenset[str]
             SCOPE_PAGE,
             EXACT_PASS_UNJUDGED_REASON,
         )
+    )
+
+
+def _paid_after_dispute_clause(output: PageOutput) -> VerdictClause | None:
+    """#1346 (owner ruling 2026-11-16): ``reading_dispute=UNKNOWN`` on a page whose shipped
+    reading came from a paid reader called after the image check disputed an earlier reader's
+    table.
+
+    ALWAYS, even when the paid reading passes every check: the checks compare it with a witness
+    that has already been wrong about this page, so a pass does not say which reading is right.
+    UNKNOWN, not FAIL: nothing was refuted about this reading.
+
+    Keyed on the typed flag the paid attempt carries onto its output, so it is derived again on
+    every later pass and after a sidecar round trip. Not fired on an ERROR page: there the paid
+    reading did not ship (the table was withheld or the page failed), the page is already
+    marked, and the clause's claim that the reading passed the checks would be false.
+    """
+    if not output.paid_after_witness_dispute:
+        return None
+    if output.status not in (PageStatus.SUCCESS, PageStatus.WARNING):
+        return None
+    return VerdictClause(
+        Check.READING_DISPUTE, CheckResult.UNKNOWN, SCOPE_PAGE, PAID_AFTER_DISPUTE_REASON
     )
 
 
@@ -2087,6 +2127,7 @@ _SILENT_SUCCESS_ORDER: tuple[tuple[Check, str], ...] = (
     (Check.FIGURE_TEXT, SCOPE_PAGE),
     (Check.PAGE_JUDGE, SCOPE_PAGE),
     (Check.PRIOR_OCR_LAYER, SCOPE_PAGE),
+    (Check.READING_DISPUTE, SCOPE_PAGE),
     (Check.FIGURE_TEXT, "figure"),
     (Check.TEXT_LAYER_NUMBERS, SCOPE_PAGE),
     # #1218: LAST, so ``with_text_layer_numbers_clause``'s count of the clauses ahead of
@@ -2691,6 +2732,7 @@ def _clauses_ahead_of_text_layer_numbers(
         _chart_values_clause(event_kinds),
         _exact_pass_unjudged_clause(output, event_kinds),
         _prior_ocr_layer_clause(output, p),
+        _paid_after_dispute_clause(output),
         # #1187 (merge with #1185): INSIDE the ahead tuple, not after the numbers clause.
         # This tuple is the single ordering authority -- ``with_text_layer_numbers_clause``
         # slots #1185's clause by the COUNT of what precedes it -- so a lane that derived its

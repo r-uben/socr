@@ -19114,7 +19114,9 @@ class UnifiedPipeline:
                     _mode = None
                 # #1251: this mode too is written only by the verdict demotion of a SUCCESS page.
                 if (
-                    _mode in LAYER_CHECK_MODES or _mode is _FM.READING_UNCORROBORATED
+                    _mode in LAYER_CHECK_MODES
+                    or _mode is _FM.READING_UNCORROBORATED
+                    or _mode is _FM.PAID_READING_AFTER_DISPUTE
                 ) and winning.get("status") != PageStatus.WARNING.value:
                     is_permanently_unverifiable = False
 

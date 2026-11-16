@@ -6929,6 +6929,7 @@ _VERDICT_DERIVED_MODES: frozenset[FailureMode] = frozenset(
         FailureMode.VISUAL_VALUES_UNTRANSCRIBED,
         FailureMode.MODEL_OUTPUT_UNJUDGED,
         FailureMode.READING_UNCORROBORATED,
+        FailureMode.PAID_READING_AFTER_DISPUTE,
         FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
         FailureMode.FIGURE_NOT_SHOWN,
         FailureMode.FIGURE_RENDER_FAILED,
@@ -7028,6 +7029,8 @@ def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
         # would need its own key, not this row.
         Check.PAGE_JUDGE: FailureMode.MODEL_OUTPUT_UNJUDGED,
         Check.PRIOR_OCR_LAYER: FailureMode.PRIOR_OCR_LAYER_UNVERIFIED,
+        # #1346: the paid reading taken after a witness dispute.
+        Check.READING_DISPUTE: FailureMode.PAID_READING_AFTER_DISPUTE,
         # #1218: FAIL is the only result the clause emits, so the check alone maps it.
         Check.TEXT_LAYER_DROPS: FailureMode.NUMBERS_DROPPED_FROM_READING,
         # #1294: FAIL and UNKNOWN both say words are missing; one mode.
