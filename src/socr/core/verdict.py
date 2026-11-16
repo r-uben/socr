@@ -318,9 +318,23 @@ class VerdictClause:
     scope: str = SCOPE_PAGE
     reason: str = ""
 
+    def banner_reason(self) -> str:
+        """The reason as the page banner shows it (#1347).
+
+        ``reason`` stays the full record (the sidecar loses nothing); the banner counts the
+        layer-silent disputes of a ``text_layer_numbers`` clause and names the contradictions.
+        Derived from ``reason`` at render time, so a live run and a refinalized stored sidecar
+        (including one written before #1347) print the same line.
+        """
+        if self.check is Check.TEXT_LAYER_NUMBERS:
+            from socr.tables.reading_agreement import summarise_disputes_for_banner
+
+            return summarise_disputes_for_banner(self.reason)
+        return self.reason
+
     def mark(self, page_num: int) -> str:
         return page_unchecked_clause_mark(
-            page_num, self.check, self.result, self.scope, self.reason
+            page_num, self.check, self.result, self.scope, self.banner_reason()
         )
 
     def to_dict(self) -> dict[str, str]:
