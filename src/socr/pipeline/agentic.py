@@ -1439,6 +1439,16 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                     "verifiable": result.verifiable,
                     "passed": result.passed,
                     "cause": result.cause,
+                    # #1357: absent unless extra resolutions were read, so the
+                    # payload of every table that took the base path is unchanged.
+                    **(
+                        {
+                            "extra_resolutions": list(result.extra_resolutions),
+                            "extra_resolution_tokens": result.extra_resolution_tokens,
+                        }
+                        if result.extra_resolutions
+                        else {}
+                    ),
                 },
             )
             if no_witness:
@@ -1505,6 +1515,26 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                 confidence=0.0,
                 # #1125-r2: source-evidence reject is not page_judge_completed
                 judge_outcome=JUDGE_OUTCOME_SOURCE_EVIDENCE,
+            )
+
+        if result.extra_resolutions:
+            # #1357: the base-resolution reading left numbers unsupported and
+            # further resolutions supported them. A reader of the audit log must
+            # be able to tell; page status and verdict are unchanged.
+            from socr.tables.source_evidence import EXTRA_RESOLUTION_KIND
+
+            self._emit_event(
+                page_num=page_num,
+                kind=EXTRA_RESOLUTION_KIND,
+                engine=output.engine or "",
+                detail=(
+                    f"numeric tokens supported by extra resolutions "
+                    f"{list(result.extra_resolutions)} dpi: {result.extra_resolution_tokens}"
+                ),
+                data={
+                    "resolutions": list(result.extra_resolutions),
+                    "tokens_resolved": result.extra_resolution_tokens,
+                },
             )
 
         if result.content_unverified:

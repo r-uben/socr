@@ -22,7 +22,7 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from socr.tables.image_locate import DETECT_DPI as _TEXT_LAYER_INK_DPI
 from socr.tables.native_verifier import (
@@ -57,6 +57,39 @@ _EVIDENCE_OCR_DPI: int = 150
 # ``tables.extract._CROP_WALL_CLOCK_MULTIPLIER`` — which is 4 s and already
 # above ``ceil(max)``. Expire maps to ``WITNESS_EXEC_ERROR``.
 TESSERACT_WITNESS_TIMEOUT_SEC: float = 4.0
+
+# #1357: the further resolutions the scanned witness reads, in order, ONLY when
+# the base-resolution reading leaves numeric table tokens unsupported. Measured
+# 2026-11-16 with ``build_scanned_evidence(include_text_layer=False)`` on the
+# 12 Fed sample pages, emitted tokens = the saved qwen table reading, unsupported
+# numeric tokens per single reading at 150/200/300/400 dpi:
+#   p007  20 numbers: 2 / 0 / 0 / 0
+#   p009 134 numbers: 3 / 2 / 113 / 103     (300+ collapses)
+#   p044  34 numbers: 31 / 19 / 13 / 10
+#   p063 185 numbers: 4 / 1 / 123 / 124     (300+ collapses)
+#   p097 162 numbers: 26 / 11 / 5 / 0
+# A table passes at a rung only when ONE reading (the base or that rung) supports
+# every token by itself; readings are never pooled (review round, #1357). Pooling
+# different tokens across resolutions let one printed glyph count as two numbers:
+# 55 of 5225 single-cell mutants of p097 (1.05%) made the whole table pass against
+# 0.02% at base, while the single-reading rule passed 0 of 14106 mutants over the
+# five pages and clears the same two pages (p007 at 200, p097 at 400).
+# 300 dpi is not a rung: by the numbers above it clears no page, it is where p009
+# and p063 collapse and drop decimal points, and a (200, 400) ladder gives the
+# same verdict on all five pages with fewer coincidences. The 3 label-only pages
+# (p027, p028, p051) have no numeric tokens and never trigger a rung. Ladder order
+# is ascending cost, and the loop stops at the first rung that clears.
+_EXTRA_EVIDENCE_OCR_DPIS: tuple[int, ...] = (200, 400)
+
+# Wall-clock bound per tesseract call at each extra rung. The base bound is
+# ``ceil(p99 * 2.0)`` at 150 dpi (p99 1.789 s, above). Per-call wall time
+# measured 2026-11-16 on the 12 sample pages (median of 3 runs per call, 17
+# calls) rose with resolution; the worst per-call ratio to the same call at
+# 150 dpi was 1.82 (200) and 2.58 (400), and the slowest single call was
+# 0.93 / 1.01 / 1.63 s at 150 / 200 / 400 dpi. Each bound is
+# ``ceil(1.789 * worst_ratio * 2.0)``: 6.5 -> 7, 9.2 -> 10. Same 2.0 headroom as
+# the base bound; the measured maxima sit well inside them.
+_EXTRA_EVIDENCE_TIMEOUT_SEC: dict[int, float] = {200: 7.0, 400: 10.0}
 
 # Alphabetic runs in evidence text: at least _MIN_CONTENT_TOKEN_LEN chars.
 _CONTENT_TOKEN_RE = re.compile(rf"[A-Za-z][A-Za-z0-9\-]{{{_MIN_CONTENT_TOKEN_LEN - 1},}}")
@@ -215,6 +248,9 @@ NO_WITNESS_BACKEND_KIND: str = "source_evidence_no_witness_backend"
 #: ``orchestrator.py`` cannot spell it differently from the emitter (the same
 #: reason ``NO_WITNESS_BACKEND_KIND`` is one).
 LABEL_UNVERIFIED_KIND: str = "source_evidence_table_label_unverified"
+#: #1357: audit event for a table that PASSED only because the witness read
+#: further resolutions. ``data``: ``resolutions`` (dpi list), ``tokens_resolved``.
+EXTRA_RESOLUTION_KIND: str = "source_evidence_table_extra_resolution"
 
 
 @dataclass(frozen=True)
@@ -291,6 +327,13 @@ class SourceEvidenceResult:
     #: #1048: EVERY unsupported token of a verifiable-and-failed verdict, as
     #: bare strings (no cap: the reason text keeps its own 5-token excerpt), so the in-text "disputed" mark can name them. Empty otherwise.
     disputed_values: tuple[str, ...] = ()
+    #: #1357: the extra resolutions (dpi) the witness read because the base
+    #: reading left numeric tokens unsupported, in the order read. Empty when
+    #: the base reading sufficed, which is the unchanged path.
+    extra_resolutions: tuple[int, ...] = ()
+    #: #1357: numeric tokens (multiset count) that were unsupported at the base
+    #: resolution and supported after the extra readings.
+    extra_resolution_tokens: int = 0
 
 
 def page_has_native_words(page) -> bool:
@@ -918,7 +961,9 @@ def _render_crop_pixmap(page, bbox: tuple[float, float, float, float], dpi: int)
     return page.get_pixmap(matrix=mat, clip=rect)
 
 
-def classical_ocr_with_state(pix) -> tuple[str, str, str]:
+def classical_ocr_with_state(
+    pix, timeout_sec: float = TESSERACT_WITNESS_TIMEOUT_SEC
+) -> tuple[str, str, str]:
     """Classical OCR over a pixmap, reporting WHY it produced what it produced.
 
     Returns ``(text, witness_state, detail)``.
@@ -944,7 +989,7 @@ def classical_ocr_with_state(pix) -> tuple[str, str, str]:
         from PIL import Image
 
         img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        text = pytesseract.image_to_string(img, timeout=TESSERACT_WITNESS_TIMEOUT_SEC) or ""
+        text = pytesseract.image_to_string(img, timeout=timeout_sec) or ""
     except Exception as exc:
         logger.debug("classical OCR failed: %s", exc)
         not_found = getattr(pytesseract, "TesseractNotFoundError", ())
@@ -1059,10 +1104,14 @@ def build_scanned_evidence(
     include_text_layer: bool = True,
     text_layer_from_words: bool = False,
     allow_full_page_ocr: bool = True,
+    dpi: int = _EVIDENCE_OCR_DPI,
 ) -> SourceEvidenceBundle:
     """Build local non-generative evidence for a scanned page.
 
     ``include_text_layer=False`` drops the PDF text layer from the evidence.
+
+    ``dpi`` is the raster resolution of the pixel readings (#1357: the extra
+    rungs of ``widen_scanned_evidence`` pass the ladder's resolutions).
 
     ``text_layer_from_words=True`` reads the layer via ``get_text("words")`` (for
     rotated born-digital pages) instead of a single ``get_text()`` blob.
@@ -1080,7 +1129,21 @@ def build_scanned_evidence(
     # judged on its own behaviour -- a reading, silence, or an exception --
     # never on whether this host happens to have tesseract installed.
     if ocr_image_fn is None:
-        read_witness = classical_ocr_with_state
+        if dpi == _EVIDENCE_OCR_DPI:
+            read_witness = classical_ocr_with_state
+        else:
+            # An extra rung: the bound derived for its resolution (#1357).
+            try:
+                rung_timeout = _EXTRA_EVIDENCE_TIMEOUT_SEC[dpi]
+            except KeyError:
+                raise ValueError(
+                    f"no derived timeout for {dpi} dpi; supported: "
+                    f"{_EVIDENCE_OCR_DPI} or {sorted(_EXTRA_EVIDENCE_TIMEOUT_SEC)}"
+                ) from None
+
+            def read_witness(pix) -> tuple[str, str, str]:
+                return classical_ocr_with_state(pix, timeout_sec=rung_timeout)
+
     else:
 
         def read_witness(pix) -> tuple[str, str, str]:
@@ -1125,7 +1188,7 @@ def build_scanned_evidence(
         table_regions_detected = bool(boxes)
         for box in boxes:
             try:
-                pix = _render_crop_pixmap(page, box.bbox, _EVIDENCE_OCR_DPI)
+                pix = _render_crop_pixmap(page, box.bbox, dpi)
             except Exception as exc:
                 # The image never existed, so the reader never saw one. Distinct
                 # from a reader that ran and failed (#658 reviewer item 2).
@@ -1148,7 +1211,7 @@ def build_scanned_evidence(
 
             # GH-304b: derive page-level rotation; rotate raster pixels only.
             rotation = upright_rotation_for(page)
-            mat = fitz.Matrix(_EVIDENCE_OCR_DPI / 72, _EVIDENCE_OCR_DPI / 72)
+            mat = fitz.Matrix(dpi / 72, dpi / 72)
             if rotation != 0:
                 mat.prerotate(rotation)
             pix = page.get_pixmap(matrix=mat)
@@ -1172,6 +1235,72 @@ def build_scanned_evidence(
         witness_detail=witness_details.get(witness_state, ""),
         ambiguous_numeric=ambiguous,
     )
+
+
+def _unsupported_numeric_count(output: Counter, evidence: Counter) -> int:
+    """Multiset count of emitted numeric tokens the evidence does not cover."""
+    return sum(max(0, count - evidence.get(tok, 0)) for tok, count in output.items())
+
+
+def widen_scanned_evidence(
+    page,
+    bundle: SourceEvidenceBundle,
+    tokens: TableTokens,
+    *,
+    ocr_image_fn: OcrImageFn | None = None,
+) -> tuple[SourceEvidenceBundle, tuple[int, ...], int]:
+    """#1357: read further resolutions when the base reading leaves numbers unsupported.
+
+    Returns ``(bundle, resolutions_read, tokens_resolved)``. When the base
+    bundle already supports every emitted numeric token, or holds no reading to
+    judge against, the input bundle is returned untouched with no extra read.
+
+    Otherwise each rung of ``_EXTRA_EVIDENCE_OCR_DPIS`` re-reads the same
+    regions as pixels only (never the text layer: ``include_text_layer=False``,
+    so on the born-digital arm too the rungs add pixel evidence only). The
+    table passes at a rung only when that ONE reading supports every emitted
+    numeric token by itself; readings are never pooled across resolutions,
+    because different tokens from different readings let one printed glyph
+    count as two numbers (#1357 review). The loop stops at the first rung that
+    clears. A rung that reads nothing (timeout, exec error, blank) contributes
+    nothing and is not listed in ``resolutions_read``; the base bundle's witness
+    state and detail are kept. On failure the base bundle is returned.
+
+    Content-label evidence stays the base reading's. Labels are a set (no
+    counts), so a larger pool can only add coincidental matches; they never
+    reject a table that has numbers (#659 flags them) and an alpha-only table
+    has no numeric token to trigger a rung, so the label verdict of a table is
+    the same as if the base reading had sufficed.
+    """
+    if (
+        not tokens.has_numeric
+        or not bundle.has_content_evidence
+        or _multiset_supported(tokens.numeric, bundle.numeric)
+    ):
+        return bundle, (), 0
+    base_missing = _unsupported_numeric_count(tokens.numeric, bundle.numeric)
+    read: list[int] = []
+    for dpi in _EXTRA_EVIDENCE_OCR_DPIS:
+        rung = build_scanned_evidence(
+            page,
+            ocr_image_fn=ocr_image_fn,
+            include_text_layer=False,
+            # Same fallback as the base pass: the full page is read only when
+            # the table crops yielded no reading at all (no region located, or
+            # every crop read empty), never in addition to crops that read.
+            allow_full_page_ocr=True,
+            dpi=dpi,
+        )
+        if not rung.has_content_evidence:
+            # Nothing was read at this resolution (timeout, exec error, blank):
+            # it contributes nothing and is not recorded as a resolution read.
+            continue
+        read.append(dpi)
+        if _multiset_supported(tokens.numeric, rung.numeric):
+            # One reading supports every token on its own. The rung's numeric
+            # evidence replaces the base's; its labels and witness state do not.
+            return replace(bundle, numeric=Counter(rung.numeric)), tuple(read), base_missing
+    return bundle, tuple(read), 0
 
 
 def _resolve_witness_state(states: list[str]) -> str:
@@ -1413,4 +1542,10 @@ def verify_scanned_table(
             include_text_layer=native_trusted is not False and layer_is_evidence,
             text_layer_from_words=False,
         )
-    return verify_table_tokens(bundle, tokens)
+    bundle, extra_dpis, resolved = widen_scanned_evidence(
+        page, bundle, tokens, ocr_image_fn=ocr_image_fn
+    )
+    result = verify_table_tokens(bundle, tokens)
+    if extra_dpis:
+        result = replace(result, extra_resolutions=extra_dpis, extra_resolution_tokens=resolved)
+    return result
