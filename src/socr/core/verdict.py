@@ -109,6 +109,13 @@ PAID_AFTER_DISPUTE_REASON = (
     "confirmed"
 )
 
+#: #1359: appended to the reason above when the earlier reading showed a table that the paid
+#: reading does not contain and the floor was lifted over it.
+PAID_OMITS_TABLE_SUFFIX = (
+    "; the earlier reading showed a table that this reading does not contain; every number of "
+    "that table appears in this reading, but counts and positions were not checked"
+)
+
 #: #1361: the same clause for a paid reading taken after the TABLE CHECKS withheld an earlier
 #: reading's table. UNKNOWN for the same reason: the paid reading passed every check and nothing
 #: was refuted about it, but the checks that withheld the first reading were not wrong about it
@@ -1237,6 +1244,8 @@ def _paid_after_dispute_clause(output: PageOutput) -> VerdictClause | None:
         if output.paid_after_witness_dispute
         else PAID_AFTER_TABLE_WITHHOLD_REASON
     )
+    if output.paid_reading_omits_disputed_table:
+        reason += PAID_OMITS_TABLE_SUFFIX
     return VerdictClause(Check.READING_DISPUTE, CheckResult.UNKNOWN, SCOPE_PAGE, reason)
 
 

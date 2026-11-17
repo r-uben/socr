@@ -682,6 +682,11 @@ class PageOutput:
     #: attempt boundary so it travels with the bytes). The verdict derives a mark from it
     #: whenever this output ships, accepted or not; see ``verdict._paid_after_dispute_clause``.
     paid_after_witness_dispute: bool = False
+    #: #1359: this paid reading (``paid_after_witness_dispute``) carries no table although the
+    #: earlier reading, which the image check disputed, did. Set only when the deterministic
+    #: no-loss condition held (``agentic.paid_reading_keeps_disputed_table_tokens``) and the floor
+    #: was lifted; the verdict's reading-dispute clause then says so in plain words.
+    paid_reading_omits_disputed_table: bool = False
     #: #1361: this output was read by a paid rung called AFTER the table checks withheld an earlier,
     #: free reading's table (``UnifiedPipeline._paid_reading_after_table_withhold``). It passed the
     #: source-evidence witness, the page judge and the table checks, and still ships marked: the
@@ -811,6 +816,9 @@ class PageOutput:
         # unconditional key would change the fingerprint of pages that never had a dispute.
         if self.paid_after_witness_dispute:
             d["paid_after_witness_dispute"] = True
+        # #1359: same omit-when-unset convention.
+        if self.paid_reading_omits_disputed_table:
+            d["paid_reading_omits_disputed_table"] = True
         # #1361: same omit-when-unset rule, same reason.
         if self.paid_after_table_withhold:
             d["paid_after_table_withhold"] = True
@@ -880,6 +888,7 @@ class PageOutput:
                 str(v) for v in d.get("table_disputed_values", ()) if str(v)
             ),
             paid_after_witness_dispute=d.get("paid_after_witness_dispute") is True,
+            paid_reading_omits_disputed_table=d.get("paid_reading_omits_disputed_table") is True,
             paid_after_table_withhold=d.get("paid_after_table_withhold") is True,
             table_ditto_columns=list(d.get("table_ditto_columns", [])),
             # #713: a sidecar is parsed JSON, so both are read defensively --
