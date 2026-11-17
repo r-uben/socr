@@ -343,3 +343,187 @@ def test_a_paid_reading_after_a_rejection_that_is_not_a_dispute_is_not_rescued()
     assert decision.accepted is False
     assert decision.attempts[1].output.paid_after_witness_dispute is False
     assert decision.attempts[1].output.table_witness_corroboration is None
+
+
+# --- review round: direction, pixel-only witness, engines, which reading, re-assessment ------
+
+
+@pytest.mark.parametrize(
+    ("emitted", "witness"),
+    [
+        ("-7", "-0.7"),  # ``-.7`` read correctly by the witness, shipped as ``-7`` by the models
+        ("4.1", "-4.1"),  # the witness holds a sign the emitted token lacks
+        ("41", "4.1"),  # the witness holds a point the emitted token lacks
+        ("1234", "1.234"),
+        ("-41", "-4.1"),
+    ],
+)
+def test_a_witness_that_is_more_complete_than_the_emitted_token_never_corroborates(
+    emitted: str, witness: str
+) -> None:
+    corroborated, still = corroborate_unsupported_numeric(C(emitted), C(witness), C(emitted))
+    assert corroborated == C()
+    assert still == C(emitted)
+    # the DIFFERENCE is the direction: swap the two tokens and the same digits corroborate
+    swapped, _ = corroborate_unsupported_numeric(C(witness), C(emitted), C(witness))
+    assert swapped == C(witness)
+
+
+def test_the_page_that_prints_a_negative_fraction_is_not_waved_through() -> None:
+    # printed ``-.7``; the witness read ``-0.7``; the models (both) lost the point: ``-7``
+    table = "| item | a |\n|---|---|\n| Corn | -7 |\n| Soy | 2.0 |\n"
+    witness = C("-0.7", "2.0")
+    second = SecondReading(engine="qwen", numeric=_tokens(table).numeric)
+    result = verify_table_tokens(
+        _bundle(witness), _tokens(table), second_reading=second, engine="gemini"
+    )
+    assert result.passed is False
+    assert result.disputed_values == ("-7",)
+    assert result.corroborated_values == ()
+
+
+def test_a_witness_token_goes_to_the_emitted_token_it_can_stand_for() -> None:
+    # witness ``7`` can stand for either ``-7`` (nothing to add) or ``0.7`` (a point to add);
+    # one witness token, two emitted tokens, only one is corroborated and none is double-counted
+    corroborated, still = corroborate_unsupported_numeric(
+        C("-0.7", "0.7"), C("7"), C("-0.7", "0.7")
+    )
+    assert sum(corroborated.values()) == 1 and sum(still.values()) == 1
+    # with a second witness token both are
+    corroborated, still = corroborate_unsupported_numeric(
+        C("-0.7", "0.7"), C("7", "-7"), C("-0.7", "0.7")
+    )
+    assert corroborated == C("-0.7", "0.7") and still == C()
+
+
+@pytest.mark.parametrize("engine", ["", "gemini"])
+def test_both_engines_must_be_known_and_differ(engine: str) -> None:
+    result = verify_table_tokens(
+        _bundle(WITNESS), _tokens(TABLE), second_reading=_second("qwen"), engine=engine
+    )
+    assert result.passed is (engine == "gemini")
+    assert bool(result.corroborated_values) is (engine == "gemini")
+
+
+# the witness is a lossy raster only when no text layer is in the bundle
+
+
+def _layer_page(text: str):
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 100), text, fontsize=11)
+    return doc, page
+
+
+def _verify_scanned(page, *, layer_is_evidence: bool):
+    return __import__("socr.tables.source_evidence", fromlist=["x"]).verify_scanned_table(
+        page,
+        TABLE,
+        ocr_image_fn=lambda pix: "Corn 41 2.0 Soy 1.5 12",
+        native_trusted=False,
+        layer_is_evidence=layer_is_evidence,
+        second_reading=_second("qwen"),
+        engine="gemini",
+    )
+
+
+def test_the_second_reading_stands_in_for_a_pixel_witness_not_for_a_text_layer() -> None:
+    # the layer prints ``4.1`` (exact), the OCR crop reads ``41``; both readers say ``-4.1``
+    doc, page = _layer_page("Corn 4.1 2.0 Soy 1.5 12")
+    try:
+        pixel = _verify_scanned(page, layer_is_evidence=False)  # layer excluded: pixels only
+        layered = _verify_scanned(page, layer_is_evidence=True)  # layer in the bundle
+    finally:
+        doc.close()
+    assert pixel.passed is True and pixel.corroborated_values == ("-4.1",)
+    assert layered.passed is False and layered.corroborated_values == ()
+
+
+# --- which earlier reading corroborates -----------------------------------------------------
+
+
+def _route_cells(cells: dict[str, str], ladder: list):
+    """Like ``_route`` but every rung's cell is given by engine: ``-4.1`` is the true value."""
+    doc = fitz.open()
+    page = doc.new_page()
+    events: list = []
+    judge = SourceEvidenceTableJudge(
+        _Accept(),
+        lambda n: page,
+        events.append,
+        ocr_image_fn=lambda pix: "Corn 41 2.0 Soy 1.5 12",
+        native_trusted=lambda n: False,
+        layer_is_evidence=lambda n: False,
+    )
+
+    def run_provider(prof, page_num: int) -> PageOutput:
+        return PageOutput(
+            page_num=page_num,
+            text=TABLE.replace("-4.1", cells[prof.engine.value]),
+            status=PageStatus.SUCCESS,
+            engine=prof.engine.value,
+        )
+
+    return route_page(1, ladder, run_provider, judge), events
+
+
+def test_the_most_recent_disputed_reading_by_another_engine_is_the_one_consulted() -> None:
+    from socr.core.providers import PROFILE_GLM
+
+    ladder = [PROFILE_QWEN_LOCAL, PROFILE_GLM, PROFILE_GEMINI]
+    # arm A: the older reading carries the token, the most recent one does not
+    older, _ = _route_cells({"qwen": "-4.1", "glm": "-4.2", "gemini": "-4.1"}, ladder)
+    # arm B: the most recent reading carries it, the older one does not
+    recent, _ = _route_cells({"qwen": "-4.2", "glm": "-4.1", "gemini": "-4.1"}, ladder)
+    assert older.final_output.table_witness_corroboration is None
+    assert recent.final_output.table_witness_corroboration is not None
+    assert recent.final_output.table_witness_corroboration["corroborated_by"] == "glm"
+    assert recent.accepted is True and older.accepted is False
+
+
+def test_a_refuted_paid_reading_can_corroborate_a_later_paid_rung() -> None:
+    from socr.core.providers import PROFILE_MISTRAL
+
+    ladder = [PROFILE_QWEN_LOCAL, PROFILE_MISTRAL, PROFILE_GEMINI]
+    carries, _ = _route_cells({"qwen": "-4.2", "mistral": "-4.1", "gemini": "-4.1"}, ladder)
+    lacks, _ = _route_cells({"qwen": "-4.2", "mistral": "-4.2", "gemini": "-4.1"}, ladder)
+    # the mistral reading is itself refuted (the witness holds ``41``, mistral emits ``-4.1``
+    # in arm one: corroborated by nobody, qwen read ``-4.2``), and it then stands for gemini
+    assert carries.final_output.table_witness_corroboration is not None
+    assert carries.final_output.table_witness_corroboration["corroborated_by"] == "mistral"
+    assert lacks.final_output.table_witness_corroboration is None
+
+
+# --- a later re-assessment has no second reading --------------------------------------------
+
+
+def test_a_reassessment_without_the_second_reading_refuses_the_corroborated_reading() -> None:
+    # The #1013 kept-candidate re-judge and the crop-patch re-judge build a fresh PageOutput,
+    # which never carries ``witness_second_reading`` (it is a one-call hand-over). The same
+    # bytes that passed through corroboration are therefore refused there: fail closed, the
+    # run that resumes diverges only by re-running the ladder.
+    carries, _ = _route("-4.1", [PROFILE_QWEN_LOCAL, PROFILE_GEMINI])
+    shipped = carries.final_output
+    assert shipped.table_witness_corroboration is not None
+
+    doc = fitz.open()
+    page = doc.new_page()
+    judge = SourceEvidenceTableJudge(
+        _Accept(),
+        lambda n: page,
+        None,
+        ocr_image_fn=lambda pix: "Corn 41 2.0 Soy 1.5 12",
+        native_trusted=lambda n: False,
+        layer_is_evidence=lambda n: False,
+    )
+    fresh = PageOutput(
+        page_num=1,
+        text=shipped.text,
+        status=PageStatus.SUCCESS,
+        engine=shipped.engine,
+        paid_after_witness_dispute=True,
+    )
+    assert judge.assess(fresh, PROFILE_GEMINI).accept is False
+    # and the difference is only the hand-over: with it the same bytes pass
+    fresh.witness_second_reading = ("qwen", TABLE)
+    assert judge.assess(fresh, PROFILE_GEMINI).accept is True

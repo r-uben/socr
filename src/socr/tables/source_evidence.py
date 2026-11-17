@@ -1236,6 +1236,24 @@ def _digit_key(token: str) -> str:
     return digits.lstrip("0") or "0"
 
 
+def _marks(token: str) -> frozenset[str]:
+    """The sign and decimal point a normalised numeric token carries (#1355 review)."""
+    return frozenset(ch for ch in token if ch in "-.")
+
+
+def _witness_may_stand_for(witness_token: str, emitted_token: str) -> bool:
+    """True when *witness_token* is *emitted_token* with a sign and/or point REMOVED.
+
+    Same digit key, and every mark the witness carries is also on the emitted token. The reverse
+    is a different claim: a witness that holds a sign or point the emitted token lacks read the
+    cell more completely than the readers did (``-.7`` shipped as ``-7`` is a documented model
+    error), so it is never corroboration.
+    """
+    return _digit_key(witness_token) == _digit_key(emitted_token) and _marks(
+        witness_token
+    ) <= _marks(emitted_token)
+
+
 def corroborate_unsupported_numeric(
     emitted: Counter, evidence: Counter, second: Counter
 ) -> tuple[Counter, Counter]:
@@ -1248,13 +1266,15 @@ def corroborate_unsupported_numeric(
 
     - ``second`` (the earlier disputed reading's tokens) carries that token at least as many
       times as it was emitted;
-    - the witness evidence holds a token with the same digit sequence (``_digit_key``) that is
-      still unconsumed, after every directly supported emitted token and every earlier
-      corroboration has taken its own. One witness ``41`` can therefore stand behind one ``-4.1``,
-      never two.
+    - the witness evidence holds a token that is the emitted token with a sign and/or point
+      removed (``_witness_may_stand_for``: same digits, witness marks a subset of the emitted
+      marks) and is still unconsumed, after every directly supported emitted token and every
+      earlier corroboration has taken its own. One witness ``41`` can therefore stand behind
+      one ``-4.1``, never two.
 
-    A token whose digits the witness does not hold stays unsupported: that is a disagreement
-    about the number, not about its sign or point.
+    A token whose digits the witness does not hold stays unsupported, and so does one the
+    witness holds WITH a mark the emitted token lacks (witness ``-4.1``, emitted ``4.1``): that
+    is a disagreement about the number, not a lost sign or point.
     """
     spare: Counter = Counter(evidence)
     unsupported: Counter = Counter()
@@ -1263,17 +1283,16 @@ def corroborate_unsupported_numeric(
         spare[tok] -= direct
         if count > direct:
             unsupported[tok] = count - direct
-    by_key: Counter = Counter()
-    for tok, count in spare.items():
-        if count > 0:
-            by_key[_digit_key(tok)] += count
     corroborated: Counter = Counter()
     still: Counter = Counter()
-    for tok in sorted(unsupported):
-        key = _digit_key(tok)
+    # Most marks first: a token with more marks fits fewer witness tokens, so it picks first, and
+    # among compatible witness tokens the most-marked is taken, leaving the least-marked (which
+    # stands for the most emitted tokens) for the rest.
+    for tok in sorted(unsupported, key=lambda t: (-len(_marks(t)), t)):
         for _ in range(unsupported[tok]):
-            if second.get(tok, 0) >= emitted[tok] and by_key[key] > 0:
-                by_key[key] -= 1
+            candidates = [w for w, n in spare.items() if n > 0 and _witness_may_stand_for(w, tok)]
+            if second.get(tok, 0) >= emitted[tok] and candidates:
+                spare[max(candidates, key=lambda w: (len(_marks(w)), w))] -= 1
                 corroborated[tok] += 1
             else:
                 still[tok] += 1
@@ -1298,8 +1317,8 @@ def verify_table_tokens(
 
     ``second_reading`` (#1355) is passed only for a paid reading run after a witness dispute.
     It can corroborate a numeric token the witness lost a sign or point on
-    (``corroborate_unsupported_numeric``), and only when its engine is known and differs from
-    ``engine``, the engine of the reading under check. A content-label dispute is never touched.
+    (``corroborate_unsupported_numeric``), and only when BOTH engines are known and differ:
+    ``engine`` is the engine of the reading under check. A content-label dispute is never touched.
     """
     if not bundle.has_content_evidence:
         # #658: an empty bundle has two very different causes. Say which one.
@@ -1331,7 +1350,12 @@ def verify_table_tokens(
             tok for tok, count in tokens.numeric.items() if bundle.numeric.get(tok, 0) < count
         ]
         still: Counter = Counter(tokens.numeric)
-        if second_reading is not None and second_reading.engine and second_reading.engine != engine:
+        if (
+            second_reading is not None
+            and second_reading.engine
+            and engine
+            and second_reading.engine != engine
+        ):
             corroborated, still = corroborate_unsupported_numeric(
                 tokens.numeric, bundle.numeric, second_reading.numeric
             )
@@ -1512,13 +1536,23 @@ def verify_scanned_table(
                 ocr_image_fn=ocr_image_fn,
                 include_text_layer=False,
             )
+            pixel_only = True
         else:
             bundle = build_born_digital_evidence(page, ocr_image_fn=ocr_image_fn)
+            pixel_only = False
     else:
+        pixel_only = not (native_trusted is not False and layer_is_evidence)
         bundle = build_scanned_evidence(
             page,
             ocr_image_fn=ocr_image_fn,
             include_text_layer=native_trusted is not False and layer_is_evidence,
             text_layer_from_words=False,
         )
-    return verify_table_tokens(bundle, tokens, second_reading=second_reading, engine=engine)
+    # #1355 review: a second reading only stands in for a LOSSY RASTER witness. A bundle that
+    # includes the exact text layer (or its whole-page number pool) is not one.
+    return verify_table_tokens(
+        bundle,
+        tokens,
+        second_reading=second_reading if pixel_only else None,
+        engine=engine,
+    )
