@@ -112,6 +112,10 @@ EXPECTED_RESUME_KINDS = frozenset(
         "native_cell_check_contradicted",
         "native_cell_check_skipped",
         "native_cell_check_verified",
+        # #1361: the paid-reading-after-table-withhold lane's record. Emitted inside the page loop,
+        # which a terminal resumed page skips, and the only carrier of the fact that the shipped
+        # reading is a paid reader's and of the ladder verdicts it replaced.
+        "paid_reading_after_table_withhold",
         "table_row_binding_contradicted",
         "table_row_binding_unverifiable",
         # #1282: emitted by _repair_dropped_points, which a terminal resumed page skips; the
@@ -174,4 +178,5 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 71 with #1306's control_bytes_replaced and hidden_footnote_stripped.
     # 75 with #1276's four figure-presence kinds merged onto #1306's two.
     # 76 with #1253 B3's native_table_model_retry.
-    assert len(EXPECTED_RESUME_KINDS) == 76
+    # 77 with #1361's paid_reading_after_table_withhold.
+    assert len(EXPECTED_RESUME_KINDS) == 77

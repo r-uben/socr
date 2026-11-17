@@ -149,8 +149,13 @@ def test_the_production_sites_are_the_ones_being_described() -> None:
     # GH-169 is about. Round 4 deleted the site after measuring the claim in the page
     # BODY only; round 5 measured the SIDECAR and put it back, now over every attempt
     # rather than the winner alone, because the claim is a page-level statement.
+    # #1361 adds a FOURTH site, surfaced by this enumeration as #1203's was: the paid reading the
+    # table-withhold lane takes is a fresh output that never passes the per-attempt loop above, so
+    # it records the verdict its own single-rung ``route_page`` gave it. It copies the reason of
+    # that rung, unconditionally, and invents none -- the property GH-169 is about.
     assert other_rhs == [
         "_SETTLED_TABLE_CLAIM_RE.sub('', _reason).strip('; ')",
+        "decision.attempts[0].reason or ''",
         "decision.reason or ''",
     ], f"unexpected judge_reason assignment site(s) in the orchestrator: {other_rhs}"
     assigns = attempt_assigns

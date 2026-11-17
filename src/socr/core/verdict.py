@@ -109,6 +109,23 @@ PAID_AFTER_DISPUTE_REASON = (
     "confirmed"
 )
 
+#: #1359: appended to the reason above when the earlier reading showed a table that the paid
+#: reading does not contain and the floor was lifted over it.
+PAID_OMITS_TABLE_SUFFIX = (
+    "; the earlier reading showed a table that this reading does not contain; every number of "
+    "that table appears in this reading, but counts and positions were not checked"
+)
+
+#: #1361: the same clause for a paid reading taken after the TABLE CHECKS withheld an earlier
+#: reading's table. UNKNOWN for the same reason: the paid reading passed every check and nothing
+#: was refuted about it, but the checks that withheld the first reading were not wrong about it
+#: by construction, so which reading is right was not independently confirmed.
+PAID_AFTER_TABLE_WITHHOLD_REASON = (
+    "an earlier reading of this page's table was withheld by the table checks; this reading "
+    "was taken from a paid reader afterwards, so which reading is right was not independently "
+    "confirmed"
+)
+
 #: Failure modes that name their own failed check. A mode absent from this map falls to
 #: ``_fallback_clause`` rather than being guessed at.
 #: #1156 / #1262: why a page whose text layer is an earlier OCR run is never CHECKED. The
@@ -1216,13 +1233,20 @@ def _paid_after_dispute_clause(output: PageOutput) -> VerdictClause | None:
     reading did not ship (the table was withheld or the page failed), the page is already
     marked, and a clause there would describe a reading that did not ship.
     """
-    if not output.paid_after_witness_dispute:
+    if not (output.paid_after_witness_dispute or output.paid_after_table_withhold):
         return None
     if output.status not in (PageStatus.SUCCESS, PageStatus.WARNING):
         return None
-    return VerdictClause(
-        Check.READING_DISPUTE, CheckResult.UNKNOWN, SCOPE_PAGE, PAID_AFTER_DISPUTE_REASON
+    # #1361: the witness dispute names the reading's own history first; a table withhold is the
+    # other cause and the two never co-occur (the lane runs only on a page with no paid attempt).
+    reason = (
+        PAID_AFTER_DISPUTE_REASON
+        if output.paid_after_witness_dispute
+        else PAID_AFTER_TABLE_WITHHOLD_REASON
     )
+    if output.paid_reading_omits_disputed_table:
+        reason += PAID_OMITS_TABLE_SUFFIX
+    return VerdictClause(Check.READING_DISPUTE, CheckResult.UNKNOWN, SCOPE_PAGE, reason)
 
 
 def _prior_ocr_layer_clause(output: PageOutput, p: Any) -> VerdictClause | None:
