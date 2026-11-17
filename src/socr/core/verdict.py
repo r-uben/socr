@@ -112,8 +112,8 @@ PAID_AFTER_DISPUTE_REASON = (
 #: #1359: appended to the reason above when the earlier reading showed a table that the paid
 #: reading does not contain and the floor was lifted over it.
 PAID_OMITS_TABLE_SUFFIX = (
-    "; the earlier reading showed a table that this reading does not contain, and nothing the "
-    "image check could confirm in that table was dropped"
+    "; the earlier reading showed a table that this reading does not contain; every number of "
+    "that table appears in this reading, but counts and positions were not checked"
 )
 
 #: Failure modes that name their own failed check. A mode absent from this map falls to

@@ -308,15 +308,64 @@ def test_the_audit_event_is_present_only_for_the_lifted_arm(arms) -> None:
     assert not [e for e in _events(out["drops"]) if e["kind"] == "paid_reading_lifted_floor"]
 
 
-def test_the_free_reading_never_lifts_end_to_end(tmp_path: Path, monkeypatch) -> None:
-    """Both readers are free-engine-labelled by ladder order: the free rung that keeps every
-    token is accepted by a judge that does not dispute it, and no flag, event or mark appears."""
+def test_a_paid_reading_with_a_table_that_keeps_every_token_is_not_lifted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Load-bearing for the table-free requirement: every token kept, but a table present. The
+    #1124 path decides, so no flag, no event and no 'does not contain a table' wording."""
     pdf = _scan_pdf(tmp_path / "doc.pdf")
-    out = tmp_path / "free"
-    _run(out, pdf, monkeypatch, free=KEEPS, paid=KEEPS)
-    side, _ = _page(out, 1)
+    out = tmp_path / "tbl"
+    kept_with_table = KEEPS + "\n\n| Date | Value |\n| --- | --- |\n| 1/19 | 1.5 |\n"
+    _run(out, pdf, monkeypatch, free=FREE_TEXT, paid=kept_with_table)
+    side, body = _page(out, 1)
     assert "paid_reading_omits_disputed_table" not in side["winning_output"]
     assert not any(e["kind"] == "paid_reading_lifted_floor" for e in _events(out))
+    assert "does not contain" not in body
+
+
+def test_a_table_present_never_lifts_at_unit_level_even_when_every_token_is_kept() -> None:
+    d = _decision(KEEPS + "\n\n| Date | Value |\n| --- | --- |\n| 1/19 | 1.5 |\n")
+    assert paid_reading_keeps_disputed_table_tokens(d.final_output, _marked())
+    settle_scanned_table_decision(d)
+    assert d.floor_lift is None and not d.final_output.paid_reading_omits_disputed_table
+
+
+# --- labels ----------------------------------------------------------------------------------
+
+LABEL_TABLE = (
+    "| Item | Value |\n| --- | --- |\n| Alpha | 0.0 |\n| Bravo | 1.5 |\n| Charlie | 3.0 |\n"
+)
+
+
+def test_the_label_half_of_the_condition_is_load_bearing() -> None:
+    marked = _marked("Intro.\n\n" + LABEL_TABLE, table_disputed_values=("charlie",))
+    keeps = "Ticks 0.0 1.5 3.0 for alpha bravo charlie."
+    drops_undisputed = "Ticks 0.0 1.5 3.0 for alpha charlie."
+    drops_disputed = "Ticks 0.0 1.5 3.0 for alpha bravo."
+    assert paid_reading_keeps_disputed_table_tokens(_paid(keeps), marked)
+    assert not paid_reading_keeps_disputed_table_tokens(_paid(drops_undisputed), marked)
+    # a disputed label carries no obligation
+    assert paid_reading_keeps_disputed_table_tokens(_paid(drops_disputed), marked)
+
+
+LABEL_ONLY = "| Month | Note |\n| --- | --- |\n| june | a |\n| july | b |\n"
+
+
+@pytest.mark.parametrize("disputed", [("june", "july"), ("june",), ("0.0",)])
+def test_a_label_only_table_never_lifts_whatever_the_paid_reading_holds(disputed) -> None:
+    """Review round: with no numeric token there is nothing to measure a loss against, and a
+    weak witness disputes labels wholesale. A paid reading that is only ``Figure.``, and one that
+    repeats every label, both leave the floor to today's promotion."""
+    marked = _marked("Intro.\n\n" + LABEL_ONLY, table_disputed_values=disputed)
+    for paid_text in ("Figure.", "june july a b"):
+        assert not paid_reading_keeps_disputed_table_tokens(_paid(paid_text), marked)
+
+
+def test_numerals_in_unrelated_prose_are_a_documented_residual() -> None:
+    """Containment is presence, not placement: prose that happens to carry the table's three
+    numbers satisfies it. Pinned so a change is deliberate; the page judge is the guard."""
+    prose = "Page 3 of 15. Growth was 1.5 percent; see note 0.0 and section 3.0."
+    assert paid_reading_keeps_disputed_table_tokens(_paid(prose), _marked())
 
 
 def test_the_flag_survives_the_sidecar_round_trip_and_refinalize() -> None:

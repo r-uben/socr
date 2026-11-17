@@ -258,7 +258,8 @@ def _disputed_table_obligations(marked: PageOutput) -> tuple[frozenset[str], fro
     ``(numeric tokens, content labels)``. Every numeric token of the table counts, the ones the
     witness disputed included: on a chart page those are axis ticks the pixel reader missed, and
     a paid reading that is faithful to the page lists them. Content labels the witness disputed
-    carry no obligation (the layout-grid placeholders of a chart-title table). ``None`` when the
+    carry no obligation (the layout-grid placeholders of a chart-title table). A table with no
+    numeric token carries no obligation at all and returns ``None`` (review round). ``None`` when the
     witness record is missing: a table nothing read (``table_unverifiable``), a dispute without
     its token list, or a table the tokeniser cannot read. Without that record there is nothing to
     measure a loss against.
@@ -269,6 +270,11 @@ def _disputed_table_obligations(marked: PageOutput) -> tuple[frozenset[str], fro
         return None
     table = _collect_evidence_table_tokens(marked.text or "")
     if table is None:
+        return None
+    if not table.numeric:
+        # A label-only table: the witness reads labels poorly (a two-row june/july table is
+        # disputed in full on a real page), so the label obligation can be empty or satisfied by
+        # page prose. Nothing numeric to measure a loss against: today's promotion decides.
         return None
     disputed = set(marked.table_disputed_values)
     return frozenset(table.numeric), frozenset(c for c in table.content if c not in disputed)
@@ -312,6 +318,9 @@ def _table_free_paid_lift(decision: PageDecision, marked: list[ProviderAttempt])
             {
                 "engine": att.engine.value,
                 "numeric_tokens": len(numeric),
+                "numeric_cells": sum(
+                    (_collect_evidence_table_tokens(att.output.text or "").numeric or {}).values()
+                ),
                 "content_labels": len(content),
                 "disputed_values": len(att.output.table_disputed_values),
             }
