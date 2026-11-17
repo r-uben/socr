@@ -20,6 +20,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+import string
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -215,6 +216,10 @@ NO_WITNESS_BACKEND_KIND: str = "source_evidence_no_witness_backend"
 #: ``orchestrator.py`` cannot spell it differently from the emitter (the same
 #: reason ``NO_WITNESS_BACKEND_KIND`` is one).
 LABEL_UNVERIFIED_KIND: str = "source_evidence_table_label_unverified"
+#: #1355: the audit event for numeric tokens the witness did not support itself but a second
+#: reading by another engine corroborated (a lost sign or decimal point). One constant, so the
+#: emitter and the resume-replay registry cannot spell it differently.
+CORROBORATED_KIND: str = "source_evidence_table_corroborated"
 
 
 @dataclass(frozen=True)
@@ -291,6 +296,21 @@ class SourceEvidenceResult:
     #: #1048: EVERY unsupported token of a verifiable-and-failed verdict, as
     #: bare strings (no cap: the reason text keeps its own 5-token excerpt), so the in-text "disputed" mark can name them. Empty otherwise.
     disputed_values: tuple[str, ...] = ()
+    #: #1355: numeric tokens (one entry per occurrence) the witness did not support itself but a
+    #: second reading by another engine corroborated; see ``corroborate_unsupported_numeric``.
+    #: Only ever set on a PASSED verdict, and only when the witness evidence alone would have
+    #: failed it.
+    corroborated_values: tuple[str, ...] = ()
+    #: #1355: the engine of that second reading ("" when ``corroborated_values`` is empty).
+    corroborated_by: str = ""
+
+
+@dataclass(frozen=True)
+class SecondReading:
+    """#1355: the EARLIER disputed reading of the same page, as the witness may use it."""
+
+    engine: str
+    numeric: Counter = field(default_factory=Counter)
 
 
 def page_has_native_words(page) -> bool:
@@ -1203,6 +1223,63 @@ def _multiset_supported(output: Counter, evidence: Counter) -> bool:
     return True
 
 
+def _digit_key(token: str) -> str:
+    """The digits of a normalised numeric token, sign and decimal point dropped (#1355).
+
+    Leading zeros are dropped as well, because the tokenisers WRITE one: ``.7`` is normalised
+    to ``0.7`` (``strip_presentation``, #1082/GH-206) while a witness that lost the point reads
+    ``7``. Without folding it the two would never meet. Trailing zeros are kept: ``12.0`` and
+    ``120`` share a key (a lost point) but ``12.0`` and ``12`` do not, since a missing trailing
+    digit is not a lost sign or point.
+    """
+    digits = "".join(ch for ch in token if ch in string.digits)
+    return digits.lstrip("0") or "0"
+
+
+def corroborate_unsupported_numeric(
+    emitted: Counter, evidence: Counter, second: Counter
+) -> tuple[Counter, Counter]:
+    """#1355: split the emitted tokens the witness leaves unsupported into
+    ``(corroborated, still_unsupported)``. Both are multisets of tokens.
+
+    The witness reads a 150 dpi raster and drops minus signs and decimal points, so a correct
+    ``-4.1`` can meet the witness as ``41``. An unsupported emitted token counts as corroborated
+    only when BOTH hold:
+
+    - ``second`` (the earlier disputed reading's tokens) carries that token at least as many
+      times as it was emitted;
+    - the witness evidence holds a token with the same digit sequence (``_digit_key``) that is
+      still unconsumed, after every directly supported emitted token and every earlier
+      corroboration has taken its own. One witness ``41`` can therefore stand behind one ``-4.1``,
+      never two.
+
+    A token whose digits the witness does not hold stays unsupported: that is a disagreement
+    about the number, not about its sign or point.
+    """
+    spare: Counter = Counter(evidence)
+    unsupported: Counter = Counter()
+    for tok, count in emitted.items():
+        direct = min(count, spare.get(tok, 0))
+        spare[tok] -= direct
+        if count > direct:
+            unsupported[tok] = count - direct
+    by_key: Counter = Counter()
+    for tok, count in spare.items():
+        if count > 0:
+            by_key[_digit_key(tok)] += count
+    corroborated: Counter = Counter()
+    still: Counter = Counter()
+    for tok in sorted(unsupported):
+        key = _digit_key(tok)
+        for _ in range(unsupported[tok]):
+            if second.get(tok, 0) >= emitted[tok] and by_key[key] > 0:
+                by_key[key] -= 1
+                corroborated[tok] += 1
+            else:
+                still[tok] += 1
+    return corroborated, still
+
+
 def _content_supported(output: frozenset[str], evidence: frozenset[str]) -> bool:
     """True when every emitted content-label token appears in evidence."""
     if not output:
@@ -1213,8 +1290,17 @@ def _content_supported(output: frozenset[str], evidence: frozenset[str]) -> bool
 def verify_table_tokens(
     bundle: SourceEvidenceBundle,
     tokens: TableTokens,
+    *,
+    second_reading: SecondReading | None = None,
+    engine: str = "",
 ) -> SourceEvidenceResult:
-    """Fail-closed check: emitted table tokens must be supported by evidence."""
+    """Fail-closed check: emitted table tokens must be supported by evidence.
+
+    ``second_reading`` (#1355) is passed only for a paid reading run after a witness dispute.
+    It can corroborate a numeric token the witness lost a sign or point on
+    (``corroborate_unsupported_numeric``), and only when its engine is known and differs from
+    ``engine``, the engine of the reading under check. A content-label dispute is never touched.
+    """
     if not bundle.has_content_evidence:
         # #658: an empty bundle has two very different causes. Say which one.
         # The page fails closed either way -- an unwitnessed table is still
@@ -1239,16 +1325,23 @@ def verify_table_tokens(
             reason="no local content evidence available for scanned table",
         )
 
+    corroborated: Counter = Counter()
     if tokens.has_numeric and not _multiset_supported(tokens.numeric, bundle.numeric):
         missing = [
             tok for tok, count in tokens.numeric.items() if bundle.numeric.get(tok, 0) < count
         ]
-        return SourceEvidenceResult(
-            verifiable=True,
-            passed=False,
-            reason=f"numeric tokens unsupported by page evidence: {missing[:5]}",
-            disputed_values=tuple(str(m) for m in missing),
-        )
+        still: Counter = Counter(tokens.numeric)
+        if second_reading is not None and second_reading.engine and second_reading.engine != engine:
+            corroborated, still = corroborate_unsupported_numeric(
+                tokens.numeric, bundle.numeric, second_reading.numeric
+            )
+        if still:
+            return SourceEvidenceResult(
+                verifiable=True,
+                passed=False,
+                reason=f"numeric tokens unsupported by page evidence: {missing[:5]}",
+                disputed_values=tuple(str(m) for m in missing),
+            )
 
     if tokens.is_alpha_only and not _content_supported(tokens.content, bundle.content):
         # No numeric token exists to anchor the #659 unverified-label
@@ -1278,6 +1371,19 @@ def verify_table_tokens(
             verifiable=False,
             passed=False,
             reason="table cells contain no verifiable tokens",
+        )
+
+    if corroborated:
+        return SourceEvidenceResult(
+            verifiable=True,
+            passed=True,
+            reason=(
+                "source evidence supports emitted table tokens, except numeric tokens its own "
+                "reading lost a sign or decimal point on, which a second reading corroborates"
+            ),
+            content_unverified=content_unverified,
+            corroborated_values=tuple(sorted(corroborated.elements())),
+            corroborated_by=second_reading.engine if second_reading is not None else "",
         )
 
     return SourceEvidenceResult(
@@ -1318,6 +1424,8 @@ def verify_scanned_table(
     ocr_image_fn: OcrImageFn | None = None,
     native_trusted: bool | None = None,
     layer_is_evidence: bool = True,
+    second_reading: SecondReading | None = None,
+    engine: str = "",
 ) -> SourceEvidenceResult:
     """Full scanned-page pipeline: defer native, else verify or fail closed.
 
@@ -1413,4 +1521,4 @@ def verify_scanned_table(
             include_text_layer=native_trusted is not False and layer_is_evidence,
             text_layer_from_words=False,
         )
-    return verify_table_tokens(bundle, tokens)
+    return verify_table_tokens(bundle, tokens, second_reading=second_reading, engine=engine)

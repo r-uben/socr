@@ -122,7 +122,11 @@ from socr.tables.native_first import (
     NativeTablePlan,
 )
 from socr.tables.ship_gate import SHIP_GATE_KIND
-from socr.tables.source_evidence import LABEL_UNVERIFIED_KIND, NO_WITNESS_BACKEND_KIND
+from socr.tables.source_evidence import (
+    CORROBORATED_KIND,
+    LABEL_UNVERIFIED_KIND,
+    NO_WITNESS_BACKEND_KIND,
+)
 from socr.judge.table_rung_gemini import gemini_rung_reachable as table_judge_gemini_rung_reachable
 from socr.judge.table_rung_ollama import ollama_rung_reachable as table_judge_ollama_rung_reachable
 from socr.judge.table_cell_guard import GuardDisposition, evaluate_cell_guard
@@ -604,6 +608,10 @@ _RESUME_REPLAYED: dict[str, str] = {
     MATH_FONT_UNRECOVERED_KIND: "#140: same contract as UNRESOLVED_MATH_KIND, for math-font damage",
     LABEL_UNVERIFIED_KIND: (
         "#659: tables_trust.json reads it; its history must not disappear on resume"
+    ),
+    CORROBORATED_KIND: (
+        "#1355: emitted by the page judge inside route_page, which a terminal resumed page "
+        "skips; it is the audit-log record of which tokens the witness did not support itself"
     ),
     SKELETON_SUPPRESSED: (
         "#635: the only archive of a withheld grid (original_text, sha256); the CLI "
