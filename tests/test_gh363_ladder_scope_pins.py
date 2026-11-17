@@ -58,7 +58,11 @@ def test_the_table_judge_gate_is_agentic_only() -> None:
             and n.func.attr == "_run_table_judge_gate"
         ),
     )
-    assert callers == {"_phase_agentic"}, (
+    # #1361: the paid-reading-after-withhold lane re-runs the gate on its candidate reading through
+    # ``_judge_paid_reading_tables``, a closure DEFINED INSIDE ``_phase_agentic`` and handed to the
+    # lane by it. Still one agentic path and no non-agentic caller, which is the claim; the
+    # closure is the second enclosing function only because this AST walk names the nearest def.
+    assert callers == {"_phase_agentic", "_judge_paid_reading_tables"}, (
         f"the table judge gate is no longer agentic-only; called from {sorted(callers)}"
     )
 
