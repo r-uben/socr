@@ -12776,6 +12776,22 @@ class UnifiedPipeline:
                                 decision, inner=_promotion_inner_judge(judge)
                             )
                         )
+                        if isinstance(decision.floor_lift, dict):
+                            # #1359: say that the floor was lifted and on what evidence.
+                            from socr.core.audit_log import AuditEvent as _LiftEvent
+
+                            state.events.append(
+                                _LiftEvent(
+                                    page_num=page_num,
+                                    kind="paid_reading_lifted_floor",
+                                    engine=decision.final_output.engine,
+                                    detail=(
+                                        "a table-free paid reading kept every token of the "
+                                        "disputed table that the page evidence can speak to"
+                                    ),
+                                    data=decision.floor_lift,
+                                )
+                            )
                         # The profile whose reading won. Needed to re-judge a candidate
                         # produced after routing (crop reread) through the same judge
                         # with the same provider context.
