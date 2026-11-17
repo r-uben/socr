@@ -92,41 +92,62 @@ def test_missing_token_found_at_later_rung_passes_and_names_the_rung():
 
 
 def test_ladder_stops_at_first_rung_that_clears():
-    r = Reader({BASE: BASE_TEXT, LADDER[0]: "4.1", LADDER[1]: "4.1", LADDER[2]: "4.1"})
+    r = Reader({BASE: BASE_TEXT, LADDER[0]: "1.5 2.5 4.1", LADDER[1]: "1.5 2.5 4.1"})
     res = _verify(TABLE, r)
     assert res.passed
     assert r.dpis == [BASE, LADDER[0]]
 
 
 def test_later_rung_used_when_first_does_not_clear():
-    r = Reader({BASE: BASE_TEXT, LADDER[0]: "7.7", LADDER[1]: "4.1"})
+    r = Reader({BASE: BASE_TEXT, LADDER[0]: "7.7", LADDER[1]: "1.5 2.5 4.1"})
     res = _verify(TABLE, r)
     assert res.passed
-    assert res.extra_resolutions == LADDER[:2]
-    assert r.dpis == [BASE, *LADDER[:2]]
+    assert res.extra_resolutions == LADDER
+    assert r.dpis == [BASE, *LADDER]
 
 
-def test_max_merge_does_not_sum_counts_across_rungs():
-    table = _md("1.5", "4.1", "4.1")
-    r = Reader({BASE: "1.5", LADDER[0]: "4.1", LADDER[1]: "4.1", LADDER[2]: "4.1"})
+def test_readings_are_never_pooled_across_resolutions():
+    # Each reading holds a different part of the table; no single reading holds all.
+    # Pooling them would pass; one reading must support every token by itself.
+    table = _md("1.5", "2.5", "4.1")
+    r = Reader({BASE: "1.5", LADDER[0]: "2.5", LADDER[1]: "4.1"})
     res = _verify(table, r)
-    # Each rung saw one "4.1"; the table emits two. Summing would pass.
+    assert not res.passed
+    assert res.extra_resolutions == LADDER
+    assert res.extra_resolution_tokens == 0
+    # The same three tokens in ONE reading pass.
+    assert _verify(table, Reader({BASE: "1.5", LADDER[1]: "1.5 2.5 4.1"})).passed
+
+
+def test_ladder_is_ascending_and_has_a_bound_per_rung():
+    assert list(LADDER) == sorted(LADDER) and LADDER[0] > BASE
+    assert 300 not in LADDER  # review round: clears no page, collapses two
+    r = Reader({BASE: BASE_TEXT, LADDER[0]: "9.9", LADDER[1]: "9.9"})
+    _verify(TABLE, r)
+    assert r.dpis == [BASE, *LADDER]
+
+
+def test_counts_are_not_summed_across_rungs():
+    table = _md("1.5", "4.1", "4.1")
+    r = Reader({BASE: "1.5 4.1", LADDER[0]: "1.5 4.1", LADDER[1]: "1.5 4.1"})
+    res = _verify(table, r)
+    # Each reading saw one "4.1"; the table emits two. Summing would pass.
     assert not res.passed
     assert res.disputed_values == ("4.1",)
-    assert res.extra_resolutions == LADDER
-    # A rung that really reads two supports both.
-    r2 = Reader({BASE: "1.5", LADDER[0]: "4.1 4.1"})
+    # A single reading that really reads two supports both.
+    r2 = Reader({BASE: "1.5", LADDER[0]: "1.5 4.1 4.1"})
     assert _verify(table, r2).passed
 
 
 def test_token_no_rung_reads_stays_disputed_like_base_only():
-    r = Reader({BASE: BASE_TEXT})
+    r = Reader({BASE: BASE_TEXT, **{d: "1.5 2.5" for d in LADDER}})
     res = _verify(TABLE, r)
     base_only = _verify(TABLE, Reader({BASE: BASE_TEXT}), ladder=())
     assert not res.passed
     assert res.disputed_values == base_only.disputed_values
     assert res.reason == base_only.reason
     assert res.verifiable == base_only.verifiable
+    assert res.witness_state == base_only.witness_state
     assert res.extra_resolutions == LADDER
     assert res.extra_resolution_tokens == 0
 
@@ -142,10 +163,17 @@ def test_erroring_extra_rung_leaves_the_base_outcome():
 
 
 def test_failed_rung_contributes_nothing_but_later_rung_still_counts():
-    r = Reader({BASE: BASE_TEXT, LADDER[0]: RuntimeError("boom"), LADDER[1]: "4.1"})
+    r = Reader({BASE: BASE_TEXT, LADDER[0]: RuntimeError("boom"), LADDER[1]: "1.5 2.5 4.1"})
     res = _verify(TABLE, r)
     assert res.passed
-    assert res.extra_resolutions == LADDER[:2]
+    # The failed rung read nothing and is not listed as a resolution read.
+    assert res.extra_resolutions == (LADDER[1],)
+
+
+def test_rungs_that_read_nothing_are_not_recorded_as_read():
+    err = {d: TimeoutError("tesseract timeout") for d in LADDER}
+    res = _verify(TABLE, Reader({BASE: BASE_TEXT, **err}))
+    assert not res.passed and res.extra_resolutions == ()
 
 
 def test_empty_extra_rung_is_not_a_witness_failure():
@@ -188,7 +216,7 @@ def test_born_digital_text_layer_is_not_multiplied_by_rungs():
     page = _page()
     page.insert_text((72, 100), "4.1 1.5", fontsize=12)
     table = _md("1.5", "4.1", "4.1")
-    r = Reader({BASE: "1.5", **{d: "4.1" for d in LADDER}})
+    r = Reader({BASE: "1.5", **{d: "1.5 4.1" for d in LADDER}})
     with patch.object(se, "_EXTRA_EVIDENCE_OCR_DPIS", LADDER):
         res = verify_scanned_table(
             page, table, ocr_image_fn=r, native_trusted=False, layer_is_evidence=True
@@ -202,7 +230,7 @@ def test_rungs_never_bring_in_a_text_layer_the_base_path_excluded():
     # read pixels only and a table emitting "7.7" stays unsupported at every rung.
     page = _page()
     page.insert_text((72, 100), "7.7 1.5", fontsize=12)
-    r = Reader({BASE: "1.5"})
+    r = Reader({BASE: "1.5", **{d: "1.5" for d in LADDER}})
     with patch.object(se, "_EXTRA_EVIDENCE_OCR_DPIS", LADDER):
         res = verify_scanned_table(
             page, _md("1.5", "7.7"), ocr_image_fn=r, native_trusted=False, layer_is_evidence=False
@@ -214,7 +242,7 @@ def test_rungs_never_bring_in_a_text_layer_the_base_path_excluded():
 def test_default_reader_uses_the_bound_derived_for_each_rung():
     assert set(LADDER) == set(se._EXTRA_EVIDENCE_TIMEOUT_SEC)
     assert all(
-        t >= se.TESSERACT_WITNESS_TIMEOUT_SEC for t in se._EXTRA_EVIDENCE_TIMEOUT_SEC.values()
+        t > se.TESSERACT_WITNESS_TIMEOUT_SEC for t in se._EXTRA_EVIDENCE_TIMEOUT_SEC.values()
     )
     seen: list[tuple[int, float]] = []
 
@@ -258,7 +286,7 @@ def _assess(reader: Reader):
 
 def test_route_level_runs_differ_only_in_what_the_second_rung_reads():
     base = {BASE: BASE_TEXT}
-    yes = _assess(Reader({**base, LADDER[0]: "4.1"}))
+    yes = _assess(Reader({**base, LADDER[0]: "1.5 2.5 4.1"}))
     no = _assess(Reader({**base, LADDER[0]: "9.9"}))
     d_yes, _, ev_yes, inner_yes = yes
     d_no, out_no, ev_no, inner_no = no
@@ -275,10 +303,83 @@ def test_route_level_runs_differ_only_in_what_the_second_rung_reads():
     inner_no.assess.assert_not_called()
     assert out_no.table_disputed_values == ("4.1",)
     rej = next(e for e in ev_no if e.kind == "source_evidence_table_reject")
-    assert rej.data["extra_resolutions"] == list(LADDER)
+    assert rej.data["extra_resolutions"] == [LADDER[0]]
+    assert rej.data["extra_resolution_tokens"] == 0
 
 
 def test_route_level_base_pass_emits_no_extra_event():
     d, _, ev, _ = _assess(Reader({BASE: "1.5 2.5 4.1"}))
     assert d.accept
     assert all(e.kind != EXTRA_RESOLUTION_KIND for e in ev)
+
+
+# ---- crop branch, tesseract timeout, fallback ----------------------------------
+
+
+def _region(page_unused=None):
+    from types import SimpleNamespace
+
+    return [SimpleNamespace(bbox=(50.0, 50.0, 450.0, 300.0))]
+
+
+def test_rungs_render_the_located_crop_at_the_rung_resolution():
+    widths: list[int] = []
+
+    def reader(pix) -> str:
+        widths.append(pix.width)
+        return "1.5 2.5"
+
+    with patch("socr.tables.locate.locate_tables", _region):
+        res = _verify(TABLE, reader)
+    assert not res.passed
+    # base crop, then one crop per rung, each wider in proportion to its dpi
+    assert len(widths) == 1 + len(LADDER)
+    for w, d in zip(widths[1:], LADDER):
+        assert abs(w / widths[0] - d / BASE) < 0.02, (widths, d)
+
+
+def test_rung_falls_back_to_full_page_like_the_base_when_crops_are_silent():
+    seen: list[tuple[bool, int]] = []
+
+    def r(pix) -> str:
+        is_full = pix.width < pix.height  # full page 500x700 pt, crop 400x250 pt
+        dpi = round(pix.width * 72 / (PAGE_W_PT if is_full else 400))
+        seen.append((is_full, dpi))
+        if not is_full:
+            return ""
+        return "1.5 2.5" if dpi == BASE else "1.5 2.5 4.1"
+
+    with patch("socr.tables.locate.locate_tables", _region):
+        res = _verify(TABLE, r)
+    assert (True, BASE) in seen  # base fell back to the full page
+    assert (True, LADDER[0]) in seen  # and so does the rung, the same way
+    assert res.passed and res.extra_resolutions == (LADDER[0],)
+
+
+def test_timeout_reaches_the_tesseract_call_at_every_rung():
+    import sys
+    import types
+
+    seen: list[tuple[int, float]] = []
+    stub = types.ModuleType("pytesseract")
+
+    def image_to_string(img, timeout=None):
+        seen.append((img.width, timeout))
+        return "1.5 2.5"
+
+    stub.image_to_string = image_to_string
+    stub.TesseractNotFoundError = type("TesseractNotFoundError", (Exception,), {})
+    with patch.dict(sys.modules, {"pytesseract": stub}):
+        verify_scanned_table(_page(), TABLE, native_trusted=False, layer_is_evidence=False)
+    expected = [se.TESSERACT_WITNESS_TIMEOUT_SEC] + [
+        se._EXTRA_EVIDENCE_TIMEOUT_SEC[d] for d in LADDER
+    ]
+    assert [t for _, t in seen] == expected
+    assert all(se._EXTRA_EVIDENCE_TIMEOUT_SEC[d] > se.TESSERACT_WITNESS_TIMEOUT_SEC for d in LADDER)
+
+
+def test_unknown_dpi_is_refused_by_name():
+    import pytest
+
+    with pytest.raises(ValueError, match="250"):
+        se.build_scanned_evidence(_page(), dpi=250)

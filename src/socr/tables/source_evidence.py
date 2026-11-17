@@ -62,30 +62,34 @@ TESSERACT_WITNESS_TIMEOUT_SEC: float = 4.0
 # the base-resolution reading leaves numeric table tokens unsupported. Measured
 # 2026-11-16 with ``build_scanned_evidence(include_text_layer=False)`` on the
 # 12 Fed sample pages, emitted tokens = the saved qwen table reading, unsupported
-# numeric tokens at 150/200/300/400 dpi and per max-merge:
+# numeric tokens per single reading at 150/200/300/400 dpi:
 #   p007  20 numbers: 2 / 0 / 0 / 0
 #   p009 134 numbers: 3 / 2 / 113 / 103     (300+ collapses)
 #   p044  34 numbers: 31 / 19 / 13 / 10
 #   p063 185 numbers: 4 / 1 / 123 / 124     (300+ collapses)
 #   p097 162 numbers: 26 / 11 / 5 / 0
-# Max-merge of 150 with a ladder: (200) 0/1/19/1/3, (200,300) 0/1/12/1/0,
-# (200,300,400) 0/1/7/1/0 for p007/p009/p044/p063/p097. No single resolution
-# is best; (200,400) leaves p044 at 8, so 300 is the marginal rung (one token on
-# p044, which stays unsupported either way). Dropping 200 leaves p009 and p063
-# at 3 and 4 instead of 1. The 3 label-only pages (p027, p028, p051) have no
-# numeric tokens and never trigger a rung. Ladder order is ascending cost, and
-# the loop stops at the first rung where nothing is unsupported.
-_EXTRA_EVIDENCE_OCR_DPIS: tuple[int, ...] = (200, 300, 400)
+# A table passes at a rung only when ONE reading (the base or that rung) supports
+# every token by itself; readings are never pooled (review round, #1357). Pooling
+# different tokens across resolutions let one printed glyph count as two numbers:
+# 55 of 5225 single-cell mutants of p097 (1.05%) made the whole table pass against
+# 0.02% at base, while the single-reading rule passed 0 of 14106 mutants over the
+# five pages and clears the same two pages (p007 at 200, p097 at 400).
+# 300 dpi is not a rung: by the numbers above it clears no page, it is where p009
+# and p063 collapse and drop decimal points, and a (200, 400) ladder gives the
+# same verdict on all five pages with fewer coincidences. The 3 label-only pages
+# (p027, p028, p051) have no numeric tokens and never trigger a rung. Ladder order
+# is ascending cost, and the loop stops at the first rung that clears.
+_EXTRA_EVIDENCE_OCR_DPIS: tuple[int, ...] = (200, 400)
 
 # Wall-clock bound per tesseract call at each extra rung. The base bound is
 # ``ceil(p99 * 2.0)`` at 150 dpi (p99 1.789 s, above). Per-call wall time
 # measured 2026-11-16 on the 12 sample pages (median of 3 runs per call, 17
 # calls) rose with resolution; the worst per-call ratio to the same call at
-# 150 dpi was 1.82 (200), 1.87 (300), 2.58 (400), and the slowest single call
-# was 0.93 / 1.01 / 1.24 / 1.63 s at 150 / 200 / 300 / 400 dpi. Each bound is
-# ``ceil(1.789 * worst_ratio * 2.0)``: 6.5 -> 7, 6.7 -> 7, 9.2 -> 10. Same
-# 2.0 headroom as the base bound; the measured maxima sit well inside them.
-_EXTRA_EVIDENCE_TIMEOUT_SEC: dict[int, float] = {200: 7.0, 300: 7.0, 400: 10.0}
+# 150 dpi was 1.82 (200) and 2.58 (400), and the slowest single call was
+# 0.93 / 1.01 / 1.63 s at 150 / 200 / 400 dpi. Each bound is
+# ``ceil(1.789 * worst_ratio * 2.0)``: 6.5 -> 7, 9.2 -> 10. Same 2.0 headroom as
+# the base bound; the measured maxima sit well inside them.
+_EXTRA_EVIDENCE_TIMEOUT_SEC: dict[int, float] = {200: 7.0, 400: 10.0}
 
 # Alphabetic runs in evidence text: at least _MIN_CONTENT_TOKEN_LEN chars.
 _CONTENT_TOKEN_RE = re.compile(rf"[A-Za-z][A-Za-z0-9\-]{{{_MIN_CONTENT_TOKEN_LEN - 1},}}")
@@ -1129,7 +1133,13 @@ def build_scanned_evidence(
             read_witness = classical_ocr_with_state
         else:
             # An extra rung: the bound derived for its resolution (#1357).
-            rung_timeout = _EXTRA_EVIDENCE_TIMEOUT_SEC[dpi]
+            try:
+                rung_timeout = _EXTRA_EVIDENCE_TIMEOUT_SEC[dpi]
+            except KeyError:
+                raise ValueError(
+                    f"no derived timeout for {dpi} dpi; supported: "
+                    f"{_EVIDENCE_OCR_DPI} or {sorted(_EXTRA_EVIDENCE_TIMEOUT_SEC)}"
+                ) from None
 
             def read_witness(pix) -> tuple[str, str, str]:
                 return classical_ocr_with_state(pix, timeout_sec=rung_timeout)
@@ -1246,12 +1256,15 @@ def widen_scanned_evidence(
     judge against, the input bundle is returned untouched with no extra read.
 
     Otherwise each rung of ``_EXTRA_EVIDENCE_OCR_DPIS`` re-reads the same
-    regions as pixels only (never the text layer: ``include_text_layer=False``)
-    and its numeric evidence is max-merged into the bundle's (``_max_merge_numeric``:
-    per token the largest count in any one reading, never the sum). The loop
-    stops at the first rung where nothing is unsupported. A rung that fails
-    (timeout, exec error, empty) has no numeric tokens and so contributes
-    nothing; the base bundle's witness state and detail are kept.
+    regions as pixels only (never the text layer: ``include_text_layer=False``,
+    so on the born-digital arm too the rungs add pixel evidence only). The
+    table passes at a rung only when that ONE reading supports every emitted
+    numeric token by itself; readings are never pooled across resolutions,
+    because different tokens from different readings let one printed glyph
+    count as two numbers (#1357 review). The loop stops at the first rung that
+    clears. A rung that reads nothing (timeout, exec error, blank) contributes
+    nothing and is not listed in ``resolutions_read``; the base bundle's witness
+    state and detail are kept. On failure the base bundle is returned.
 
     Content-label evidence stays the base reading's. Labels are a set (no
     counts), so a larger pool can only add coincidental matches; they never
@@ -1266,24 +1279,28 @@ def widen_scanned_evidence(
     ):
         return bundle, (), 0
     base_missing = _unsupported_numeric_count(tokens.numeric, bundle.numeric)
-    numeric = Counter(bundle.numeric)
     read: list[int] = []
     for dpi in _EXTRA_EVIDENCE_OCR_DPIS:
         rung = build_scanned_evidence(
             page,
             ocr_image_fn=ocr_image_fn,
             include_text_layer=False,
-            # Same regions as the base pass: the full page is read only when
-            # no table region was located, as the base pass would have.
-            allow_full_page_ocr=not bundle.table_regions_detected,
+            # Same fallback as the base pass: the full page is read only when
+            # the table crops yielded no reading at all (no region located, or
+            # every crop read empty), never in addition to crops that read.
+            allow_full_page_ocr=True,
             dpi=dpi,
         )
+        if not rung.has_content_evidence:
+            # Nothing was read at this resolution (timeout, exec error, blank):
+            # it contributes nothing and is not recorded as a resolution read.
+            continue
         read.append(dpi)
-        numeric = _max_merge_numeric(numeric, rung.numeric)
-        if _multiset_supported(tokens.numeric, numeric):
-            break
-    resolved = base_missing - _unsupported_numeric_count(tokens.numeric, numeric)
-    return replace(bundle, numeric=numeric), tuple(read), resolved
+        if _multiset_supported(tokens.numeric, rung.numeric):
+            # One reading supports every token on its own. The rung's numeric
+            # evidence replaces the base's; its labels and witness state do not.
+            return replace(bundle, numeric=Counter(rung.numeric)), tuple(read), base_missing
+    return bundle, tuple(read), 0
 
 
 def _resolve_witness_state(states: list[str]) -> str:
