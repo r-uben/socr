@@ -1978,6 +1978,9 @@ class UnifiedPipeline:
 
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
+        #: #1361: per page, what undoes a committed paid-after-withhold reading if a later table
+        #: gate withholds it.
+        self._paid_lane_undo: dict[int, dict] = {}
         #: #1080: preflight checks the operator ran without (``--allow-missing``),
         #: set by the CLI gate; recorded as ``ran_without`` in metadata.json.
         self.ran_without: list[str] = []
@@ -8517,6 +8520,7 @@ class UnifiedPipeline:
         provider_timeout,
         on_candidate,
         table_gate,
+        doc_dir=None,
     ) -> PageOutput:
         """#1361: run the paid reader once on a page whose free reading's table was withheld.
 
@@ -8592,19 +8596,32 @@ class UnifiedPipeline:
                 )
             )
 
-        n_events = len(state.events)
-        saved = {
-            "table_ladder_disposition": ps.table_ladder_disposition,
-            "table_judge_retry_pending": ps.table_judge_retry_pending,
-            "table_judge_retry_rungs": list(ps.table_judge_retry_rungs),
-            "binding_adjudication": copy.deepcopy(ps.binding_adjudication),
-            "native_cell_binding": copy.deepcopy(ps.native_cell_binding),
-        }
+        # Restored by identity, not by index: a check can rebind ``state.events`` to a filtered
+        # list (``rollback_native_cell_page_state``), which makes an index into it stale.
+        events_before = list(state.events)
+        n_events = len(events_before)
+        # The whole page state, restored wholesale when the trial does not commit; only the
+        # recorded facts of the call itself (spend, judge calls, attempts) stay, as in
+        # ``_reset_page_for_retry``.
+        snapshot = copy.deepcopy(ps)
+        kept_fields = frozenset(
+            {
+                "page_cost_usd",
+                "judge_calls",
+                "judge_calls_unrestored",
+                "judge_calls_prior_unavailable",
+                "attempts",
+            }
+        )
+
+        def _restore_ps() -> None:
+            for f in dataclasses.fields(snapshot):
+                if f.name not in kept_fields:
+                    setattr(ps, f.name, getattr(snapshot, f.name))
 
         def _restore() -> None:
-            del state.events[n_events:]
-            for name, value in saved.items():
-                setattr(ps, name, value)
+            state.events[:] = events_before
+            _restore_ps()
 
         decision = route_page(
             page_num,
@@ -8642,6 +8659,9 @@ class UnifiedPipeline:
             _provider_call_never_ran(out)
             or not (out.text or "").strip()
             or is_failed_candidate(out)
+            # An empty paid answer on a page with a text layer is replaced by the native text
+            # (engine ``native``): that is not a paid reading, and it is never shipped as one.
+            or out.engine != paid.engine.value
         ):
             _restore()
             _record(
@@ -8669,6 +8689,8 @@ class UnifiedPipeline:
         out.judge_reason = decision.attempts[0].reason or ""
         out.escalated_from = bo.engine
         out.paid_after_table_withhold = True
+        if doc_dir is not None:
+            self._sanitize_agentic_page_image_refs(state, page_num, out, doc_dir)
         self._reconcile_chart_table_grids(state, page_num, out)
         self._suppress_chart_table_skeletons(state, page_num, out)
         self._guard_agentic_page_table_repetition(state, page_num, out, False)
@@ -8720,6 +8742,7 @@ class UnifiedPipeline:
         state.events[:n_events] = [e for e in state.events[:n_events] if not _superseded(e)]
         ps.attempts.append(out)
         ps.best_output = out
+        commit_len = len(state.events)
         _record(
             "accepted",
             f"paid reading from {paid.engine.value} passed the page checks and every table "
@@ -8729,7 +8752,79 @@ class UnifiedPipeline:
             ],
             earlier_engine=bo.engine,
         )
+        # What a LATER gate (row binding, #1203) needs to put the page back if it withholds the
+        # paid table after all: the rescue then did not happen and must not read as one.
+        self._paid_lane_undo[page_num] = {
+            "free": bo,
+            "paid": out,
+            "events_before": events_before,
+            "trial": list(trial),
+            "commit_len": commit_len,
+            "accepted_event": state.events[-1],
+            "snapshot": snapshot,
+            "kept_fields": kept_fields,
+        }
         return out
+
+    @staticmethod
+    def _paid_lane_called(state: DocumentState, page_num: int) -> bool:
+        """Whether the #1361 lane sent this page to the paid reader (any outcome but budget)."""
+        return any(
+            e.page_num == page_num
+            and e.kind == PAID_AFTER_TABLE_WITHHOLD_KIND
+            and (e.data or {}).get("outcome") != "budget_exhausted"
+            for e in state.events
+        )
+
+    def _undo_paid_after_table_withhold(
+        self, state: DocumentState, page_num: int, ps: PageState, why: str
+    ) -> PageOutput | None:
+        """#1361: take back a committed paid reading that a later table gate withheld.
+
+        Returns the free reading restored as the page's reading, or None when the page did not
+        go through the lane. The page goes back to the state it had when the lane started (its
+        ladder withhold included); the lane event is replaced by one saying the rescue did not
+        ship. Spend stays.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        rec = self._paid_lane_undo.pop(page_num, None)
+        if rec is None:
+            return None
+        drop = {id(e) for e in rec["trial"]}
+        drop.add(id(rec["accepted_event"]))
+        drop.update(
+            id(e)
+            for e in state.events[rec["commit_len"] :]
+            if e.page_num == page_num and e.kind.startswith("table_row_binding_")
+        )
+        before = {id(e) for e in rec["events_before"]}
+        later = [e for e in state.events if id(e) not in drop and id(e) not in before]
+        state.events[:] = [*rec["events_before"], *later]
+        for f in dataclasses.fields(rec["snapshot"]):
+            if f.name not in rec["kept_fields"]:
+                setattr(ps, f.name, getattr(rec["snapshot"], f.name))
+        free, paid = rec["free"], rec["paid"]
+        ps.attempts[:] = [a for a in ps.attempts if a is not paid]
+        ps.best_output = free
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=PAID_AFTER_TABLE_WITHHOLD_KIND,
+                engine=paid.engine,
+                detail=(
+                    f"paid reading from {paid.engine} passed the page checks and the ladder, then "
+                    f"was withheld by a later table check ({why}); the page keeps the earlier "
+                    "reading's withheld table"
+                ),
+                data={
+                    "outcome": "rejected_by_later_table_check",
+                    "provider_id": paid.provider_id,
+                    "reason": why,
+                },
+            )
+        )
+        return free
 
     @staticmethod
     def _clear_fail_closed_flags(state: DocumentState, page_num: int, ps, profile) -> None:
@@ -12711,6 +12806,11 @@ class UnifiedPipeline:
             if not _retry_failed or backend_degraded or not ladder:
                 return
             failed = self._failed_pages(state, _routed_pages)
+            # #1361: a page the paid-after-withhold lane already called the paid reader for is not
+            # sent to it again: the reversed ladder would route that same reader first.
+            failed = {
+                _pn: _rec for _pn, _rec in failed.items() if not self._paid_lane_called(state, _pn)
+            }
             if not failed:
                 return
             ladder = list(reversed(ladder))
@@ -13692,6 +13792,7 @@ class UnifiedPipeline:
                                 provider_timeout=provider_timeout,
                                 on_candidate=_ingest_candidate,
                                 table_gate=_judge_paid_reading_tables,
+                                doc_dir=_agentic_doc_dir,
                             )
                         # P1 (owner ruling Q2): a withheld page ships a failure marker
                         # in place of the table, so the human's ONLY route back to the
@@ -13762,6 +13863,13 @@ class UnifiedPipeline:
                 # because the floor demotes the winner in place.
                 if self._withhold_unconfirmed_table(state, page_num, ps, _chart_figures_dir):
                     bo = ps.best_output or bo
+                    _undone = self._undo_paid_after_table_withhold(
+                        state, page_num, ps, "withheld as an unconfirmed scanned table"
+                    )
+                    if _undone is not None:
+                        bo = _undone
+                        self._withhold_unconfirmed_table(state, page_num, ps, _chart_figures_dir)
+                        bo = ps.best_output or bo
 
                 # #1187: a figure this page's own shipped body NAMES and does not show.
                 # Decided HERE, after BOTH table-withholding gates and immediately before the
@@ -13829,6 +13937,20 @@ class UnifiedPipeline:
                         # both withhold gates, the finalize guards). A demotion changes what the
                         # record says, so the record is taken once more in that case only.
                         if self._run_row_binding_check(state, page_num, ps, bo, _record.output):
+                            _undone = self._undo_paid_after_table_withhold(
+                                state, page_num, ps, "row binding contradicted the paid table"
+                            )
+                            if _undone is not None:
+                                bo = _undone
+                                # Back to the ladder withhold: its picture, as the ladder renders it.
+                                if (
+                                    ps.table_ladder_disposition is FailureMode.TABLE_WITHHELD
+                                    and not getattr(ps, "d3_floor_png_ref", "")
+                                    and _chart_figures_dir is not None
+                                ):
+                                    ps.d3_floor_png_ref = self._render_d3_floor_png(
+                                        state.handle.path, page_num, _chart_figures_dir
+                                    )
                             # A withheld table ships the failure marker and a link to the page
                             # picture, rendered exactly as the ladder withhold renders it
                             # (marker only if the render fails, as there).

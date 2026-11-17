@@ -34,6 +34,10 @@ from socr.tables.reconcile import find_table_blocks
 
 #: The cell the free reader shifted. A table carrying it is a table the stub ladder withholds.
 SHIFTED = "9.9"
+NO_TABLE = "no-table"
+#: A paid table the stub ladder leaves UNVERIFIED (no disposition, no accept).
+UNVERIFIED_CELL = "8.8"
+UNVERIFIED_KOREA = f"4.0 | 2.6 | 5.7 | -.8 | {UNVERIFIED_CELL}"
 HEADER = "| Country | Q1 | Q2 | Q3 | Q4 | Q5 |\n| --- | --- | --- | --- | --- | --- |\n"
 GOOD_KOREA = "4.0 | 2.6 | 5.7 | -.8 | 4.0"
 SHIFT_KOREA = f"2.6 | 5.7 | -.8 | 4.0 | {SHIFTED}"
@@ -78,6 +82,16 @@ class _Reader:
                 PageOutput(page_num=n, text="", status=PageStatus.ERROR, engine=self.name)
                 for n in page_nums
             ]
+        if self.korea == NO_TABLE:  # a paid reading that dropped the table
+            return [
+                PageOutput(
+                    page_num=n,
+                    text=f"{_prose(n)}. {_PROSE_ROWS}",
+                    status=PageStatus.SUCCESS,
+                    engine=self.name,
+                )
+                for n in page_nums
+            ]
         return [
             PageOutput(
                 page_num=n,
@@ -106,11 +120,18 @@ class _Judge:
 def _stub_gate(state, page_num, ps, bo, rungs) -> None:
     """The table ladder's outcome, pinned: a table carrying the shifted cell is withheld."""
     withheld = SHIFTED in (bo.text or "")
+    unverified = UNVERIFIED_CELL in (bo.text or "")
     for index in range(len(find_table_blocks(bo.text or ""))):
         state.events.append(
             AuditEvent(
                 page_num=page_num,
-                kind="table_ladder_withheld" if withheld else "table_ladder_accepted",
+                kind=(
+                    "table_ladder_withheld"
+                    if withheld
+                    else "table_ladder_unverified"
+                    if unverified
+                    else "table_ladder_accepted"
+                ),
                 engine=bo.engine or "",
                 detail="stub ladder",
                 data={"table_id": f"p{page_num}-t{index}"},
@@ -135,6 +156,10 @@ def _run(
     strict_local: bool = False,
     cost_budget: float = 0.0,
     max_paid_pages: int | None = None,
+    retry_failed_pages: bool = False,
+    cell_check=None,
+    contradiction=None,
+    row_binding=None,
 ):
     calls = calls if calls is not None else []
     with monkeypatch.context() as m:
@@ -157,6 +182,7 @@ def _run(
                 strict_local=strict_local,
                 cost_budget=cost_budget,
                 max_paid_pages=max_paid_pages,
+                retry_failed_pages=retry_failed_pages,
             )
         )
         pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL, PROFILE_GEMINI]
@@ -164,18 +190,18 @@ def _run(
         pipe._resolve_crop_vlm_model = lambda: None
         pipe._resolve_judge_model = lambda *a, **k: ""
         pipe._run_table_judge_gate = _stub_gate
-        pipe._run_native_cell_binding_check = lambda *a, **k: None
+        pipe._run_native_cell_binding_check = cell_check or (lambda *a, **k: None)
         # The checks on the shipped reading that compare it with this fixture's synthetic rotated
         # layer are orthogonal to the lane and would mark BOTH arms; they are pinned off so the
         # lane's own clause is the only one a page carries.
-        pipe._run_row_binding_check = lambda *a, **k: False
+        pipe._run_row_binding_check = row_binding or (lambda *a, **k: False)
         for name in (
             "text_layer_numbers_clause",
             "text_layer_drops_clause",
             "text_layer_words_clause",
         ):
             m.setattr(verdict_module, name, lambda output, p: None)
-        pipe._withhold_contradicted_unverified_tables = lambda *a, **k: None
+        pipe._withhold_contradicted_unverified_tables = contradiction or (lambda *a, **k: None)
         if not lane:
             pipe._paid_reading_after_table_withhold = lambda state, page_num, ps, bo, **k: bo
         return pipe.process(pdf, output_dir=out_dir)
@@ -534,3 +560,135 @@ def test_the_clause_alone_names_the_mode_and_its_own_reason() -> None:
     _, other_verdict = apply_verdict_marks(other, _p(), 1)
     [other_clause] = [c for c in other_verdict.clauses if c.check is Check.READING_DISPUTE]
     assert other_clause.reason == PAID_AFTER_DISPUTE_REASON
+
+
+# ---- review round -------------------------------------------------------------------------
+
+
+def _same_as_lane_off(tmp_path: Path, monkeypatch, pdf: Path, **arm) -> tuple[Path, list]:
+    off, on, calls = tmp_path / "off", tmp_path / "on", []
+    _run(off, pdf, monkeypatch, lane=False, **{k: v for k, v in arm.items() if k != "paid_korea"})
+    _run(on, pdf, monkeypatch, lane=True, calls=calls, **arm)
+    assert len(_paid_calls(calls)) == 1, "the paid reader was called, and refused"
+    assert _shipped(on) == _shipped(off)
+    return on, calls
+
+
+@pytest.mark.parametrize(
+    "paid_korea",
+    [
+        pytest.param(NO_TABLE, id="paid-reading-dropped-the-table"),
+        pytest.param(UNVERIFIED_KOREA, id="paid-table-left-unverified"),
+    ],
+)
+def test_a_paid_reading_that_does_not_clear_the_ladder_restores_the_withheld_page(
+    tmp_path: Path, monkeypatch, pdf: Path, paid_korea: str
+) -> None:
+    """The ladder state the trial reset is put back: the page ends withheld, with the free
+    reader's table NOT shipped, exactly as the lane-off arm ends it."""
+    on, _ = _same_as_lane_off(tmp_path, monkeypatch, pdf, paid_korea=paid_korea)
+    status, mode, *_rest, body, _ = _shipped(on)
+    assert (status, mode) == ("error", FailureMode.TABLE_WITHHELD.value)
+    assert SHIFT_KOREA not in body
+    [event] = _lane_events(on)
+    assert event["data"]["outcome"] == "rejected_by_table_checks"
+
+
+def test_the_native_contradiction_withhold_applies_to_the_paid_reading(
+    tmp_path: Path, monkeypatch, pdf: Path
+) -> None:
+    def contradiction(state, page_num, ps, bo):
+        if bo.engine == "gemini":
+            ps.table_ladder_disposition = FailureMode.TABLE_WITHHELD
+
+    on, _ = _same_as_lane_off(tmp_path, monkeypatch, pdf, contradiction=contradiction)
+    assert [e["data"]["outcome"] for e in _lane_events(on)] == ["rejected_by_table_checks"]
+
+
+def test_a_check_that_rebinds_the_event_list_does_not_leave_the_trial_in_the_log(
+    tmp_path: Path, monkeypatch, pdf: Path
+) -> None:
+    """``rollback_native_cell_page_state`` rebinds ``state.events`` to a filtered list; the
+    trial's undo must not index into the old one."""
+
+    def cell_check(state, page_num, ps, bo):
+        state.events = [e for e in state.events if not e.kind.startswith("native_cell_check_")]
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind="native_cell_check_ambiguous",
+                engine=bo.engine,
+                detail="stub",
+                data={},
+            )
+        )
+
+    off, on, calls = tmp_path / "off", tmp_path / "on", []
+    _run(off, pdf, monkeypatch, lane=False, paid_korea=SHIFT_KOREA, cell_check=cell_check)
+    _run(on, pdf, monkeypatch, calls=calls, paid_korea=SHIFT_KOREA, cell_check=cell_check)
+    assert len(_paid_calls(calls)) == 1
+    assert [k for k in _kinds(on) if k != PAID_AFTER_TABLE_WITHHOLD_KIND] == _kinds(off)
+    engines = [e["engine"] for e in _events(on) if e["kind"] == "native_cell_check_ambiguous"]
+    assert engines == ["qwen"]
+
+
+def test_a_later_gate_that_withholds_the_paid_table_puts_the_page_back(
+    tmp_path: Path, monkeypatch, pdf: Path
+) -> None:
+    """Row binding runs after the lane has committed. If it withholds the paid table the rescue
+    did not happen: the page ends as the lane-off arm ends it and the audit says so."""
+
+    def row_binding(state, page_num, ps, bo, record_output):
+        if bo.engine != "gemini":
+            return False
+        bo.status = PageStatus.ERROR
+        bo.audit_passed = False
+        bo.failure_mode = FailureMode.TABLE_WITHHELD
+        return True
+
+    off, on, calls = tmp_path / "off", tmp_path / "on", []
+    _run(off, pdf, monkeypatch, lane=False)
+    _run(on, pdf, monkeypatch, calls=calls, row_binding=row_binding)
+    assert len(_paid_calls(calls)) == 1
+    side, _ = _page(on, 1)
+    assert side["winning_output"]["engine"] == "qwen"
+    assert "paid_after_table_withhold" not in side["winning_output"]
+    assert [k for k in _kinds(on) if k != PAID_AFTER_TABLE_WITHHOLD_KIND] == _kinds(off)
+    [event] = _lane_events(on)
+    assert event["data"]["outcome"] == "rejected_by_later_table_check"
+    assert _shipped(on) == _shipped(off)
+
+
+def test_retry_failed_pages_never_sends_a_page_to_the_paid_reader_twice(
+    tmp_path: Path, monkeypatch, pdf: Path
+) -> None:
+    """The lane's paid reading is refused and the page ends ERROR; the retry pass reverses the
+    ladder and would route the paid reader first. One paid call per page, with or without it."""
+    on, calls = tmp_path / "on", []
+    _run(on, pdf, monkeypatch, calls=calls, paid_korea=SHIFT_KOREA, retry_failed_pages=True)
+    assert len(_paid_calls(calls)) == 1
+
+
+def test_an_empty_paid_answer_on_a_page_with_a_text_layer_is_unavailable(
+    tmp_path: Path, monkeypatch, pdf: Path
+) -> None:
+    """The route substitutes the native text for an empty answer (engine ``native``); that is
+    not a paid reading and the lane records it as unavailable, never as a table-check refusal."""
+    on, _ = _same_as_lane_off(tmp_path, monkeypatch, pdf, paid_korea=None)
+    [event] = _lane_events(on)
+    assert event["data"]["outcome"] == "unavailable"
+
+
+def test_the_paid_reading_gets_its_image_placeholders_sanitized(
+    tmp_path: Path, monkeypatch, pdf: Path
+) -> None:
+    seen: list = []
+    real = UnifiedPipeline._sanitize_agentic_page_image_refs
+
+    def spy(self, state, page_num, bo, doc_dir):
+        seen.append(bo.engine)
+        return real(self, state, page_num, bo, doc_dir)
+
+    monkeypatch.setattr(UnifiedPipeline, "_sanitize_agentic_page_image_refs", spy)
+    _run(tmp_path / "on", pdf, monkeypatch)
+    assert "gemini" in seen and "qwen" in seen
