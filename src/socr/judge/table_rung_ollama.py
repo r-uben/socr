@@ -48,6 +48,7 @@ from socr.judge.table_verdict import (
     RungResult,
     classify_http_status,
     is_availability_exception,
+    is_transient_transport_error,
     output_reads_as_refusal,
     rung_result_from_output,
 )
@@ -412,6 +413,11 @@ class BlindCellResult:
     error: str = ""
     unavailable: bool = False
     refusal: bool = False
+    #: The call failed with a transient TRANSPORT error (#1365): HTTP 5xx or a
+    #: timeout/connection error, classified by exception type and status. The
+    #: guard may retry such a call once; a refusal, a 4xx or a malformed answer
+    #: never sets it.
+    transient_transport: bool = False
 
 
 def adjudicator_rung_id(model: str) -> str:
@@ -607,6 +613,7 @@ def transcribe_cells_ollama(
             and (
                 exc.response.status_code in _REFUSAL_STATUS_CODES or output_reads_as_refusal(body)
             ),
+            transient_transport=is_transient_transport_error(exc),
         )
     except (httpx.HTTPError, OSError) as exc:
         latency_sec = time.monotonic() - start
@@ -616,6 +623,7 @@ def transcribe_cells_ollama(
             latency_sec=latency_sec,
             error=f"{type(exc).__name__}: {exc}",
             unavailable=is_availability_exception(exc),
+            transient_transport=is_transient_transport_error(exc),
         )
     except ValueError as exc:
         # A body of the wrong SHAPE (round 3, NEW C). Deterministic: the same
