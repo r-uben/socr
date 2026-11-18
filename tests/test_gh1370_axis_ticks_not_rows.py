@@ -65,7 +65,13 @@ def _chart_words() -> list:
 def _verdicts(markdown: str, words: list, monkeypatch) -> tuple[bool, bool]:
     """(exclusion active, exclusion patched off)."""
     active = table_truncated(markdown, words)
-    monkeypatch.setattr(sc, "_axis_runs", lambda band_words: None)
+    # raising=False: this file can then run against an older commit that lacks
+    # one of the two names (the first commit has only ``_is_axis_tick_band``,
+    # which took tokens), instead of dying with AttributeError. The patch
+    # still switches the exclusion off there, which is what makes the same
+    # tests fail on those commits.
+    monkeypatch.setattr(sc, "_axis_runs", lambda band_words: None, raising=False)
+    monkeypatch.setattr(sc, "_is_axis_tick_band", lambda *_a: False, raising=False)
     return active, table_truncated(markdown, words)
 
 
@@ -210,3 +216,86 @@ class TestRealTruncationStillCaught:
         assert table_truncated(cut, _page(DECIMAL_ROWS)) == table_truncated(
             cut, _page(DECIMAL_ROWS) + _chart_words()
         )
+
+
+def _page_split_labels(rows: list[tuple[str, list[str]]], pitch: float = 24.0) -> list:
+    """Layout B: the label sits 12 pt above its values, so every integer
+    progression row is a digit-only band."""
+    words: list = []
+    for i, (label, values) in enumerate(rows):
+        y = 100.0 + pitch * i
+        words += [_word(20.0 + 26.0 * j, y, tok) for j, tok in enumerate(label.split())]
+        words += [_word(COL_X[c], y + 12.0, v) for c, v in enumerate(values)]
+    return words
+
+
+def _with_chart_table(md: str, rows: list[list[str]]) -> str:
+    width = max(len(r) for r in rows)
+    out = md + "\n\n| Chart | " + " | ".join(f"c{i}" for i in range(width)) + " |\n"
+    out += "| --- |" + " --- |" * width + "\n"
+    out += "\n".join("| " + " | ".join(["chart x-axis", *r]) + " |" for r in rows)
+    return out
+
+
+def _chart_axis_words() -> list:
+    side = _years(2000, 2007)
+    return _tick_band(400.0, side) + _tick_band(500.0, side)
+
+
+def _drop_last(rows, k: int) -> set[int]:
+    return set(range(len(rows) - k, len(rows)))
+
+
+T = _years(2000, 2007)
+
+
+class TestImperfectAxisCopy:
+    """A: the reader wrote an imperfect copy of a chart axis as a table row.
+    The candidate counts that row, so the native axis band must stay counted."""
+
+    @pytest.mark.parametrize(
+        ("name", "chart_rows", "k"),
+        [
+            ("skipped tick", [_years(2000, 2006) + ["2008"]] * 2, 2),
+            ("skipped tick", [_years(2000, 2006) + ["2008"]] * 2, 3),
+            ("y value in row", [[*T, "67.6"]] * 2, 2),
+            ("y value in row", [[*T, "67.6"]] * 2, 3),
+            ("overprints", [["2000", "2000", "2001", "2002", "2002", *T[3:]]], 1),
+            ("overprints", [["2000", "2000", "2001", "2002", "2002", *T[3:]]], 2),
+            ("first four ticks", [T[:4]] * 3, 3),
+        ],
+    )
+    def test_cut_still_truncated(self, name, chart_rows, k, monkeypatch):
+        words = _page(DECIMAL_ROWS) + _chart_axis_words()
+        md = _with_chart_table(_markdown(DECIMAL_ROWS, _drop_last(DECIMAL_ROWS, k)), chart_rows)
+        active, off = _verdicts(md, words, monkeypatch)
+        assert active == off is True
+
+
+class TestLabelFreeProgressionRowsInsideTable:
+    """B: labels 12 pt above the values, so integer rows are digit-only bands."""
+
+    @pytest.mark.parametrize("skip", [{2, 3}, {2, 3, 4}, {2, 3, 4, 6}])
+    def test_integer_rows_dropped(self, skip, monkeypatch):
+        words = _page_split_labels(MIXED_ROWS)
+        active, off = _verdicts(_markdown(MIXED_ROWS, skip), words, monkeypatch)
+        assert active == off is True
+
+    def test_integer_rows_misread_and_decimal_rows_dropped(self, monkeypatch):
+        misread = {2: (0, "26"), 3: (3, "9"), 4: (3, "8"), 6: (3, "409")}
+        rows = []
+        for i, (label, values) in enumerate(MIXED_ROWS):
+            if i in misread:
+                c, v = misread[i]
+                values = [*values[:c], v, *values[c + 1 :]]
+            rows.append((label, values))
+        words = _page_split_labels(MIXED_ROWS)
+        active, off = _verdicts(_markdown(rows, {0, 1, 5, 7, 8}), words, monkeypatch)
+        assert active == off is True
+
+    def test_year_caption_above_the_table_is_still_excluded(self):
+        """The caption has no aligned band above it, so it is not a body row:
+        a complete reading with a caption and a chart is not truncated."""
+        caption = _tick_band(80.0, _years(2001, 2004), x0=COL_X[0], pitch=50.0)
+        words = _page(DECIMAL_ROWS) + caption + _chart_words()
+        assert table_truncated(_markdown(DECIMAL_ROWS), words) is False

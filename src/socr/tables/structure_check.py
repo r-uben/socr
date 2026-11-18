@@ -427,11 +427,20 @@ def _candidate_numeric_supply(markdown: str) -> Counter:
 _AXIS_RUN_MIN_TERMS = 3
 
 
+#: #1370: two same-text words are one overprinted label when their x-extents
+#: overlap by MORE than this fraction of the narrower word's width, i.e. a
+#: majority. Floats cannot be compared for equality (p049's overprints differ by
+#: 2e-5 pt in x0), and no larger overlap is needed: neighbouring ticks of one
+#: axis do not overlap at all (p049: 20 pt pitch for 14.5 pt wide labels), so
+#: any value in (0, 1) separates the two; the majority is the natural midpoint.
+_OVERPRINT_MIN_OVERLAP_FRACTION = 0.5
+
+
 def _majority_overlap(a: Sequence, b: Sequence) -> bool:
-    """Whether the x-extents of words *a* and *b* overlap by more than half of
-    the narrower one's width."""
+    """Whether the x-extents of words *a* and *b* overlap by more than
+    ``_OVERPRINT_MIN_OVERLAP_FRACTION`` of the narrower one's width."""
     overlap = min(a[2], b[2]) - max(a[0], b[0])
-    return overlap > 0.5 * min(a[2] - a[0], b[2] - b[0])
+    return overlap > _OVERPRINT_MIN_OVERLAP_FRACTION * min(a[2] - a[0], b[2] - b[0])
 
 
 def _axis_runs(band_words: Sequence) -> list[list[int]] | None:
@@ -499,31 +508,58 @@ def _is_axis_tick_band(band_words: Sequence) -> bool:
     return _axis_runs(band_words) is not None
 
 
+def _words_share_lanes(band_words: Sequence, other_words: Sequence) -> bool:
+    """Whether every word of *band_words* sits in a column lane of
+    *other_words*: x0 (or, for right-aligned columns, x1) within
+    ``reconstruct._LANE_X_TOL_PT`` of one of its words. The tolerance and the
+    two anchors are the column-lane definition the #703 lane gate uses."""
+    from socr.tables.reconstruct import _LANE_X_TOL_PT
+
+    for edge in (0, 2):
+        anchors = [w[edge] for w in other_words]
+        if all(any(abs(w[edge] - a) <= _LANE_X_TOL_PT for a in anchors) for w in band_words):
+            return True
+    return False
+
+
 def _native_row_bands(words: list, row_shape_min: int, candidate_rows: list) -> list:
     """Token tuples of the native table-shaped bands that count as rows in
     term (b).
 
-    An axis tick band is left out, UNLESS the candidate itself wrote that
-    progression as a table row (a chart transcribed as a table, with the years
-    as a body row): then the candidate side counts it, so the native side must
-    too, or each such row would be a free credit against a dropped data row.
-    The candidate side already leaves header lines out, so a pure year-caption
-    band is excluded on both sides.
+    An axis tick band (``_axis_runs``) is left out, with two exceptions, each
+    of which keeps the band COUNTED (excluding lowers the native count, which is
+    the fail-open direction, so every doubt keeps it):
+
+    * the candidate wrote a table row sharing at least ``_AXIS_RUN_MIN_TERMS``
+      of the band's tick values (a chart transcribed as a table, perfect or
+      not: a row of ticks plus a y value, overprints, a truncated copy). The
+      candidate side counts that row, so the native side must count the band;
+      the arithmetic that makes three terms a progression also makes three
+      shared values more than coincidence;
+    * the band sits INSIDE a table: some table-shaped non-axis band above AND
+      some below share its column lanes (``_words_share_lanes``). That is a
+      label-free body row that happens to be an integer progression. A year
+      caption above a table has no aligned band above it and stays excluded,
+      which is symmetric with the candidate side dropping header lines.
     """
     from socr.tables.row_corroboration import baseline_bands, cluster_band_words
     from socr.tables.row_corroboration import is_table_shaped_band
 
     bands = baseline_bands(words)
     word_bands = cluster_band_words(words)
-    written = {tuple(row) for row in candidate_rows}
+    shaped = [is_table_shaped_band(b.tokens, row_shape_min) for b in bands]
+    runs = [_axis_runs(bw) if ok else None for ok, bw in zip(shaped, word_bands, strict=True)]
+    plain = [i for i, ok in enumerate(shaped) if ok and runs[i] is None]
     kept = []
-    for band, band_words in zip(bands, word_bands, strict=True):
-        if not is_table_shaped_band(band.tokens, row_shape_min):
+    for i, band in enumerate(bands):
+        if not shaped[i]:
             continue
-        runs = _axis_runs(band_words)
-        if runs is not None:
-            first = tuple(str(v) for v in runs[0])
-            if tuple(band.tokens) not in written and first not in written:
+        if runs[i] is not None:
+            ticks = {str(v) for run in runs[i] for v in run}
+            copied = any(len(ticks & set(row)) >= _AXIS_RUN_MIN_TERMS for row in candidate_rows)
+            above = any(j < i and _words_share_lanes(word_bands[i], word_bands[j]) for j in plain)
+            below = any(j > i and _words_share_lanes(word_bands[i], word_bands[j]) for j in plain)
+            if not (copied or (above and below)):
                 continue
         kept.append(band.tokens)
     return kept
@@ -589,9 +625,17 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
     ``1990..2008`` and, on p091, the second stacked chart; on p049 and p082 a
     merged band from two side-by-side charts that restarts mid-band). Bands
     for which ``_is_axis_tick_band`` holds (label-free, one progression or the
-    same one repeated) are now left out of the native count unless the
-    candidate wrote them as a table row, after which none of the three falls
-    short. Adjacent-pair cuts of the saved readings that still go unflagged
+    same one repeated) are now left out of the native count, after which none of
+    the three falls short. Excluding a band LOWERS the native count, which is
+    the fail-open direction, so ``_native_row_bands`` keeps the band counted
+    whenever the candidate wrote a row sharing ``_AXIS_RUN_MIN_TERMS`` of its
+    ticks (an imperfect copy of an axis would otherwise be a free credit) or
+    the band sits between table rows in the same column lanes (a label-free
+    integer-progression body row). Known limits: such a body row that is the
+    first or last row of its table has no aligned band on one side and is
+    still excluded; an axis whose every tick happens to sit in a table's
+    column lanes, with table rows above and below it, stays counted. A candidate that writes more chart-copy rows than the page has
+    axis bands is credited for the surplus rows (uncapped). Adjacent-pair cuts of the saved readings that still go unflagged
     on p049 remove one data row plus a label-only panel row; the 1-band
     allowance absorbs that, and it happens on main with the charts removed.
 
