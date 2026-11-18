@@ -332,6 +332,9 @@ class ManifestEntry:
     # manifest predating GH-170 (or a page with no images) -- see
     # ``stale_assets`` for how that distinction is preserved on replay.
     assets: list[AssetRef] = field(default_factory=list)
+    #: #1374: the page's shipped body is the LINE-ORDER floor body (its notice line). Omitted
+    #: when False, so every manifest written before this field is byte-identical.
+    floor_line_order_body: bool = False
 
     def to_dict(self) -> dict:
         d = {
@@ -348,6 +351,8 @@ class ManifestEntry:
             # the exact same JSON as before GH-170, so every golden/byte-identity
             # fixture that never had figures is untouched by this field existing.
             d["assets"] = [a.to_dict() for a in self.assets]
+        if self.floor_line_order_body:
+            d["floor_line_order_body"] = True
         return d
 
     @classmethod
@@ -361,6 +366,7 @@ class ManifestEntry:
             fingerprint=PageFingerprint(**d["fingerprint"]),
             journal=d.get("journal", []),
             disposition=disposition,
+            floor_line_order_body=d.get("floor_line_order_body") is True,
         )
 
 
@@ -3435,23 +3441,44 @@ def _native_order_boxes(p) -> list[tuple[float, float, float, float]] | None:
     return boxes
 
 
-def _table_continuation_lines(words, lines, index, boxes, texts) -> set[int]:
-    """#1374: the layer lines that continue a detected table past its box (the span walk).
+def _table_continuation_lines(words, lines, index, boxes) -> set[int] | None:
+    """#1374: the layer lines that continue a detected table past its box, by ROW PITCH.
 
-    From the first and the last baseline band that has a word centred inside a box, go outward
-    band by band. A band's lines that overlap the box's x-span are continuation while any of
-    them carries a printed digit; the walk stops at the first band whose lines in that span
-    carry none, or that has none. Same banding as the floor (``cluster_band_words``).
+    The criterion is geometric and never reads what a row contains. For each box, the bands
+    with a word centred inside it give the table's own row pitch: the LARGEST gap between
+    consecutive such bands' y-centres (its widest printed row spacing, so a table with an
+    irregular row is not under-measured). From the box's last band and from its first, go
+    outward band by band: a band that has a line overlapping the box's x-span is withheld
+    (only those lines) while its y-centre lies within one pitch of the previous WITHHELD
+    band's; the walk stops at the first such band that lies further. A band with no line in
+    the x-span (another column's sentence) is skipped: it neither stops the walk nor counts as
+    the previous band. Label-only rows, word cells, ``n.a.`` cells, memo rows and the word that
+    sits between two boxes are all withheld by this, whatever they say. Footnotes set tight
+    under a table are withheld too (the safe side).
+
+    ``None`` means "abstain" (the caller ships the whole-page marker): a box with fewer than two
+    bands centred inside it has no pitch to derive, and none is invented.
+
+    What can still ship (#1374; the history is in
+    ``docs/log/2026-11-14_1261-table-only-withhold.md``, where a pitch rule was never tried in
+    rounds 1-5, and in ``_row_shape_reconciliation``'s docstring, which records that a pitch
+    threshold cannot tell a table's own internal section gap from its end): a table
+    continuation beyond a vertical gap larger than the table's own widest row spacing, and an
+    unboxed table far from every box. Both ship under the page's banner, notice and table
+    marker, exactly as they do on a page the bands body recovers.
     """
-    from socr.tables.row_corroboration import bears_printed_numeral, cluster_band_words
+    from socr.tables.row_corroboration import cluster_band_words
 
     bands = cluster_band_words(words)
     band_members = [{index[(w[5], w[6])] for w in band} for band in bands]
+    centres = [sum((w[1] + w[3]) / 2.0 for w in band) / len(band) for band in bands]
     out: set[int] = set()
     for box in boxes:
         inside = [k for k, band in enumerate(bands) if _band_centre_in(band, box)]
-        if not inside:
-            continue
+        ys = sorted(centres[k] for k in inside)
+        if len(ys) < 2:
+            return None
+        pitch = _row_pitch(ys)
 
         def _span_lines(k: int, box=box) -> list[int]:
             return [
@@ -3460,16 +3487,30 @@ def _table_continuation_lines(words, lines, index, boxes, texts) -> set[int]:
                 if any(w[0] <= box[2] and w[2] >= box[0] for w in lines[i])
             ]
 
-        def _walk(ks, box=box) -> None:
+        for ks in (range(max(inside) + 1, len(bands)), range(min(inside) - 1, -1, -1)):
+            last = centres[max(inside)] if ks.step > 0 else centres[min(inside)]
             for k in ks:
                 span = _span_lines(k)
-                if not any(bears_printed_numeral(str(w[4])) for i in span for w in lines[i]):
-                    return
+                if not span:
+                    continue
+                if abs(centres[k] - last) > pitch and not math.isclose(
+                    abs(centres[k] - last), pitch, rel_tol=_PITCH_FLOAT_REL_TOL
+                ):
+                    break
                 out.update(span)
-
-        _walk(range(max(inside) + 1, len(bands)))
-        _walk(range(min(inside) - 1, -1, -1))
+                last = centres[k]
     return out
+
+
+#: Float32 coordinate noise in a PDF's word boxes (~1e-5 of a row pitch): a row printed at exactly
+#: the table's widest row spacing is not "further" because its centre differs in the last bit.
+#: A numerical tolerance, not a design threshold.
+_PITCH_FLOAT_REL_TOL = 1e-3
+
+
+def _row_pitch(ys: list[float]) -> float:
+    """The widest gap between consecutive band centres (a table's own widest row spacing)."""
+    return max(b - a for a, b in zip(ys, ys[1:]))
 
 
 def _band_centre_in(band, box) -> bool:
@@ -3519,13 +3560,17 @@ def _native_order_prose_body(
     x-range overlaps a box, so a full-width table box withholds the whole page and the body
     abstains (measured on the 114 order-gate pages of the 156-document run: no line ships on
     any of them). Without the span rule a line ships when it is outside every box (no word
-    overlapping a box at all: a clipped glyph is withheld, not shipped) and the continuation
-    walk does not reach it: from each box's first and last band the walk goes outward band by
-    band and withholds the lines of a band that overlap the box's x-span while any of them
-    carries a printed digit, stopping at the first band whose lines in that span carry none (a
-    clipped box's ruled final row and the numbered notes under a grid go; a numeral-free
-    continuation does not, as in the bands body). The numerals rule, the band rule, table
-    syntax and the two-letter rule are unchanged, and the notice line follows the banner.
+    overlapping a box at all: a clipped glyph is withheld, not shipped), its band is not
+    numerals-withheld (``band_span``) and ``_table_continuation_lines`` does not reach it. That
+    walk is by ROW PITCH, never by what a row says (a digit or sentence criterion is the #1261
+    round 2-4 design the reviews took apart: label-only rows, ``n.a.`` cells and one-line memo
+    rows all shipped). The numerals rule, the band rule, table syntax and the two-letter rule
+    are unchanged, and the notice line follows the banner. A box with fewer than two bands
+    centred inside it has no pitch: the body abstains.
+
+    What can still ship on this body: a table continuation beyond a vertical gap larger than
+    the table's own widest row spacing; an unboxed table far from every box; and, as on every
+    body of this lane, a numeral-light row on a page with no box near it.
     """
     from socr.core.born_digital import text_layer_trusted
     from socr.tables.reconcile import table_syntax_line_indices
@@ -3595,9 +3640,10 @@ def _native_order_prose_body(
             for i, line in enumerate(lines)
             if any(_overlaps_box(w, b) for w in line for b in boxes)
         }
-        continuation = (
-            band_span | edge | _table_continuation_lines(words, lines, index, boxes, texts)
-        )
+        walked = _table_continuation_lines(words, lines, index, boxes)
+        if walked is None:
+            return None
+        continuation = band_span | edge | walked
     ships = [base_ok[i] and i not in continuation for i in range(len(lines))]
     if not any(ships) or not text_layer_trusted("\n".join(t for t, ok in zip(texts, ships) if ok)):
         return None
@@ -8676,6 +8722,7 @@ def build_manifest(
             journal=journal,
             disposition=record.disposition,
             assets=page_assets,
+            floor_line_order_body=has_line_order_notice(page.text, page_num),
         )
     return manifest
 
