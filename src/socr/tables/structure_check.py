@@ -420,50 +420,113 @@ def _candidate_numeric_supply(markdown: str) -> Counter:
     return supply
 
 
-#: #1370: fewest distinct terms a run of integers needs before "equal steps"
-#: says anything. Two numbers always differ by some constant, so an arithmetic
-#: progression is only a constraint from three terms on; this is that
-#: arithmetic fact, not a tuned threshold.
+#: #1370: fewest terms a progression needs before "equal steps" says anything.
+#: Two numbers always differ by some constant, so an arithmetic progression is
+#: only a constraint from three terms on; this is that arithmetic fact, not a
+#: tuned threshold.
 _AXIS_RUN_MIN_TERMS = 3
 
 
-def _is_axis_tick_band(tokens: tuple[str, ...]) -> bool:
-    """#1370: whether one native band is a chart axis tick line (the year
-    labels under a chart), not a table row.
+def _majority_overlap(a: Sequence, b: Sequence) -> bool:
+    """Whether the x-extents of words *a* and *b* overlap by more than half of
+    the narrower one's width."""
+    overlap = min(a[2], b[2]) - max(a[0], b[0])
+    return overlap > 0.5 * min(a[2] - a[0], b[2] - b[0])
 
-    True iff every token is a plain unsigned integer and, after collapsing
-    adjacent repeats (overprinted labels), the sequence splits at each
-    non-increase into runs that are each an arithmetic progression of at least
-    ``_AXIS_RUN_MIN_TERMS`` terms. The split handles two charts printed side by
-    side, whose tick lines merge into one band that restarts (``1994 ... 2008
-    1994 ... 2008``). A decimal, a comma-grouped number or a signed value is
-    never an axis label here, so a row of measurements is not matched.
 
-    The candidate side of term (b) already leaves header lines (the year
-    caption over a table's columns) out of its row count, so leaving a pure
-    year-caption band out of the native count is the same exclusion on the
-    other side. Known cost: a genuine body row of integers in exact arithmetic
-    progression (``10 20 30``) is also skipped, which lowers the native count
-    by one for that row.
-    """
-    if not tokens or not all(tok.isdigit() for tok in tokens):
-        return False
-    values = [int(tok) for tok in tokens]
+def _axis_runs(band_words: Sequence) -> list[list[int]] | None:
+    """The axis runs of one native band's words, or ``None`` if the band is not
+    an axis tick line. See ``_is_axis_tick_band``."""
+    from socr.tables.row_corroboration import _is_genuine_numeric
+
+    ordered = sorted(band_words, key=lambda w: w[0])
+    kept: list = []
+    for word in ordered:
+        text = word[4]
+        # A label of a table row, a unit, a footnote mark, a decimal, a sign, a
+        # currency or percent mark: none is an axis tick.
+        if not (text.isascii() and text.isdigit()):
+            return None
+        if not _is_genuine_numeric(text)[0]:
+            return None
+        # An overprinted label (the same text in the same slot) is one tick.
+        # Same slot = the boxes overlap by more than half the word's width; the
+        # measured overprints on p049 differ by 2e-5 pt in x0, so exact
+        # equality of floats is not usable, and a legitimately repeated
+        # value in the next column does not overlap at all.
+        if kept and kept[-1][4] == text and _majority_overlap(kept[-1], word):
+            continue
+        kept.append(word)
+    if not kept:
+        return None
+    values = [int(w[4]) for w in kept]
     runs: list[list[int]] = [[values[0]]]
     for value in values[1:]:
-        if value == runs[-1][-1]:
-            continue
-        if value < runs[-1][-1]:
+        if value <= runs[-1][-1]:
             runs.append([value])
         else:
             runs[-1].append(value)
-    for run in runs:
-        if len(run) < _AXIS_RUN_MIN_TERMS:
-            return False
-        step = run[1] - run[0]
-        if any(b - a != step for a, b in zip(run, run[1:])):
-            return False
-    return True
+    first = runs[0]
+    if len(first) < _AXIS_RUN_MIN_TERMS:
+        return None
+    step = first[1] - first[0]
+    if any(b - a != step for a, b in zip(first, first[1:])):
+        return None
+    if any(run != first for run in runs):
+        return None
+    return runs
+
+
+def _is_axis_tick_band(band_words: Sequence) -> bool:
+    """#1370: whether one native band (the fitz words on one printed line) is a
+    chart axis tick line (the year labels under a chart), not a table row.
+
+    True iff EVERY word of the band is a plain ASCII-digit integer (so a
+    labelled table row such as ``Payrolls th 100 200 300 400`` is not axis:
+    measured on the three real pages, all 6 axis bands carry no other word),
+    and the integers, left to right with same-text-same-slot overprints counted
+    once, form ONE arithmetic progression of at least ``_AXIS_RUN_MIN_TERMS``
+    terms, or the SAME progression repeated whole (two charts printed side by
+    side merge into one band that restarts: ``1994 ... 2008 1994 ... 2008``).
+
+    Deliberately narrow. It still accepts a label-free printed row that is one
+    progression, ``10 20 30 40`` or ``1 2 3 4 1 2 3 4``. It rejects mixed steps
+    (``5 10 15 3 6 9``), two different progressions side by side, repeated
+    values in different slots (``3 6 9 9 9``), and any presentation (``$100``,
+    ``5*``). Side-by-side charts with DIFFERENT year ranges are not excluded
+    (fail-safe: they keep counting as rows).
+    """
+    return _axis_runs(band_words) is not None
+
+
+def _native_row_bands(words: list, row_shape_min: int, candidate_rows: list) -> list:
+    """Token tuples of the native table-shaped bands that count as rows in
+    term (b).
+
+    An axis tick band is left out, UNLESS the candidate itself wrote that
+    progression as a table row (a chart transcribed as a table, with the years
+    as a body row): then the candidate side counts it, so the native side must
+    too, or each such row would be a free credit against a dropped data row.
+    The candidate side already leaves header lines out, so a pure year-caption
+    band is excluded on both sides.
+    """
+    from socr.tables.row_corroboration import baseline_bands, cluster_band_words
+    from socr.tables.row_corroboration import is_table_shaped_band
+
+    bands = baseline_bands(words)
+    word_bands = cluster_band_words(words)
+    written = {tuple(row) for row in candidate_rows}
+    kept = []
+    for band, band_words in zip(bands, word_bands, strict=True):
+        if not is_table_shaped_band(band.tokens, row_shape_min):
+            continue
+        runs = _axis_runs(band_words)
+        if runs is not None:
+            first = tuple(str(v) for v in runs[0])
+            if tuple(band.tokens) not in written and first not in written:
+                continue
+        kept.append(band.tokens)
+    return kept
 
 
 def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
@@ -525,8 +588,12 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
     were tick lines (a lone chart's ``1992..2005`` / ``2000..2007`` /
     ``1990..2008`` and, on p091, the second stacked chart; on p049 and p082 a
     merged band from two side-by-side charts that restarts mid-band). Bands
-    for which ``_is_axis_tick_band`` holds are now left out of the native
-    count, after which none of the three falls short.
+    for which ``_is_axis_tick_band`` holds (label-free, one progression or the
+    same one repeated) are now left out of the native count unless the
+    candidate wrote them as a table row, after which none of the three falls
+    short. Adjacent-pair cuts of the saved readings that still go unflagged
+    on p049 remove one data row plus a label-only panel row; the 1-band
+    allowance absorbs that, and it happens on main with the charts removed.
 
     Known limits: a dropped row is missed when its numbers also appear
     elsewhere in the candidate (``0%``, a repeated total) or when it is the
@@ -563,8 +630,6 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
         return False
     from socr.tables.row_corroboration import (
         ROW_CORROBORATION_MIN,
-        baseline_bands,
-        is_table_shaped_band,
         numeric_body_rows,
         table_blocks,
     )
@@ -576,11 +641,7 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
         return False
 
     row_shape_min = min(len(row) for row in candidate_rows)
-    bands = [
-        band.tokens
-        for band in baseline_bands(words)
-        if is_table_shaped_band(band.tokens, row_shape_min) and not _is_axis_tick_band(band.tokens)
-    ]
+    bands = _native_row_bands(words, row_shape_min, candidate_rows)
     if not _falls_short(len(candidate_rows), len(bands), ROW_CORROBORATION_MIN):
         return False
 

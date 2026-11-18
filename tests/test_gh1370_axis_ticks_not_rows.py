@@ -2,16 +2,20 @@
 
 Term (b) of ``table_truncated`` counted every table-shaped native band as a
 table row, so a complete reading of a page with a small table and charts was
-called truncated. Hermetic: synthetic fitz-shaped word tuples and Markdown.
+called truncated. The exclusion must not open a hole for real truncation, so
+the guard tests are DIFFERENCE tests: a cut reading gets the same verdict with
+the axis exclusion active and with it patched off.
+
+Hermetic: synthetic fitz-shaped word tuples and Markdown.
 """
 
 from __future__ import annotations
 
 import pytest
 
+import socr.tables.structure_check as sc
 from socr.tables.structure_check import _is_axis_tick_band, table_truncated
 
-ROWS = 8
 COLS = 4
 COL_X = [200.0 + 50.0 * c for c in range(COLS)]
 
@@ -20,22 +24,33 @@ def _word(x: float, y: float, text: str) -> tuple:
     return (x, y, x + 24.0, y + 8.0, text, 0, 0, 0)
 
 
-def _table_words() -> list:
-    words = []
-    for r in range(ROWS):
-        y = 100.0 + 12.0 * r
-        words.append(_word(60.0, y, f"Item{r}"))
-        for c in range(COLS):
-            words.append(_word(COL_X[c], y, f"{r + 1}{c + 3}.{r}{c}"))
+def _row_words(y: float, label: str, values: list[str]) -> list:
+    words = [_word(20.0 + 26.0 * j, y, tok) for j, tok in enumerate(label.split())]
+    words += [_word(COL_X[c], y, v) for c, v in enumerate(values)]
     return words
 
 
-def _tick_band(y: float, labels: list[str], x0: float = 60.0, pitch: float = 30.0) -> list:
+def _tick_band(y: float, labels: list[str], x0: float = 20.0, pitch: float = 30.0) -> list:
     return [_word(x0 + pitch * i, y, lab) for i, lab in enumerate(labels)]
 
 
 def _years(first: int, last: int, step: int = 1) -> list[str]:
     return [str(y) for y in range(first, last + 1, step)]
+
+
+def _page(rows: list[tuple[str, list[str]]], y0: float = 100.0) -> list:
+    words: list = []
+    for i, (label, values) in enumerate(rows):
+        words += _row_words(y0 + 12.0 * i, label, values)
+    return words
+
+
+def _markdown(rows: list[tuple[str, list[str]]], skip: set[int] = frozenset()) -> str:
+    lines = ["| Item | C0 | C1 | C2 | C3 |", "| --- | --- | --- | --- | --- |"]
+    for i, (label, values) in enumerate(rows):
+        if i not in skip:
+            lines.append("| " + " | ".join([label, *values]) + " |")
+    return "\n".join(lines)
 
 
 def _chart_words() -> list:
@@ -47,67 +62,151 @@ def _chart_words() -> list:
     return words
 
 
-def _markdown(skip: set[int] = frozenset()) -> str:
-    lines = ["| Item | A | B | C | D |", "| --- | --- | --- | --- | --- |"]
-    for r in range(ROWS):
-        if r in skip:
-            continue
-        cells = [f"{r + 1}{c + 3}.{r}{c}" for c in range(COLS)]
-        lines.append("| " + " | ".join([f"Item{r}", *cells]) + " |")
-    return "\n".join(lines)
+def _verdicts(markdown: str, words: list, monkeypatch) -> tuple[bool, bool]:
+    """(exclusion active, exclusion patched off)."""
+    active = table_truncated(markdown, words)
+    monkeypatch.setattr(sc, "_axis_runs", lambda band_words: None)
+    return active, table_truncated(markdown, words)
+
+
+DECIMAL_ROWS = [(f"Item{r}", [f"{r + 1}{c + 3}.{r}{c}" for c in range(COLS)]) for r in range(8)]
+
+# input 1: a table whose labelled rows include integer progressions
+MIXED_ROWS = [
+    ("GDP growth", ["2.1", "2.4", "1.9", "3.0"]),
+    ("Unemployment", ["4.6", "4.5", "4.7", "4.4"]),
+    ("Target rate bp", ["25", "50", "75", "100"]),
+    ("Meetings held", ["2", "4", "6", "8"]),
+    ("Maturity yrs", ["1", "3", "5", "7"]),
+    ("Core PCE", ["1.8", "2.2", "2.0", "2.3"]),
+    ("Payrolls th", ["100", "200", "300", "400"]),
+    ("CPI", ["2.9", "3.1", "2.7", "3.3"]),
+    ("Housing starts", ["1.31", "1.27", "1.42", "1.38"]),
+    ("Vacancies", ["4.11", "4.02", "3.97", "4.20"]),
+]
+
+# input 2: every row a labelled progression
+TENOR_NAMES = "one two three four five six seven eight nine ten".split()
+TENOR_ROWS = [
+    (f"Tenor {n}", [str(k * m) for m in (5, 10, 15, 20)])
+    for k, n in enumerate(TENOR_NAMES, start=1)
+]
+
+# input 3: three panels, each a labelled year row plus decimal rows
+PANEL_ROWS = []
+for _p, _name in enumerate("ABC"):
+    PANEL_ROWS.append((f"Panel {_name}", [str(2001 + 4 * _p + c) for c in range(COLS)]))
+    for _r in range(3):
+        PANEL_ROWS.append(
+            (f"Series {_name}{_r}", [f"{_p + 1}{_r}.{c}{_r}{_p}" for c in range(COLS)])
+        )
 
 
 class TestAxisBandPredicate:
-    @pytest.mark.parametrize(
-        "tokens",
-        [
-            tuple(_years(1992, 2005)),
-            tuple(_years(1990, 2008, 2)),
-            tuple(_years(2000, 2007) + _years(2000, 2007)),
-            # overprinted labels repeat adjacent tokens
-            ("2000", "2000", "2001", "2002", "2002", "2003", "2004"),
-        ],
-    )
-    def test_axis_like(self, tokens):
-        assert _is_axis_tick_band(tokens)
+    @staticmethod
+    def _band(texts: list[str], pitch: float = 30.0) -> list:
+        return _tick_band(100.0, texts, pitch=pitch)
 
     @pytest.mark.parametrize(
-        "tokens",
+        "texts",
         [
-            (),
-            ("4.5", "4.6", "4.7"),  # decimals are measurements
-            ("1,000", "2,000", "3,000"),
-            ("-1", "0", "1"),
-            ("3", "17", "40", "41"),  # not equal steps
-            ("2000", "2001"),  # two terms constrain nothing
-            tuple(_years(1992, 2005)) + ("7",),  # a stray value breaks the run
+            _years(1992, 2005),
+            _years(1990, 2008, 2),
+            _years(2000, 2007) + _years(2000, 2007),
         ],
     )
-    def test_not_axis_like(self, tokens):
-        assert not _is_axis_tick_band(tokens)
+    def test_axis_like(self, texts):
+        assert _is_axis_tick_band(self._band(texts))
+
+    def test_overprinted_labels_at_the_same_x_count_once(self):
+        words = [
+            _word(110.0, 10.0, "2000"),
+            _word(110.0, 10.0, "2000"),
+            _word(130.0, 10.0, "2001"),
+            _word(150.0, 10.0, "2002"),
+            _word(150.00002, 10.0, "2002"),  # measured on p049: x0 differs by 2e-5
+        ]
+        assert _is_axis_tick_band(words)
+
+    @pytest.mark.parametrize(
+        "texts",
+        [
+            [],
+            ["4.5", "4.6", "4.7"],
+            ["1,000", "2,000", "3,000"],
+            ["-1", "0", "1"],
+            ["3", "17", "40", "41"],
+            ["2000", "2001"],
+            ["5", "10", "15", "3", "6", "9"],  # two progressions, different steps
+            ["1", "5", "9", "2", "4", "6"],
+            ["3", "6", "9", "9", "9"],  # repeats in different slots are not overprints
+            ["$100", "$200", "$300"],
+            ["5*", "10*", "15*"],
+            _years(1992, 2005) + ["7"],
+        ],
+    )
+    def test_not_axis_like(self, texts):
+        assert not _is_axis_tick_band(self._band(texts))
+
+    def test_a_labelled_row_is_not_an_axis_band(self):
+        assert not _is_axis_tick_band(
+            _row_words(100.0, "Payrolls th", ["100", "200", "300", "400"])
+        )
 
 
 class TestCompleteReadingNotTruncated:
     def test_complete_reading_with_chart_axes_is_not_truncated(self):
-        words = _table_words() + _chart_words()
-        assert table_truncated(_markdown(), words) is False
+        words = _page(DECIMAL_ROWS) + _chart_words()
+        assert table_truncated(_markdown(DECIMAL_ROWS), words) is False
 
     def test_baseline_without_charts_is_not_truncated(self):
-        assert table_truncated(_markdown(), _table_words()) is False
+        assert table_truncated(_markdown(DECIMAL_ROWS), _page(DECIMAL_ROWS)) is False
 
 
 class TestRealTruncationStillCaught:
     def test_tail_cut_with_chart_axes_is_truncated(self):
-        words = _table_words() + _chart_words()
-        assert table_truncated(_markdown(skip={ROWS - 2, ROWS - 1}), words) is True
+        words = _page(DECIMAL_ROWS) + _chart_words()
+        assert table_truncated(_markdown(DECIMAL_ROWS, skip={6, 7}), words) is True
 
     def test_middle_cut_with_chart_axes_is_truncated(self):
-        words = _table_words() + _chart_words()
-        assert table_truncated(_markdown(skip={3, 4}), words) is True
+        words = _page(DECIMAL_ROWS) + _chart_words()
+        assert table_truncated(_markdown(DECIMAL_ROWS, skip={3, 4}), words) is True
 
-    def test_cut_is_caught_with_and_without_charts_alike(self):
-        """The difference under test: adding chart axis bands changes nothing."""
-        cut = _markdown(skip={3, 4})
-        assert table_truncated(cut, _table_words()) == table_truncated(
-            cut, _table_words() + _chart_words()
+    @pytest.mark.parametrize("skip", [{2, 3}, {0, 1}, {7, 8, 9}, {0, 1, 5, 7, 8}])
+    def test_input1_labelled_progression_rows(self, skip, monkeypatch):
+        words = _page(MIXED_ROWS)
+        active, off = _verdicts(_markdown(MIXED_ROWS, skip), words, monkeypatch)
+        assert active == off is True
+
+    def test_input2_all_rows_progressions(self, monkeypatch):
+        words = _page(TENOR_ROWS)
+        keep = set(range(1, 10))
+        active, off = _verdicts(_markdown(TENOR_ROWS, keep), words, monkeypatch)
+        assert active == off is True
+
+    @pytest.mark.parametrize("skip", [{1, 2}, {1, 2, 3}, {8, 9, 10, 11}])
+    def test_input3_labelled_year_rows(self, skip, monkeypatch):
+        words = _page(PANEL_ROWS)
+        active, off = _verdicts(_markdown(PANEL_ROWS, skip), words, monkeypatch)
+        assert active == off is True
+
+    @pytest.mark.parametrize("skip", [{1, 2, 3}, {0, 3, 5, 6}])
+    def test_input4_candidate_wrote_axis_rows_as_table_rows(self, skip, monkeypatch):
+        """A chart transcribed as a table with the years as a body row: the
+        candidate counts those rows, so the native bands must count too."""
+        words = _page(DECIMAL_ROWS)
+        for i, y in enumerate((400.0, 500.0, 600.0)):
+            words += _tick_band(y, _years(2000, 2007))
+        axis_rows = [(f"chart {i}, x-axis", _years(2000, 2007)) for i in range(3)]
+        md = _markdown(DECIMAL_ROWS, skip)
+        md += "\n\n| Chart | " + " | ".join(f"c{i}" for i in range(8)) + " |\n"
+        md += "| --- |" + " --- |" * 8 + "\n"
+        md += "\n".join("| " + " | ".join([lab, *vals]) + " |" for lab, vals in axis_rows)
+        active, off = _verdicts(md, words, monkeypatch)
+        assert active == off is True
+
+    def test_cut_verdict_is_independent_of_chart_axes(self):
+        cut = _markdown(DECIMAL_ROWS, skip={3, 4})
+        assert table_truncated(cut, _page(DECIMAL_ROWS)) == table_truncated(
+            cut, _page(DECIMAL_ROWS) + _chart_words()
         )
