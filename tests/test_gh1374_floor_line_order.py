@@ -250,6 +250,207 @@ CONTINUATIONS = [
 ]
 
 
+#: Round 2 (second review of PR #1376): digit-bearing rows after a gap just over one pitch.
+#: The pitch rule alone released them (00cbe400); the walk now also continues over a band that
+#: carries a digit. Each is (id, box, drawn rows, grid rows, tokens that must not ship).
+GAP_INPUTS = [
+    (
+        "second_row_17pt_after",  # pitch 16: a digit row 17 pt after the label row
+        GRID_BOX,
+        None,
+        [
+            ((76, 176), "Pension liabilities"),
+            ((76, 193), "Total pension obligation"),
+            ((300, 193), "12 million dollars"),
+        ],
+        ("Pension liabilities", "Total pension obligation", "12 million dollars"),
+    ),
+    (
+        "rows_20pt_after",  # both digit rows ship on 00cbe400
+        GRID_BOX,
+        None,
+        [
+            ((76, 196), "Total pension obligation"),
+            ((300, 196), "12 million dollars"),
+            ((76, 216), "Plans are"),
+            ((300, 216), "80 percent funded"),
+        ],
+        ("Total pension obligation", "12 million dollars", "80 percent funded"),
+    ),
+]
+
+
+@pytest.mark.parametrize("name,box,grid,rows,tokens", GAP_INPUTS, ids=[c[0] for c in GAP_INPUTS])
+def test_a_digit_bearing_row_after_a_gap_just_over_one_pitch_is_withheld(
+    tmp_path: Path, name, box, grid, rows, tokens
+) -> None:
+    """DIFFERENCE: the same page without the rows ships the same prose; with them, no row word
+    ships. The gap is larger than the table's pitch, so only the digit clause withholds them."""
+
+    def draw(page) -> None:
+        for (x, y), text in rows:
+            page.insert_text((x, y), text, fontsize=9)
+
+    _s, with_rows = _build(tmp_path, _with(draw, note=False), [box], name=f"{name}.pdf")
+    _s2, without = _build(tmp_path, _with(lambda pg: None, note=False), [box], name="b.pdf")
+    _reaches_line_order(with_rows)
+    body = _floor(with_rows)
+    assert has_line_order_notice(body, 1)
+    for token in tokens:
+        assert token not in body, f"{name}: {token!r} shipped"
+    assert _own_lines(body) == _own_lines(_floor(without)) != []
+
+
+def test_a_tight_box_of_two_line_cells_does_not_release_rows_34pt_below(tmp_path: Path) -> None:
+    """A box whose only band pair is a two-line cell row (pitch 11 pt): the table's next rows lie
+    34 pt below. The digit clause withholds them. DIFFERENCE against the same page without."""
+    tight = (60.0, 118.0, 560.0, 146.0)
+
+    def draw(page, *, rows: bool) -> None:
+        page.insert_text((72, 60), "\n".join(LEFT), fontsize=9)
+        for c, (a, b) in enumerate((("2.6", "claims"), ("4.1", "assets"), ("3.3", "income"))):
+            page.insert_text((76 + c * 150, 130), a, fontsize=9)
+            page.insert_text((76 + c * 150, 141), b, fontsize=9)
+        if rows:
+            page.insert_text((76, 175), "Pension obligation", fontsize=9)
+            page.insert_text((300, 175), "12 million dollars", fontsize=9)
+        page.insert_text((72, 300), TAIL_LEFT, fontsize=9)
+        for i, text in enumerate(RIGHT):
+            page.insert_text((330, 60 + i * 16), text, fontsize=9)
+        page.insert_text((330, 300), TAIL_RIGHT, fontsize=9)
+
+    _s, with_rows = _build(tmp_path, lambda pg: draw(pg, rows=True), [tight], name="t.pdf")
+    _s2, without = _build(tmp_path, lambda pg: draw(pg, rows=False), [tight], name="n.pdf")
+    _reaches_line_order(with_rows)
+    body = _floor(with_rows)
+    assert has_line_order_notice(body, 1)
+    assert "12 million dollars" not in body and "Pension obligation" not in body
+    assert _own_lines(body) == _own_lines(_floor(without)) != []
+
+
+def test_a_smaller_font_continuation_row_does_not_slip_past_the_pitch(tmp_path: Path) -> None:
+    """A continuation row in 6 pt type under a table of 9 pt type at 9 pt row pitch: the smaller type
+    shifts the band centres by about a point, which the pitch alone does not absorb (00cbe400
+    shipped the total row). DIFFERENCE against the same page without the rows."""
+    box = (60.0, 118.0, 560.0, 149.0)
+
+    def draw(page, *, rows: bool) -> None:
+        page.insert_text((72, 60), "\n".join(LEFT), fontsize=9)
+        for r, row in enumerate(GRID):
+            for c, cell in enumerate(row[:3]):
+                page.insert_text((76 + c * 150, 130 + r * 9), cell, fontsize=9)
+        if rows:
+            page.insert_text((76, 156), "Total pension obligation", fontsize=6)
+            page.insert_text((300, 156), "12 million dollars", fontsize=6)
+        page.insert_text((72, 300), TAIL_LEFT, fontsize=9)
+        for i, text in enumerate(RIGHT):
+            page.insert_text((330, 60 + i * 16), text, fontsize=9)
+        page.insert_text((330, 300), TAIL_RIGHT, fontsize=9)
+
+    _s, with_rows = _build(tmp_path, lambda pg: draw(pg, rows=True), [box], name="s.pdf")
+    _s2, without = _build(tmp_path, lambda pg: draw(pg, rows=False), [box], name="n.pdf")
+    _reaches_line_order(with_rows)
+    body = _floor(with_rows)
+    assert has_line_order_notice(body, 1)
+    for token in ("Total pension obligation", "12 million dollars"):
+        assert token not in body, f"{token!r} shipped"
+    assert _own_lines(body) == _own_lines(_floor(without)) != []
+
+
+def test_the_walk_goes_upward_too(tmp_path: Path) -> None:
+    """A digit-free header row printed ABOVE a box that starts at the table's second row, at the
+    table's own row pitch, is withheld. DIFFERENCE against the same page without the header."""
+    box = (60.0, 138.0, 560.0, 184.0)
+
+    def draw(page, *, header: bool) -> None:
+        page.insert_text((72, 60), "\n".join(LEFT), fontsize=9)
+        for r, y in enumerate((146, 162, 178)):
+            page.insert_text((76, y), ("Real GDP", "Final sales", "Exports")[r], fontsize=9)
+            page.insert_text((300, y), ("2.6", "2.4", "1.9")[r], fontsize=9)
+        if header:
+            page.insert_text((76, 130), "Item Group Class", fontsize=9)
+        page.insert_text((72, 300), TAIL_LEFT, fontsize=9)
+        for i, text in enumerate(RIGHT):
+            page.insert_text((330, 60 + i * 16), text, fontsize=9)
+        page.insert_text((330, 300), TAIL_RIGHT, fontsize=9)
+
+    _s, with_h = _build(tmp_path, lambda pg: draw(pg, header=True), [box], name="h.pdf")
+    _s2, without = _build(tmp_path, lambda pg: draw(pg, header=False), [box], name="n.pdf")
+    _reaches_line_order(with_h)
+    body = _floor(with_h)
+    assert has_line_order_notice(body, 1)
+    assert "Item Group Class" not in body
+    assert _own_lines(body) == _own_lines(_floor(without)) != []
+
+
+def test_the_pitch_is_the_widest_row_spacing_not_the_narrowest(tmp_path: Path) -> None:
+    """A table whose rows are 10 pt and 20 pt apart has a pitch of 20: a digit-free row 16 pt
+    under it is table. Were the pitch the narrowest gap (10) the row would ship. DIFFERENCE
+    against the same row 26 pt under it (further than the widest spacing), which ships."""
+    box = (60.0, 118.0, 560.0, 165.0)
+
+    def draw(page, *, row_y: int) -> None:
+        page.insert_text((72, 60), "\n".join(LEFT), fontsize=9)
+        for y, label, value in (
+            (130, "Real GDP", "2.6"),
+            (140, "Final sales", "2.4"),
+            (160, "Exports", "1.9"),
+        ):
+            page.insert_text((76, y), label, fontsize=9)
+            page.insert_text((300, y), value, fontsize=9)
+        page.insert_text((76, row_y), "Pension liabilities", fontsize=9)
+        page.insert_text((72, 300), TAIL_LEFT, fontsize=9)
+        for i, text in enumerate(RIGHT):
+            page.insert_text((330, 60 + i * 16), text, fontsize=9)
+        page.insert_text((330, 300), TAIL_RIGHT, fontsize=9)
+
+    _s, near = _build(tmp_path, lambda pg: draw(pg, row_y=176), [box], name="near.pdf")
+    _s2, far = _build(tmp_path, lambda pg: draw(pg, row_y=186), [box], name="far.pdf")
+    assert "Pension liabilities" not in _floor(near)
+    assert "Pension liabilities" in _floor(far)
+
+
+def test_a_row_at_the_pitch_up_to_float_noise_is_still_within_it() -> None:
+    """``_PITCH_FLOAT_REL_TOL`` is load-bearing: a band whose centre lies 1e-5 of a pitch beyond
+    the widest gap (float32 coordinate noise) is still the table's next row. Synthetic words,
+    one per band; a mutant with the tolerance at zero fails this."""
+
+    def word(cy: float, block: int):
+        return (10.0, cy - 1.0, 40.0, cy + 1.0, "label", block, 0, 0)
+
+    pitch = 16.0
+    centres = [100.0, 116.0, 116.0 + pitch + pitch * 1e-5]
+    words = [word(c, i) for i, c in enumerate(centres)]
+    lines = [[w] for w in words]
+    index = {(w[5], w[6]): i for i, w in enumerate(words)}
+    box = (0.0, 90.0, 100.0, 120.0)  # holds the first two centres only
+    walked = M._table_continuation_lines(words, lines, index, [box])
+    assert walked == {2}, walked
+    farther = [100.0, 116.0, 116.0 + pitch * 1.5]
+    words = [word(c, i) for i, c in enumerate(farther)]
+    lines = [[w] for w in words]
+    index = {(w[5], w[6]): i for i, w in enumerate(words)}
+    assert M._table_continuation_lines(words, lines, index, [box]) == set()
+
+
+def test_a_digit_free_band_beyond_one_pitch_ends_the_walk(tmp_path: Path) -> None:
+    """The remaining case, stated in the docstring: a digit-free band further than a pitch ends
+    the walk, so the rows after it ship. DIFFERENCE against the same row placed within a pitch."""
+
+    def after_gap(page) -> None:
+        page.insert_text((76, 196), "A separating sentence without any figures.", fontsize=9)
+        page.insert_text((76, 214), "Pension liabilities", fontsize=9)
+
+    def within(page) -> None:
+        page.insert_text((76, 176), "A separating sentence without any figures.", fontsize=9)
+        page.insert_text((76, 190), "Pension liabilities", fontsize=9)
+
+    _s, far = _build(tmp_path, _with(after_gap, note=False), [GRID_BOX], name="far.pdf")
+    _s2, near = _build(tmp_path, _with(within, note=False), [GRID_BOX], name="near.pdf")
+    assert "Pension liabilities" in _floor(far)
+    assert "Pension liabilities" not in _floor(near)
+
+
 @pytest.mark.parametrize("name,rows,tokens", CONTINUATIONS, ids=[c[0] for c in CONTINUATIONS])
 def test_a_table_continuing_at_row_pitch_ships_none_of_its_rows(
     tmp_path: Path, name: str, rows, tokens

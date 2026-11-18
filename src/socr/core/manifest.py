@@ -3442,19 +3442,22 @@ def _native_order_boxes(p) -> list[tuple[float, float, float, float]] | None:
 
 
 def _table_continuation_lines(words, lines, index, boxes) -> set[int] | None:
-    """#1374: the layer lines that continue a detected table past its box, by ROW PITCH.
+    """#1374: the layer lines that continue a detected table past its box.
 
-    The criterion is geometric and never reads what a row contains. For each box, the bands
-    with a word centred inside it give the table's own row pitch: the LARGEST gap between
-    consecutive such bands' y-centres (its widest printed row spacing, so a table with an
-    irregular row is not under-measured). From the box's last band and from its first, go
-    outward band by band: a band that has a line overlapping the box's x-span is withheld
-    (only those lines) while its y-centre lies within one pitch of the previous WITHHELD
-    band's; the walk stops at the first such band that lies further. A band with no line in
+    The walk continues while the next band lies within the table's ROW PITCH **or** carries a
+    printed digit; that is a superset of both rules the reviews compared (the digit walk of the
+    first revision, the pitch walk of the second), so it cannot release a row either closed.
+    For each box, the bands with a word centred inside it give the pitch: the LARGEST gap
+    between consecutive such bands' y-centres (its widest printed row spacing). From the box's
+    last band and from its first, go outward band by band: a band that has a line overlapping
+    the box's x-span is withheld (only those lines) while its y-centre lies within one pitch of
+    the previous WITHHELD band's, or while it carries a digit in those lines; the walk stops at
+    the first such band that is both further than a pitch and digit-free. A band with no line in
     the x-span (another column's sentence) is skipped: it neither stops the walk nor counts as
     the previous band. Label-only rows, word cells, ``n.a.`` cells, memo rows and the word that
-    sits between two boxes are all withheld by this, whatever they say. Footnotes set tight
-    under a table are withheld too (the safe side).
+    sits between two boxes are withheld by the pitch; a digit-bearing row after a gap larger than
+    one pitch is withheld by the digit clause. Footnotes set tight under a table, and digit-bearing
+    text under it, are withheld too (the safe side).
 
     ``None`` means "abstain" (the caller ships the whole-page marker): a box with fewer than two
     bands centred inside it has no pitch to derive, and none is invented.
@@ -3462,12 +3465,14 @@ def _table_continuation_lines(words, lines, index, boxes) -> set[int] | None:
     What can still ship (#1374; the history is in
     ``docs/log/2026-11-14_1261-table-only-withhold.md``, where a pitch rule was never tried in
     rounds 1-5, and in ``_row_shape_reconciliation``'s docstring, which records that a pitch
-    threshold cannot tell a table's own internal section gap from its end): a table
-    continuation beyond a vertical gap larger than the table's own widest row spacing, and an
-    unboxed table far from every box. Both ship under the page's banner, notice and table
-    marker, exactly as they do on a page the bands body recovers.
+    threshold cannot tell a table's own internal section gap from its end): a digit-FREE band
+    further than one pitch from the last withheld band ends the walk, and every row after it
+    ships, digit-bearing or not (a continuation after a gap and a digit-free separator; the
+    first such row after the stop is the first that can ship); and an unboxed table far from every
+    box. Both ship under the page's banner, notice and table marker, exactly as they do on a
+    page the bands body recovers.
     """
-    from socr.tables.row_corroboration import cluster_band_words
+    from socr.tables.row_corroboration import bears_printed_numeral, cluster_band_words
 
     bands = cluster_band_words(words)
     band_members = [{index[(w[5], w[6])] for w in band} for band in bands]
@@ -3493,8 +3498,10 @@ def _table_continuation_lines(words, lines, index, boxes) -> set[int] | None:
                 span = _span_lines(k)
                 if not span:
                     continue
-                if abs(centres[k] - last) > pitch and not math.isclose(
-                    abs(centres[k] - last), pitch, rel_tol=_PITCH_FLOAT_REL_TOL
+                gap = abs(centres[k] - last)
+                further = gap > pitch and not math.isclose(gap, pitch, rel_tol=_PITCH_FLOAT_REL_TOL)
+                if further and not any(
+                    bears_printed_numeral(str(w[4])) for i in span for w in lines[i]
                 ):
                     break
                 out.update(span)
