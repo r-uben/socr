@@ -80,6 +80,16 @@ logger = logging.getLogger(__name__)
 ENGINE_NAME = "table_blind_cell_adjudicator"
 
 
+#: How many times the adjudicator call is repeated after a transient TRANSPORT
+#: failure (HTTP 5xx, timeout, connection error; #1365). One retry: a gateway
+#: 504 on an otherwise healthy daemon usually clears at once, and a second
+#: failure means the outage is real and the page latches for a later run as
+#: before. Applied only when the call's listed price is zero (see
+#: ``evaluate_cell_guard``): a retry is not metered, so it must never be a
+#: second paid request.
+GUARD_TRANSPORT_RETRIES = 1
+
+
 class GuardDisposition(str, Enum):
     """What the chain established. Closed set; every value is fail-closed
     except the two that explicitly clear the table."""
@@ -123,6 +133,9 @@ class CellGuardDecision:
     detail: str = ""
     #: The adjudicator's raw result, kept for the audit trail when it ran.
     blind_result: BlindCellResult | None = field(default=None, compare=False)
+    #: Transport retries actually made (#1365). 0 on every ordinary path; the
+    #: caller records it in the audit only when positive.
+    transport_retries: int = 0
 
     @property
     def cleared(self) -> bool:
@@ -227,6 +240,34 @@ def _record_call(
     )
 
 
+def _call_adjudicator(
+    adjudicator: CellAdjudicator,
+    crop_path: Path | None,
+    refs: Sequence[str],
+    config: PipelineConfig,
+) -> BlindCellResult:
+    """One adjudicator call; an exception becomes a failed ``BlindCellResult``."""
+    try:
+        return adjudicator(crop_path if crop_path is None else Path(crop_path), refs)
+    except Exception as exc:
+        from socr.judge.table_verdict import is_availability_exception, is_transient_transport_error
+
+        logger.warning(
+            "blind-cell adjudicator raised %s: %s", type(exc).__name__, exc, exc_info=True
+        )
+        return BlindCellResult(
+            rung=getattr(
+                adjudicator,
+                "rung_id",
+                adjudicator_rung_id(config.table_judge_adjudicator_model),
+            ),
+            ok=False,
+            error=f"{type(exc).__name__}: {exc}",
+            unavailable=is_availability_exception(exc),
+            transient_transport=is_transient_transport_error(exc),
+        )
+
+
 def evaluate_cell_guard(
     *,
     state: DocumentState,
@@ -320,23 +361,17 @@ def evaluate_cell_guard(
             detail=refusal_reason,
         )
 
-    try:
-        result = adjudicator(crop_path if crop_path is None else Path(crop_path), refs)
-    except Exception as exc:
-        from socr.judge.table_verdict import is_availability_exception
-
-        logger.warning(
-            "blind-cell adjudicator raised %s: %s", type(exc).__name__, exc, exc_info=True
-        )
-        result = BlindCellResult(
-            rung=getattr(
-                adjudicator,
-                "rung_id",
-                adjudicator_rung_id(config.table_judge_adjudicator_model),
-            ),
-            ok=False,
-            error=f"{type(exc).__name__}: {exc}",
-            unavailable=is_availability_exception(exc),
+    # #1365: a transient transport failure is retried, never a paid call twice.
+    max_retries = GUARD_TRANSPORT_RETRIES if call_cost == 0 else 0
+    transport_retries = 0
+    while True:
+        result = _call_adjudicator(adjudicator, crop_path, refs, config)
+        if result.ok or not result.transient_transport or transport_retries >= max_retries:
+            break
+        transport_retries += 1
+        logger.info(
+            "blind-cell adjudicator hit a transient transport error (%s); retrying once",
+            result.error,
         )
     # The call was ATTEMPTED, so it is metered whatever it answered -- an
     # outage still spends wall clock and, on a subscription, a request.
@@ -351,6 +386,7 @@ def evaluate_cell_guard(
             refusal=bool(result.refusal),
             detail=result.error,
             blind_result=result,
+            transport_retries=transport_retries,
         )
 
     # Cold review round 2, N2. A cell the blind reader reported it could not
@@ -367,6 +403,7 @@ def evaluate_cell_guard(
             disposition=GuardDisposition.NOT_CLEARED,
             detail=f"blind transcription reported these cells unreadable: {unreadable}",
             blind_result=result,
+            transport_retries=transport_retries,
         )
     missing = [ref for ref in refs if ref not in result.tokens]
     if missing:
@@ -378,6 +415,7 @@ def evaluate_cell_guard(
             disposition=GuardDisposition.NOT_CLEARED,
             detail=f"blind transcription returned no reading for: {missing}",
             blind_result=result,
+            transport_retries=transport_retries,
         )
     disagreed = [
         ref
@@ -394,6 +432,7 @@ def evaluate_cell_guard(
             disposition=GuardDisposition.MISMATCHED,
             detail=f"blind transcription disagreed on {disagreed}",
             blind_result=result,
+            transport_retries=transport_retries,
         )
     return CellGuardDecision(
         geometry_evidence=geometry_evidence,
@@ -401,4 +440,5 @@ def evaluate_cell_guard(
         disposition=GuardDisposition.VERIFIED_BY_BLIND_CELL_TRANSCRIPTION,
         detail=f"blind transcription agreed on every doubted cell ({len(refs)})",
         blind_result=result,
+        transport_retries=transport_retries,
     )

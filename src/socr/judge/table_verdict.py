@@ -618,6 +618,34 @@ def is_availability_exception(exc: BaseException) -> bool:
     return isinstance(exc, _AVAILABILITY_EXCEPTIONS)
 
 
+def is_transient_transport_error(exc: BaseException) -> bool:
+    """Whether ``exc`` is a transport failure worth ONE immediate retry (#1365).
+
+    Decided from the exception TYPE and HTTP status code only, never from the
+    message. Narrower than :func:`is_availability_exception` on purpose: that
+    function answers "is the rung unreachable" (and latches the page); this one
+    answers "would the identical call plausibly succeed a moment later".
+
+    * HTTP 5xx: the server or a gateway in front of it failed.
+    * ``httpx.TimeoutException`` (connect, read, write, pool) and the builtin
+      ``TimeoutError``, EXCEPT ``TotalDeadlineExceeded``: that is the wall-clock
+      deadline this pipeline enforces itself, and retrying it would extend it.
+    * ``httpx.NetworkError`` and the builtin ``ConnectionError``.
+
+    4xx (including 401/403/429 refusals), a malformed body and every other
+    exception are not transient.
+    """
+    from socr.core.ollama_utils import TotalDeadlineExceeded
+
+    if isinstance(exc, TotalDeadlineExceeded):
+        return False
+    if isinstance(exc, httpx.HTTPStatusError):
+        return _SERVER_ERROR_FLOOR <= exc.response.status_code <= _SERVER_ERROR_CEILING
+    return isinstance(
+        exc, (httpx.TimeoutException, httpx.NetworkError, ConnectionError, TimeoutError)
+    )
+
+
 class RungCallable(Protocol):
     """Anything that judges one table crop and returns a ``RungResult``.
 

@@ -10706,6 +10706,12 @@ class UnifiedPipeline:
             "guard_refusal": decision.refusal,
             "adjudicator_suppressed": suppressed,
             "requested_refs": list(refs),
+            # #1365: present only when the adjudicator call was retried.
+            **(
+                {"guard_transport_retries": decision.transport_retries}
+                if decision.transport_retries
+                else {}
+            ),
         }
         if decision.unavailable:
             guard_unavailable_kinds.add(RUNG_KIND_CELL_ADJUDICATOR)
