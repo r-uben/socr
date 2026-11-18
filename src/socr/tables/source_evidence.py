@@ -266,6 +266,12 @@ class TableTokens:
     content: frozenset[str] = field(default_factory=frozenset)
     has_numeric: bool = False
     is_alpha_only: bool = False
+    #: #1355: numbers that sit inside a HEADER cell which is not itself a bare number
+    #: (``2001 (Percent change<sup>1</sup>)``), tokenised by ``plain_text_tokens``. NOT part of
+    #: ``numeric``, so the witness check never sees them; only the winner-containment rule counts
+    #: them, as carried by the table. Header row only: a data row's label cell must not be able to
+    #: hide a dropped value.
+    header_label_numeric: Counter = field(default_factory=Counter)
 
 
 @dataclass(frozen=True)
@@ -810,6 +816,7 @@ def collect_table_tokens(markdown: str) -> TableTokens | None:
 
     raw_numeric: list[str] = []
     raw_content: set[str] = set()
+    header_label_numeric: Counter = Counter()
     for block in blocks:
         for row_idx, row in enumerate(block.grid):
             for cell in row:
@@ -821,6 +828,8 @@ def collect_table_tokens(markdown: str) -> TableTokens | None:
                 normalized = _normalize_cell(cell)
                 if is_numeric_token(normalized):
                     raw_numeric.append(normalized)
+                elif row_idx == 0:
+                    header_label_numeric.update(plain_text_tokens(cell)[0])
                 # Content-label tokens come from data rows only (row 0 is the
                 # header).  Generic header words ("Category", "Description") are
                 # not reliable hallucination signals and rarely appear in OCR
@@ -841,6 +850,7 @@ def collect_table_tokens(markdown: str) -> TableTokens | None:
         content=frozenset(raw_content),
         has_numeric=has_numeric,
         is_alpha_only=is_alpha_only,
+        header_label_numeric=header_label_numeric,
     )
 
 

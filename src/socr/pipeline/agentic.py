@@ -248,7 +248,10 @@ def winner_accounts_for_marked_tables(winner: PageOutput, marked: PageOutput) ->
     if winner_table is None:
         return False
     for tok, need in supported.items():
-        if winner_table.numeric.get(tok, 0) < need:
+        # #1355: a header cell that carries the number inside a label (``2001 (Percent
+        # change<sup>1</sup>)``) still carries it. Header row of the winner's own table blocks only.
+        carried = winner_table.numeric.get(tok, 0) + winner_table.header_label_numeric.get(tok, 0)
+        if carried < need:
             return False
     return True
 
