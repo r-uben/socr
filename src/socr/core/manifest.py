@@ -3390,6 +3390,28 @@ def _native_text_line_body(p, page_num: int, *, marker_line: str, png_ref: str) 
 _LINE_WITHHELD_MARK = "[line withheld]"
 _LINES_WITHHELD_MARK = "[{n} lines withheld]"
 
+#: #1374 (owner ruling): the notice a LINE-ORDER body carries under its banner. The bands body
+#: of ``native_prose_floor_text`` could not be shown to follow the page's reading order, so the
+#: words ship in the order the PDF text layer stores them. It starts ``[page N`` like the banner,
+#: so ``_RECOVERED_FURNITURE_RE`` treats it as furniture (never part of the order check) and a
+#: restore recognises the body by its banner above it. Socr writes it; no model attempt can.
+LINE_ORDER_NOTICE = (
+    "[page {page_num}: the band reading order of this page could not be confirmed, so the words "
+    "below follow the order the PDF text layer stores them; the table region is still withheld]"
+)
+#: Audit note recorded on the rebuilt output, so the line-order body is visible in the page
+#: sidecar and not only in the bytes (#1374).
+FLOOR_LINE_ORDER_NOTE = (
+    "floor_line_order_body: the band reading order of this page could not be confirmed, so the "
+    "recovered words ship in the order the PDF text layer stores them (table regions withheld)"
+)
+
+
+def has_line_order_notice(text: str, page_num: int) -> bool:
+    """Whether *text* carries this page's line-order notice line (#1374)."""
+    notice = LINE_ORDER_NOTICE.format(page_num=page_num)
+    return any(line.strip() == notice for line in (text or "").splitlines())
+
 
 def _native_order_boxes(p) -> list[tuple[float, float, float, float]] | None:
     """The page's detected boxes as float rectangles, or ``None`` when one cannot be read.
@@ -3413,7 +3435,54 @@ def _native_order_boxes(p) -> list[tuple[float, float, float, float]] | None:
     return boxes
 
 
-def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str) -> str | None:
+def _table_continuation_lines(words, lines, index, boxes, texts) -> set[int]:
+    """#1374: the layer lines that continue a detected table past its box (the span walk).
+
+    From the first and the last baseline band that has a word centred inside a box, go outward
+    band by band. A band's lines that overlap the box's x-span are continuation while any of
+    them carries a printed digit; the walk stops at the first band whose lines in that span
+    carry none, or that has none. Same banding as the floor (``cluster_band_words``).
+    """
+    from socr.tables.row_corroboration import bears_printed_numeral, cluster_band_words
+
+    bands = cluster_band_words(words)
+    band_members = [{index[(w[5], w[6])] for w in band} for band in bands]
+    out: set[int] = set()
+    for box in boxes:
+        inside = [k for k, band in enumerate(bands) if _band_centre_in(band, box)]
+        if not inside:
+            continue
+
+        def _span_lines(k: int, box=box) -> list[int]:
+            return [
+                i
+                for i in sorted(band_members[k])
+                if any(w[0] <= box[2] and w[2] >= box[0] for w in lines[i])
+            ]
+
+        def _walk(ks, box=box) -> None:
+            for k in ks:
+                span = _span_lines(k)
+                if not any(bears_printed_numeral(str(w[4])) for i in span for w in lines[i]):
+                    return
+                out.update(span)
+
+        _walk(range(max(inside) + 1, len(bands)))
+        _walk(range(min(inside) - 1, -1, -1))
+    return out
+
+
+def _band_centre_in(band, box) -> bool:
+    for w in band:
+        cx, cy = (w[0] + w[2]) / 2.0, (w[1] + w[3]) / 2.0
+        if box[0] <= cx <= box[2] and box[1] <= cy <= box[3]:
+            return True
+    return False
+
+
+def _native_order_prose_body(
+    p, page_num: int, *, marker_line: str, png_ref: str, table_span: bool = True
+) -> str | None:
     """#1261: the words the geometry floor would ship, in the text layer's OWN line order.
 
     ``native_prose_floor_text`` clusters words by baseline, so on a page whose columns are
@@ -3444,6 +3513,19 @@ def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str
     or continuing a detected box, otherwise a neutral line-withheld mark; the page carries the
     table marker at least once. A paragraph breaks where the layer block changes. Returns None
     when nothing ships or the shipped text is not a trusted layer.
+
+    #1374: ``table_span=False`` is the LINE-ORDER body, tried only when this body (with the
+    table span) and the bands body have both failed. The span rule withholds every line whose
+    x-range overlaps a box, so a full-width table box withholds the whole page and the body
+    abstains (measured on the 114 order-gate pages of the 156-document run: no line ships on
+    any of them). Without the span rule a line ships when it is outside every box (no word
+    overlapping a box at all: a clipped glyph is withheld, not shipped) and the continuation
+    walk does not reach it: from each box's first and last band the walk goes outward band by
+    band and withholds the lines of a band that overlap the box's x-span while any of them
+    carries a printed digit, stopping at the first band whose lines in that span carry none (a
+    clipped box's ruled final row and the numbered notes under a grid go; a numeral-free
+    continuation does not, as in the bands body). The numerals rule, the band rule, table
+    syntax and the two-letter rule are unchanged, and the notice line follows the banner.
     """
     from socr.core.born_digital import text_layer_trusted
     from socr.tables.reconcile import table_syntax_line_indices
@@ -3489,6 +3571,9 @@ def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str
         for i, line in enumerate(lines)
     ]
 
+    def _overlaps_box(w, box) -> bool:
+        return min(w[2], box[2]) > max(w[0], box[0]) and min(w[3], box[3]) > max(w[1], box[1])
+
     box_span: set[int] = set()
     for box in boxes:
         for i, line in enumerate(lines):
@@ -3498,7 +3583,21 @@ def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str
     for members in band_lines:
         if any(numerals[i] for i in members):
             band_span.update(members)
-    continuation = box_span | band_span
+    if table_span:
+        continuation = box_span | band_span
+    else:
+        # #1374: the leak guard of the line-order body. No line holding a word that overlaps a
+        # detected box ships, whatever its band says: a word whose centre is outside the box
+        # but whose glyph box crosses its edge is not "inside" for ``_band_meets_a_box`` and
+        # would otherwise ship from a box the floor withholds.
+        edge = {
+            i
+            for i, line in enumerate(lines)
+            if any(_overlaps_box(w, b) for w in line for b in boxes)
+        }
+        continuation = (
+            band_span | edge | _table_continuation_lines(words, lines, index, boxes, texts)
+        )
     ships = [base_ok[i] and i not in continuation for i in range(len(lines))]
     if not any(ships) or not text_layer_trusted("\n".join(t for t, ok in zip(texts, ships) if ok)):
         return None
@@ -3509,6 +3608,8 @@ def _native_order_prose_body(p, page_num: int, *, marker_line: str, png_ref: str
     ]
 
     blocks = [prose_recovered_flag(page_num, born_digital=True, keep_sentences=True)]
+    if not table_span:
+        blocks.append(LINE_ORDER_NOTICE.format(page_num=page_num))
     if png_ref:
         blocks.append(png_ref)
     page_image = page_image_link(png_ref)
@@ -3998,6 +4099,15 @@ def table_floor_text_for_source(
                 )
                 if in_order and _prose_follows_native_order(in_order, native_text):
                     return in_order
+                # #1374 (owner ruling): the band order cannot be confirmed, so the words ship
+                # in the order the PDF layer stores them, every box still withheld, the page
+                # still marked, and a body that cannot satisfy the same order check keeps the
+                # whole-page marker.
+                line_order = _native_order_prose_body(
+                    p, page_num, marker_line=d3_marker, png_ref=png_ref, table_span=False
+                )
+                if line_order and _prose_follows_native_order(line_order, native_text):
+                    return line_order
             return _refuse("order_gate")
         return recovered
 
@@ -7616,6 +7726,19 @@ def _apply_native_paragraphs(
     return output if text == output.text else replace(output, text=text)
 
 
+def _apply_line_order_note(output: PageOutput, page_num: int) -> PageOutput:
+    """#1374: record ``FLOOR_LINE_ORDER_NOTE`` on an output whose body is a line-order floor body.
+
+    Derived from the shipped bytes (the notice line socr's floor writes under its banner), so
+    a resume, an assemble re-finalize and the original run agree. Additive: it never clears.
+    """
+    if not has_line_order_notice(output.text or "", page_num):
+        return output
+    if FLOOR_LINE_ORDER_NOTE in (output.audit_notes or []):
+        return output
+    return replace(output, audit_notes=[*(output.audit_notes or []), FLOOR_LINE_ORDER_NOTE])
+
+
 def _recovery_facts_of_saved_body(output: PageOutput, saved_text: str, page_num: int):
     """#1155 round 4 (Argon 2): the recovery facts belong to the BYTES that ship.
 
@@ -7883,6 +8006,7 @@ def _select_and_finalize_page(
       9d. _apply_unverified_table_mark (#1048)
       9e. _apply_unaccepted_output_mark (#1129)
       9e2. _apply_damaged_layer_guard (#1306)
+      9e3. _apply_line_order_note (#1374)
       9f. _apply_verdict_marks (#1145) -- LAST, so the verdict sees the final bytes and
           every mark an earlier step already put at the top.
       10. Disposition construction from the guarded output and provenance.
@@ -7990,6 +8114,8 @@ def _select_and_finalize_page(
     # #1306 step 9e2: control bytes become U+FFFD and a hidden footnote duplicate goes, BEFORE
     # the verdict reads the bytes, so the words check and the control-byte clause see what ships.
     output = _apply_damaged_layer_guard(output, p)
+    # #1374 step 9e3: a line-order floor body is recorded from its own bytes (additive).
+    output = _apply_line_order_note(output, page_num)
     # #1145 step 9f. A resumed page takes the verdict its original run PUBLISHED: two
     # clause inputs (``table_label_unverified``; slice 3's escalation predicate, which
     # reads ``p.attempts``) do not survive a resume, and recomputing would drop them, so
