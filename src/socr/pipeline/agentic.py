@@ -141,6 +141,10 @@ class PageDecision:
     final_output: PageOutput
     attempts: list[ProviderAttempt] = field(default_factory=list)
     accepted: bool = False
+    #: #1359: set by ``settle_scanned_table_decision`` when a table-free paid reading lifted the
+    #: scanned-table floor over an earlier disputed table; the orchestrator records it as an
+    #: audit event. ``None`` otherwise.
+    floor_lift: dict | None = None
 
     @property
     def total_cost_usd(self) -> float:
@@ -247,6 +251,82 @@ def winner_accounts_for_marked_tables(winner: PageOutput, marked: PageOutput) ->
         if winner_table.numeric.get(tok, 0) < need:
             return False
     return True
+
+
+def _disputed_table_obligations(marked: PageOutput) -> tuple[frozenset[str], frozenset[str]] | None:
+    """#1359: what a paid reading must still contain for a disputed table to be omitted.
+
+    ``(numeric tokens, content labels)``. Every numeric token of the table counts, the ones the
+    witness disputed included: on a chart page those are axis ticks the pixel reader missed, and
+    a paid reading that is faithful to the page lists them. Content labels the witness disputed
+    carry no obligation (the layout-grid placeholders of a chart-title table). A table with no
+    numeric token carries no obligation at all and returns ``None`` (review round). ``None`` when the
+    witness record is missing: a table nothing read (``table_unverifiable``), a dispute without
+    its token list, or a table the tokeniser cannot read. Without that record there is nothing to
+    measure a loss against.
+    """
+    if marked.table_unverifiable or not marked.table_disputed:
+        return None
+    if not marked.table_disputed_values:
+        return None
+    table = _collect_evidence_table_tokens(marked.text or "")
+    if table is None:
+        return None
+    if not table.numeric:
+        # A label-only table: the witness reads labels poorly (a two-row june/july table is
+        # disputed in full on a real page), so the label obligation can be empty or satisfied by
+        # page prose. Nothing numeric to measure a loss against: today's promotion decides.
+        return None
+    disputed = set(marked.table_disputed_values)
+    return frozenset(table.numeric), frozenset(c for c in table.content if c not in disputed)
+
+
+def paid_reading_keeps_disputed_table_tokens(paid: PageOutput, marked: PageOutput) -> bool:
+    """#1359: True when a table-free paid reading dropped nothing from *marked*'s table.
+
+    Set containment, not multiset: a chart's axis ticks are listed once, a table repeats them per
+    row, so counts differ on the very pages this serves, while a dropped genuine table fails the
+    set test just as well (measured, see ``docs/log/2026-11-16_1359-table-free-paid-reading.md``).
+    """
+    from socr.tables.source_evidence import plain_text_tokens
+
+    need = _disputed_table_obligations(marked)
+    if need is None:
+        return False
+    numeric, content = need
+    have_numeric, have_content = plain_text_tokens(paid.text or "")
+    return numeric <= set(have_numeric) and content <= set(have_content)
+
+
+def _table_free_paid_lift(decision: PageDecision, marked: list[ProviderAttempt]) -> dict | None:
+    """#1359: the audit evidence when *decision*'s accepted paid reading may lift the floor.
+
+    Only a PAID reading taken after a witness dispute, that the page judge accepted, that holds
+    no table at all, and that keeps every obligation of every earlier marked table. ``None``
+    otherwise, and the #1124 floor stands.
+    """
+    winner = decision.final_output
+    if not (decision.accepted and winner.paid_after_witness_dispute):
+        return None
+    if _evidence_readable_table_count(winner.text) != 0:
+        return None
+    evidence: list[dict] = []
+    for att in marked:
+        if not paid_reading_keeps_disputed_table_tokens(winner, att.output):
+            return None
+        numeric, content = _disputed_table_obligations(att.output) or (frozenset(), frozenset())
+        evidence.append(
+            {
+                "engine": att.engine.value,
+                "numeric_tokens": len(numeric),
+                "numeric_cells": sum(
+                    (_collect_evidence_table_tokens(att.output.text or "").numeric or {}).values()
+                ),
+                "content_labels": len(content),
+                "disputed_values": len(att.output.table_disputed_values),
+            }
+        )
+    return {"earlier_tables": evidence}
 
 
 class _PromotionLayerAbstainJudge:
@@ -435,6 +515,14 @@ def settle_scanned_table_decision(
         and not att.paid_after_witness_dispute
     ]
     if not marked:
+        return None
+    # #1359: the one exception to the rule below. A paid reading taken after the witness disputed
+    # the table, that the judge accepts and that holds no table, lifts the floor only when it
+    # dropped nothing from the disputed table that the page evidence can speak to.
+    lift = _table_free_paid_lift(decision, marked)
+    if lift is not None:
+        decision.final_output.paid_reading_omits_disputed_table = True
+        decision.floor_lift = lift
         return None
     # #1124: a later accept without a passed table does not lift the floor
     if decision.accepted and accepted_winner_has_passed_table(decision.final_output):
@@ -1383,6 +1471,16 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                     "verifiable": result.verifiable,
                     "passed": result.passed,
                     "cause": result.cause,
+                    # #1357: absent unless extra resolutions were read, so the
+                    # payload of every table that took the base path is unchanged.
+                    **(
+                        {
+                            "extra_resolutions": list(result.extra_resolutions),
+                            "extra_resolution_tokens": result.extra_resolution_tokens,
+                        }
+                        if result.extra_resolutions
+                        else {}
+                    ),
                 },
             )
             if no_witness:
@@ -1471,6 +1569,26 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                     f"earlier {result.corroborated_by} reading of this page"
                 ),
                 data=dict(output.table_witness_corroboration),
+            )
+
+        if result.extra_resolutions:
+            # #1357: the base-resolution reading left numbers unsupported and
+            # further resolutions supported them. A reader of the audit log must
+            # be able to tell; page status and verdict are unchanged.
+            from socr.tables.source_evidence import EXTRA_RESOLUTION_KIND
+
+            self._emit_event(
+                page_num=page_num,
+                kind=EXTRA_RESOLUTION_KIND,
+                engine=output.engine or "",
+                detail=(
+                    f"numeric tokens supported by extra resolutions "
+                    f"{list(result.extra_resolutions)} dpi: {result.extra_resolution_tokens}"
+                ),
+                data={
+                    "resolutions": list(result.extra_resolutions),
+                    "tokens_resolved": result.extra_resolution_tokens,
+                },
             )
 
         if result.content_unverified:

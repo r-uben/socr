@@ -359,6 +359,17 @@ class _AbandonedEscalation:
     started: float
 
 
+#: #1361: the audit event of the paid-reading-after-table-withhold lane. One per page the lane
+#: considered; ``data["outcome"]`` is one of ``PAID_AFTER_WITHHOLD_OUTCOMES``.
+PAID_AFTER_TABLE_WITHHOLD_KIND = "paid_reading_after_table_withhold"
+PAID_AFTER_WITHHOLD_OUTCOMES = (
+    "accepted",
+    "rejected_by_page_checks",
+    "rejected_by_table_checks",
+    "unavailable",
+    "budget_exhausted",
+)
+
 #: Audit-event kinds ``resume_restore_kinds`` replays on resume, beyond the table-ladder
 #: terminals and ``EQUATION_LANE_EVENT_KINDS``, each with why. The shared reason: a resumed
 #: page is terminal and is not re-processed, so nothing re-emits the event; the sidecar
@@ -463,6 +474,12 @@ _UNSHIPPED_FIGURE_FIELDS = (
 _UNSHIPPED_FIGURE_KIND_FIELD = "unshipped_figure_kind"
 
 _RESUME_REPLAYED: dict[str, str] = {
+    PAID_AFTER_TABLE_WITHHOLD_KIND: (
+        "#1361: emitted by _paid_reading_after_table_withhold inside the page loop, which a "
+        "terminal resumed page skips; it is the only record that the shipped reading is a paid "
+        "reader's, taken after the table checks withheld an earlier reading, and what the "
+        "earlier ladder verdicts were (they are replaced by the paid reading's own)"
+    ),
     PROVIDER_EMPTY_RESPONSE_KIND: (
         "a provider answered this page with no text; emitted by the engine call, which a "
         "terminal resumed page skips, and the run summary counts these events"
@@ -1969,6 +1986,9 @@ class UnifiedPipeline:
 
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
+        #: #1361: per page, what undoes a committed paid-after-withhold reading if a later table
+        #: gate withholds it.
+        self._paid_lane_undo: dict[int, dict] = {}
         #: #1080: preflight checks the operator ran without (``--allow-missing``),
         #: set by the CLI gate; recorded as ``ran_without`` in metadata.json.
         self.ran_without: list[str] = []
@@ -8480,6 +8500,340 @@ class UnifiedPipeline:
             logger.warning("table escalation failed on p%d (%s); keeping text", page_num, exc)
             return False, bo
 
+    def _page_had_paid_attempt(self, ps) -> bool:
+        """#1361: whether a paid reader was already tried (or billed) for this page.
+
+        Any attempt of a paid profile counts, a call that timed out or raised included, and so
+        does any recorded page spend; an UNKNOWN spend (``None``) fails closed. This is what
+        keeps the lane to at most one paid call per page across the route and this lane.
+        """
+        if getattr(ps, "page_cost_usd", 0.0) != 0.0:
+            return True
+        for att in ps.attempts:
+            prof = profile_by_id(getattr(att, "provider_id", "") or "")
+            if prof is not None and is_paid_profile(prof):
+                return True
+        return False
+
+    def _paid_reading_after_table_withhold(
+        self,
+        state: DocumentState,
+        page_num: int,
+        ps: PageState,
+        bo: PageOutput,
+        *,
+        ladder: list,
+        judge,
+        route_provider,
+        provider_timeout,
+        on_candidate,
+        table_gate,
+        doc_dir=None,
+    ) -> PageOutput:
+        """#1361: run the paid reader once on a page whose free reading's table was withheld.
+
+        Runs right after the table ladder and returns the output the page loop must use from here
+        on: the paid reading when it passes every check, else *bo* untouched.
+
+        Covers only a page whose shipped reading is a ROUTED FREE reader's (its ``provider_id``
+        names a free profile and it sits in ``ps.attempts``), the ladder (or the native
+        contradiction check) ended ``TABLE_WITHHELD``, no paid attempt was made for the page and
+        the paid reading would not be withheld again by ``_withhold_unconfirmed_table`` (a page
+        whose layer may not serve as evidence). Native-text pages, the native-table lane, chart
+        pages and pages a paid reader already read are out of scope by construction: they carry no
+        free provider reading, or are not eligible. ``--strict-local`` and ``--max-cost-per-page``
+        remove paid rungs from ``ladder``, so nothing is eligible there.
+
+        The paid reading goes through the same ``route_page`` a routed paid rung does (single-rung
+        ladder: budget skip, charge, timeout, canonical boundary and ``judge.assess``, which holds
+        the source-evidence witness and the page judge), then through the table gate. It ships
+        only if every table of it is ACCEPTED. A reading that fails any check leaves the page as
+        it was: the events the trial produced are dropped, the ladder state is restored, and only
+        this lane's own event is added. Its paid spend stays recorded (it was spent).
+        """
+        from socr.core.audit_log import AuditEvent
+        from socr.judge.table_verdict import (
+            TABLE_BINDING_ADJUDICATED_KIND,
+            TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+            TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+            TABLE_LADDER_ACCEPTED_KIND,
+            TABLE_LADDER_EVENT_KINDS,
+        )
+        from socr.pipeline.agentic import _provider_call_never_ran
+        from socr.tables.reconcile import find_table_blocks
+
+        if ps.table_ladder_disposition is not FailureMode.TABLE_WITHHELD:
+            return bo
+        if self.config.strict_local or not self.config.table_judge_ladder:
+            return bo
+        free = profile_by_id(getattr(bo, "provider_id", "") or "")
+        if (
+            free is None
+            or is_paid_profile(free)
+            or not any(a is bo for a in ps.attempts)
+            or bo.engine in ("native", "chart_asset")
+        ):
+            return bo
+        if self._page_had_paid_attempt(ps):
+            return bo
+        if not (ps.is_born_digital or layer_is_admissible_evidence(ps)):
+            return bo
+        paid = next((p for p in ladder if is_paid_profile(p) and p.supports_per_page), None)
+        if paid is None:
+            return bo
+
+        remaining = None
+        if self.config.cost_budget > 0:
+            total_cost = state.total_cost
+            remaining = (
+                0.0 if total_cost is None else max(self.config.cost_budget - total_cost, 0.0)
+            )
+        _assessment_pages = (
+            self._last_assessment.pages if self._last_assessment is not None else None
+        ) or []
+        _pa = next((p for p in _assessment_pages if p.page_num == page_num), None)
+
+        def _record(outcome: str, detail: str, **extra) -> None:
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind=PAID_AFTER_TABLE_WITHHOLD_KIND,
+                    engine=paid.engine.value,
+                    detail=detail,
+                    data={"outcome": outcome, "provider_id": paid.id, **extra},
+                )
+            )
+
+        # Restored by identity, not by index: a check can rebind ``state.events`` to a filtered
+        # list (``rollback_native_cell_page_state``), which makes an index into it stale.
+        events_before = list(state.events)
+        n_events = len(events_before)
+        # The whole page state, restored wholesale when the trial does not commit; only the
+        # recorded facts of the call itself (spend, judge calls, attempts) stay, as in
+        # ``_reset_page_for_retry``.
+        snapshot = copy.deepcopy(ps)
+        kept_fields = frozenset(
+            {
+                "page_cost_usd",
+                "judge_calls",
+                "judge_calls_unrestored",
+                "judge_calls_prior_unavailable",
+                "attempts",
+            }
+        )
+
+        def _restore_ps() -> None:
+            for f in dataclasses.fields(snapshot):
+                if f.name not in kept_fields:
+                    setattr(ps, f.name, getattr(snapshot, f.name))
+
+        def _restore() -> None:
+            state.events[:] = events_before
+            _restore_ps()
+
+        decision = route_page(
+            page_num,
+            [paid],
+            route_provider,
+            judge,
+            remaining_budget=remaining,
+            provider_timeout=provider_timeout,
+            on_candidate=on_candidate,
+            sparse_signals=sparse_signals_from_page_assessment(_pa),
+            audit_min_words=self.config.audit_min_words,
+        )
+        att = decision.attempts[0]
+        out = att.output
+        if att.reason == "budget exceeded":
+            _record(
+                "budget_exhausted",
+                f"paid reading not taken: {paid.engine.value} (${paid.cost_per_page_usd:g}/page) "
+                "exceeds the remaining budget; the page keeps its withheld table",
+            )
+            return bo
+        # Cost: the routed rung's own accounting (``decision.total_cost_usd`` is the charge
+        # route_page computed: nothing for a call that never went out).
+        state.record_engine_run(
+            EngineResult(
+                document_path=state.handle.path,
+                engine=paid.engine.value,
+                status=DocumentStatus.SUCCESS if att.accepted else DocumentStatus.AUDIT_FAILED,
+                cost=decision.total_cost_usd,
+                processing_time=0.0,
+            ),
+            page_nums=[page_num],
+        )
+        if (
+            _provider_call_never_ran(out)
+            or not (out.text or "").strip()
+            or is_failed_candidate(out)
+            # An empty paid answer on a page with a text layer is replaced by the native text
+            # (engine ``native``): that is not a paid reading, and it is never shipped as one.
+            or out.engine != paid.engine.value
+        ):
+            _restore()
+            _record(
+                "unavailable",
+                f"paid reading not available from {paid.engine.value}: {att.reason or 'no text'}",
+                reason=att.reason,
+            )
+            return bo
+        if not att.accepted:
+            _restore()
+            _record(
+                "rejected_by_page_checks",
+                f"paid reading from {paid.engine.value} refused by the page checks "
+                f"({att.reason}); the page keeps its withheld table",
+                reason=att.reason,
+            )
+            return bo
+
+        # The paid reading becomes the page's reading ONLY for the trial below; every path that
+        # does not commit restores the page.
+        out.cost_usd = att.cost_usd
+        out.audit_passed = True
+        out.provider_id = paid.id
+        out.provider_backend, out.provider_model = resolved_provenance(paid, self.config)
+        out.judge_reason = decision.attempts[0].reason or ""
+        out.escalated_from = bo.engine
+        out.paid_after_table_withhold = True
+        if doc_dir is not None:
+            self._sanitize_agentic_page_image_refs(state, page_num, out, doc_dir)
+        self._reconcile_chart_table_grids(state, page_num, out)
+        self._suppress_chart_table_skeletons(state, page_num, out)
+        self._guard_agentic_page_table_repetition(state, page_num, out, False)
+        ps.table_ladder_disposition = None
+        ps.table_judge_retry_pending = False
+        ps.table_judge_retry_rungs = []
+        ps.binding_adjudication = {}
+        ps.native_cell_binding = {}
+        self._run_native_cell_binding_check(state, page_num, ps, out)
+        table_gate(page_num, ps, out)
+        trial = state.events[n_events:]
+        ladder_kinds = [e.kind for e in trial if e.kind in TABLE_LADDER_EVENT_KINDS]
+        n_blocks = len(find_table_blocks(out.text or ""))
+        passed = (
+            n_blocks > 0
+            and ps.table_ladder_disposition is None
+            and not ps.table_judge_retry_pending
+            and ladder_kinds == [TABLE_LADDER_ACCEPTED_KIND] * n_blocks
+        )
+        if not passed:
+            ending = ps.table_ladder_disposition
+            _restore()
+            _record(
+                "rejected_by_table_checks",
+                f"paid reading from {paid.engine.value} passed the page checks but not the "
+                "table checks; the page keeps its withheld table",
+                ladder_events=ladder_kinds,
+                disposition=ending.value if ending is not None else "",
+                tables=n_blocks,
+            )
+            return bo
+
+        # Commit. The earlier reading's ladder records are replaced by the paid reading's own
+        # (kept in this event), or the page would still read as withheld to every consumer of
+        # those events (tables_trust, the document note, the resumed page).
+        superseded_kinds = TABLE_LADDER_EVENT_KINDS | {
+            TABLE_BINDING_ADJUDICATED_KIND,
+            TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
+            TABLE_BINDING_BOUNDARY_UNRESOLVED_KIND,
+        }
+
+        def _superseded(e) -> bool:
+            return e.page_num == page_num and (
+                e.kind in superseded_kinds
+                or e.kind.startswith(("native_cell_check_", "table_row_binding_"))
+            )
+
+        old = [e for e in state.events[:n_events] if _superseded(e)]
+        state.events[:n_events] = [e for e in state.events[:n_events] if not _superseded(e)]
+        ps.attempts.append(out)
+        ps.best_output = out
+        commit_len = len(state.events)
+        _record(
+            "accepted",
+            f"paid reading from {paid.engine.value} passed the page checks and every table "
+            "check; it replaces the earlier reading, whose table was withheld, and ships marked",
+            superseded=[
+                {"kind": e.kind, "table_id": (e.data or {}).get("table_id", "")} for e in old
+            ],
+            earlier_engine=bo.engine,
+        )
+        # What a LATER gate (row binding, #1203) needs to put the page back if it withholds the
+        # paid table after all: the rescue then did not happen and must not read as one.
+        self._paid_lane_undo[page_num] = {
+            "free": bo,
+            "paid": out,
+            "events_before": events_before,
+            "trial": list(trial),
+            "commit_len": commit_len,
+            "accepted_event": state.events[-1],
+            "snapshot": snapshot,
+            "kept_fields": kept_fields,
+        }
+        return out
+
+    @staticmethod
+    def _paid_lane_called(state: DocumentState, page_num: int) -> bool:
+        """Whether the #1361 lane sent this page to the paid reader (any outcome but budget)."""
+        return any(
+            e.page_num == page_num
+            and e.kind == PAID_AFTER_TABLE_WITHHOLD_KIND
+            and (e.data or {}).get("outcome") != "budget_exhausted"
+            for e in state.events
+        )
+
+    def _undo_paid_after_table_withhold(
+        self, state: DocumentState, page_num: int, ps: PageState, why: str
+    ) -> PageOutput | None:
+        """#1361: take back a committed paid reading that a later table gate withheld.
+
+        Returns the free reading restored as the page's reading, or None when the page did not
+        go through the lane. The page goes back to the state it had when the lane started (its
+        ladder withhold included); the lane event is replaced by one saying the rescue did not
+        ship. Spend stays.
+        """
+        from socr.core.audit_log import AuditEvent
+
+        rec = self._paid_lane_undo.pop(page_num, None)
+        if rec is None:
+            return None
+        drop = {id(e) for e in rec["trial"]}
+        drop.add(id(rec["accepted_event"]))
+        drop.update(
+            id(e)
+            for e in state.events[rec["commit_len"] :]
+            if e.page_num == page_num and e.kind.startswith("table_row_binding_")
+        )
+        before = {id(e) for e in rec["events_before"]}
+        later = [e for e in state.events if id(e) not in drop and id(e) not in before]
+        state.events[:] = [*rec["events_before"], *later]
+        for f in dataclasses.fields(rec["snapshot"]):
+            if f.name not in rec["kept_fields"]:
+                setattr(ps, f.name, getattr(rec["snapshot"], f.name))
+        free, paid = rec["free"], rec["paid"]
+        ps.attempts[:] = [a for a in ps.attempts if a is not paid]
+        ps.best_output = free
+        state.events.append(
+            AuditEvent(
+                page_num=page_num,
+                kind=PAID_AFTER_TABLE_WITHHOLD_KIND,
+                engine=paid.engine,
+                detail=(
+                    f"paid reading from {paid.engine} passed the page checks and the ladder, then "
+                    f"was withheld by a later table check ({why}); the page keeps the earlier "
+                    "reading's withheld table"
+                ),
+                data={
+                    "outcome": "rejected_by_later_table_check",
+                    "provider_id": paid.provider_id,
+                    "reason": why,
+                },
+            )
+        )
+        return free
+
     @staticmethod
     def _clear_fail_closed_flags(state: DocumentState, page_num: int, ps, profile) -> None:
         """Release a fail-closed page once a candidate has measurably improved it.
@@ -10360,6 +10714,12 @@ class UnifiedPipeline:
             "guard_refusal": decision.refusal,
             "adjudicator_suppressed": suppressed,
             "requested_refs": list(refs),
+            # #1365: present only when the adjudicator call was retried.
+            **(
+                {"guard_transport_retries": decision.transport_retries}
+                if decision.transport_retries
+                else {}
+            ),
         }
         if decision.unavailable:
             guard_unavailable_kinds.add(RUNG_KIND_CELL_ADJUDICATOR)
@@ -12391,6 +12751,12 @@ class UnifiedPipeline:
         # rungs; the gate reads an empty list as "fail open to UNVERIFIED".
         _table_judge_rungs = self._build_table_judge_rungs()
 
+        def _judge_paid_reading_tables(page_num: int, ps: PageState, out: PageOutput) -> None:
+            """The table checks of the page loop, run on a candidate reading (#1361): the ladder
+            gate, then the native-contradiction withhold that follows it in the loop."""
+            self._run_table_judge_gate(state, page_num, ps, out, _table_judge_rungs)
+            self._withhold_contradicted_unverified_tables(state, page_num, ps, out)
+
         # -- Doc-scoped equation flags -------------------------------------------
         _detect_eq = bool(self.config.detect_equations)
         _recover_eq = self._clean_equation_recovery_enabled()
@@ -12454,6 +12820,11 @@ class UnifiedPipeline:
             if not _retry_failed or backend_degraded or not ladder:
                 return
             failed = self._failed_pages(state, _routed_pages)
+            # #1361: a page the paid-after-withhold lane already called the paid reader for is not
+            # sent to it again: the reversed ladder would route that same reader first.
+            failed = {
+                _pn: _rec for _pn, _rec in failed.items() if not self._paid_lane_called(state, _pn)
+            }
             if not failed:
                 return
             ladder = list(reversed(ladder))
@@ -12784,6 +13155,22 @@ class UnifiedPipeline:
                                 decision, inner=_promotion_inner_judge(judge)
                             )
                         )
+                        if isinstance(decision.floor_lift, dict):
+                            # #1359: say that the floor was lifted and on what evidence.
+                            from socr.core.audit_log import AuditEvent as _LiftEvent
+
+                            state.events.append(
+                                _LiftEvent(
+                                    page_num=page_num,
+                                    kind="paid_reading_lifted_floor",
+                                    engine=decision.final_output.engine,
+                                    detail=(
+                                        "a table-free paid reading kept every token of the "
+                                        "disputed table that the page evidence can speak to"
+                                    ),
+                                    data=decision.floor_lift,
+                                )
+                            )
                         # The profile whose reading won. Needed to re-judge a candidate
                         # produced after routing (crop reread) through the same judge
                         # with the same provider context.
@@ -13422,6 +13809,21 @@ class UnifiedPipeline:
                         with clock.span("ladder"):
                             self._run_table_judge_gate(state, page_num, ps, bo, _table_judge_rungs)
                             self._withhold_contradicted_unverified_tables(state, page_num, ps, bo)
+                            # #1361: a withheld free reading gets one paid reading, checked like
+                            # a routed one. Before the floor PNG below, which it may make moot.
+                            bo = self._paid_reading_after_table_withhold(
+                                state,
+                                page_num,
+                                ps,
+                                bo,
+                                ladder=ladder,
+                                judge=judge,
+                                route_provider=_timed_route_provider,
+                                provider_timeout=provider_timeout,
+                                on_candidate=_ingest_candidate,
+                                table_gate=_judge_paid_reading_tables,
+                                doc_dir=_agentic_doc_dir,
+                            )
                         # P1 (owner ruling Q2): a withheld page ships a failure marker
                         # in place of the table, so the human's ONLY route back to the
                         # numbers is the page image. Rendered here, right after the
@@ -13491,6 +13893,13 @@ class UnifiedPipeline:
                 # because the floor demotes the winner in place.
                 if self._withhold_unconfirmed_table(state, page_num, ps, _chart_figures_dir):
                     bo = ps.best_output or bo
+                    _undone = self._undo_paid_after_table_withhold(
+                        state, page_num, ps, "withheld as an unconfirmed scanned table"
+                    )
+                    if _undone is not None:
+                        bo = _undone
+                        self._withhold_unconfirmed_table(state, page_num, ps, _chart_figures_dir)
+                        bo = ps.best_output or bo
 
                 # #1187: a figure this page's own shipped body NAMES and does not show.
                 # Decided HERE, after BOTH table-withholding gates and immediately before the
@@ -13558,6 +13967,20 @@ class UnifiedPipeline:
                         # both withhold gates, the finalize guards). A demotion changes what the
                         # record says, so the record is taken once more in that case only.
                         if self._run_row_binding_check(state, page_num, ps, bo, _record.output):
+                            _undone = self._undo_paid_after_table_withhold(
+                                state, page_num, ps, "row binding contradicted the paid table"
+                            )
+                            if _undone is not None:
+                                bo = _undone
+                                # Back to the ladder withhold: its picture, as the ladder renders it.
+                                if (
+                                    ps.table_ladder_disposition is FailureMode.TABLE_WITHHELD
+                                    and not getattr(ps, "d3_floor_png_ref", "")
+                                    and _chart_figures_dir is not None
+                                ):
+                                    ps.d3_floor_png_ref = self._render_d3_floor_png(
+                                        state.handle.path, page_num, _chart_figures_dir
+                                    )
                             # A withheld table ships the failure marker and a link to the page
                             # picture, rendered exactly as the ladder withhold renders it
                             # (marker only if the render fails, as there).
