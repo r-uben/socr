@@ -7394,6 +7394,24 @@ class UnifiedPipeline:
         )
 
     @staticmethod
+    def _floor_line_order_pages(records: list) -> list[int]:
+        """#1374: recovered pages whose body is the LINE-ORDER floor body.
+
+        Read from the shipped bytes (the notice line socr's floor writes under its banner),
+        the same evidence the restore path and ``_apply_line_order_note`` use.
+        """
+        from socr.core.manifest import has_line_order_notice
+
+        return sorted(
+            {
+                rec.output.page_num
+                for rec in records
+                if rec.output.scanned_prose_recovered
+                and has_line_order_notice(rec.output.text or "", rec.output.page_num)
+            }
+        )
+
+    @staticmethod
     def _scanned_prose_recovered_note(records: list) -> str | None:
         """Document-level one-liner naming pages whose text is a scan recovery.
 
@@ -7417,6 +7435,13 @@ class UnifiedPipeline:
                 f"page(s) {', '.join(str(n) for n in born)}: a born-digital table could not "
                 "be verified, so the page's own unverified text layer shipped flagged around "
                 "a withheld table -- see scanned_prose_recovered in the page sidecar"
+            )
+        line_order = UnifiedPipeline._floor_line_order_pages(records)
+        if line_order:
+            parts.append(
+                f"page(s) {', '.join(str(n) for n in line_order)}: the band reading order could "
+                "not be confirmed, so the recovered words ship in the order the PDF text layer "
+                "stores them -- see floor_line_order_body in audit_log.json"
             )
         return "; ".join(parts) or None
 
@@ -22218,6 +22243,20 @@ class UnifiedPipeline:
                         ),
                     )
                 )
+            for n in self._floor_line_order_pages(pre_records):
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind="floor_line_order_body",
+                        engine="native",
+                        detail=(
+                            "the band reading order of this page could not be confirmed, so the "
+                            "recovered words shipped in the order the PDF text layer stores "
+                            "them; every table region stays withheld"
+                        ),
+                        data={"floor_line_order_body": True},
+                    )
+                )
             for n in native_fallback_pages:
                 state.events.append(
                     AuditEvent(
@@ -22730,6 +22769,13 @@ class UnifiedPipeline:
                             "unverified recovered prose (the page's own text layer; its table "
                             f"content withheld): {_born_pgs}[/red]"
                         )
+                _line_order_pgs = self._floor_line_order_pages(pre_records)
+                if _line_order_pgs:
+                    console.print(
+                        f"  [red]{len(_line_order_pgs)} page(s) shipped recovered words in the "
+                        "PDF layer's own line order (band reading order not confirmed; table "
+                        f"content withheld): {_line_order_pgs}[/red]"
+                    )
                 if native_fallback_pages:
                     console.print(
                         f"  [yellow]{len(native_fallback_pages)} structured/enhancement page(s) "
