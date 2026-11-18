@@ -420,6 +420,52 @@ def _candidate_numeric_supply(markdown: str) -> Counter:
     return supply
 
 
+#: #1370: fewest distinct terms a run of integers needs before "equal steps"
+#: says anything. Two numbers always differ by some constant, so an arithmetic
+#: progression is only a constraint from three terms on; this is that
+#: arithmetic fact, not a tuned threshold.
+_AXIS_RUN_MIN_TERMS = 3
+
+
+def _is_axis_tick_band(tokens: tuple[str, ...]) -> bool:
+    """#1370: whether one native band is a chart axis tick line (the year
+    labels under a chart), not a table row.
+
+    True iff every token is a plain unsigned integer and, after collapsing
+    adjacent repeats (overprinted labels), the sequence splits at each
+    non-increase into runs that are each an arithmetic progression of at least
+    ``_AXIS_RUN_MIN_TERMS`` terms. The split handles two charts printed side by
+    side, whose tick lines merge into one band that restarts (``1994 ... 2008
+    1994 ... 2008``). A decimal, a comma-grouped number or a signed value is
+    never an axis label here, so a row of measurements is not matched.
+
+    The candidate side of term (b) already leaves header lines (the year
+    caption over a table's columns) out of its row count, so leaving a pure
+    year-caption band out of the native count is the same exclusion on the
+    other side. Known cost: a genuine body row of integers in exact arithmetic
+    progression (``10 20 30``) is also skipped, which lowers the native count
+    by one for that row.
+    """
+    if not tokens or not all(tok.isdigit() for tok in tokens):
+        return False
+    values = [int(tok) for tok in tokens]
+    runs: list[list[int]] = [[values[0]]]
+    for value in values[1:]:
+        if value == runs[-1][-1]:
+            continue
+        if value < runs[-1][-1]:
+            runs.append([value])
+        else:
+            runs[-1].append(value)
+    for run in runs:
+        if len(run) < _AXIS_RUN_MIN_TERMS:
+            return False
+        step = run[1] - run[0]
+        if any(b - a != step for a, b in zip(run, run[1:])):
+            return False
+    return True
+
+
 def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
     """TICKET-A2 (#645) term (b): the candidate's numeric body-row count falls
     short of the native table-shaped row count by more than A1b's own
@@ -470,6 +516,17 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
       43, 41 and 44 times of 50 (before: 44, 42, 44);
     * the same shares deleted from the middle: caught 26, 41 and 44 times
       (before: 45, 46, 44, while also firing on 47 of the 56 uncut answers).
+
+    **#1370: chart axis tick lines are not rows.** On a page with charts
+    under a small table the year labels under each chart are table-shaped
+    bands, so a complete reading was called truncated and the page shipped
+    nothing. Measured on three Fed pages with saved Gemini readings (p091: 5
+    rows vs 7 bands; p049: 10 vs 12; p082: 6 vs 8), exactly two bands per page
+    were tick lines (a lone chart's ``1992..2005`` / ``2000..2007`` /
+    ``1990..2008`` and, on p091, the second stacked chart; on p049 and p082 a
+    merged band from two side-by-side charts that restarts mid-band). Bands
+    for which ``_is_axis_tick_band`` holds are now left out of the native
+    count, after which none of the three falls short.
 
     Known limits: a dropped row is missed when its numbers also appear
     elsewhere in the candidate (``0%``, a repeated total) or when it is the
@@ -522,7 +579,7 @@ def _truncated_row_shortfall(words: list | None, markdown: str) -> bool:
     bands = [
         band.tokens
         for band in baseline_bands(words)
-        if is_table_shaped_band(band.tokens, row_shape_min)
+        if is_table_shaped_band(band.tokens, row_shape_min) and not _is_axis_tick_band(band.tokens)
     ]
     if not _falls_short(len(candidate_rows), len(bands), ROW_CORROBORATION_MIN):
         return False
