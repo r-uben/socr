@@ -20,6 +20,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+import string
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -248,9 +249,30 @@ NO_WITNESS_BACKEND_KIND: str = "source_evidence_no_witness_backend"
 #: ``orchestrator.py`` cannot spell it differently from the emitter (the same
 #: reason ``NO_WITNESS_BACKEND_KIND`` is one).
 LABEL_UNVERIFIED_KIND: str = "source_evidence_table_label_unverified"
+#: #1355: the audit event for numeric tokens the witness did not support itself but a second
+#: reading by another engine corroborated (a lost sign or decimal point). One constant, so the
+#: emitter and the resume-replay registry cannot spell it differently.
+CORROBORATED_KIND: str = "source_evidence_table_corroborated"
 #: #1357: audit event for a table that PASSED only because the witness read
 #: further resolutions. ``data``: ``resolutions`` (dpi list), ``tokens_resolved``.
 EXTRA_RESOLUTION_KIND: str = "source_evidence_table_extra_resolution"
+
+
+@dataclass(frozen=True)
+class TableHeader:
+    """#1355: what the header rows of one table hold, kept apart from its data rows.
+
+    ``bare``: numeric tokens of header cells that are a bare number (also in ``numeric``). The
+    header region is row 0 plus the rows after it whose first cell is empty.
+    ``label``: numbers inside header cells that are not (``2001 (Percent change<sup>1</sup>)``),
+    tokenised by ``plain_text_tokens``. ``real``: the table has a header row at all (a markdown
+    separator row after the first line; ``<th>`` for HTML, set by the caller): without one, row 0
+    is data and neither counter may stand in for it.
+    """
+
+    bare: Counter = field(default_factory=Counter)
+    label: Counter = field(default_factory=Counter)
+    real: bool = False
 
 
 @dataclass(frozen=True)
@@ -261,6 +283,10 @@ class TableTokens:
     content: frozenset[str] = field(default_factory=frozenset)
     has_numeric: bool = False
     is_alpha_only: bool = False
+    #: #1355: one ``TableHeader`` per evidence-readable table, in page order. Used only by the
+    #: winner-containment rule (``agentic.winner_accounts_for_marked_tables``); the witness check
+    #: never reads it.
+    headers: tuple[TableHeader, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -283,6 +309,22 @@ class SourceEvidenceBundle:
     #: #1085: dash-led numbers the witness read but that support nothing. Counts
     #: as a reading (``has_content_evidence``), never as support.
     ambiguous_numeric: int = 0
+    #: #1355: numeric tokens read from PIXELS (crop/full-page OCR) only. ``None`` on a bundle
+    #: that does not separate its sources (the pixel-only bundle, where every token is a pixel
+    #: token, and the scanned bundle that folds the text layer into ``numeric``); set by
+    #: ``_merge_source_bundles``, where ``numeric`` is the per-token MAX of the text layer and the
+    #: pixels and so cannot say which source a token came from.
+    pixel_numeric: Counter | None = None
+    #: #1355: numeric tokens of the exact text layer, kept apart from the pixels so a disputed
+    #: token the layer states itself is never corroborated. Empty unless ``pixel_numeric`` is set.
+    layer_numeric: Counter = field(default_factory=Counter)
+    #: #1355: the digit key (``_digit_key``) of EVERY number-bearing word of the visible text layer,
+    #: including the ones ``layer_numeric`` drops (dash-led, ``41bp``, ``x41``). Veto evidence only,
+    #: never support.
+    layer_digit_keys: frozenset[str] = frozenset()
+    #: #1355: every numeric token the extra-resolution re-reads (#1357) saw, whether or not a
+    #: re-read cleared the table. Veto evidence only, never support and never pooled.
+    rung_tokens: frozenset[str] = frozenset()
 
     @property
     def no_reading(self) -> bool:
@@ -327,6 +369,13 @@ class SourceEvidenceResult:
     #: #1048: EVERY unsupported token of a verifiable-and-failed verdict, as
     #: bare strings (no cap: the reason text keeps its own 5-token excerpt), so the in-text "disputed" mark can name them. Empty otherwise.
     disputed_values: tuple[str, ...] = ()
+    #: #1355: numeric tokens (one entry per occurrence) the witness did not support itself but a
+    #: second reading by another engine corroborated; see ``corroborate_unsupported_numeric``.
+    #: Only ever set on a PASSED verdict, and only when the witness evidence alone would have
+    #: failed it.
+    corroborated_values: tuple[str, ...] = ()
+    #: #1355: the engine of that second reading ("" when ``corroborated_values`` is empty).
+    corroborated_by: str = ""
     #: #1357: the extra resolutions (dpi) the witness read because the base
     #: reading left numeric tokens unsupported, in the order read. Empty when
     #: the base reading sufficed, which is the unchanged path.
@@ -334,6 +383,14 @@ class SourceEvidenceResult:
     #: #1357: numeric tokens (multiset count) that were unsupported at the base
     #: resolution and supported after the extra readings.
     extra_resolution_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class SecondReading:
+    """#1355: the EARLIER disputed reading of the same page, as the witness may use it."""
+
+    engine: str
+    numeric: Counter = field(default_factory=Counter)
 
 
 def page_has_native_words(page) -> bool:
@@ -743,18 +800,27 @@ def _plain_text_from_visible_chars(page, mat, page_pix=None) -> str:
     return " ".join(words)
 
 
-def _tokens_from_page_text_layer(page) -> tuple[Counter, set[str], int]:
-    """Tokenise the visibly rendered text layer for born-digital evidence (#1099).
+def _digit_keys_of_text(text: str) -> frozenset[str]:
+    """#1355: the digit key of every whitespace-delimited word of *text* that holds a digit, plus
+    each digit run on its own. A veto set: it errs toward more keys (``41bp``, ``x41``, ``-41`` and
+    ``4.1`` all give ``41``; ``2001-2002`` gives ``20012002``, ``2001`` and ``2002``)."""
+    keys: set[str] = set()
+    for word in re.findall(r"\S+", html.unescape(text or "")):
+        digits = "".join(ch for ch in word if ch in string.digits)
+        if digits:
+            keys.add(digits.lstrip("0") or "0")
+        for run in re.findall(r"[0-9]+", word):
+            keys.add(run.lstrip("0") or "0")
+    return frozenset(keys)
 
-    Character-level: drop ``rawdict`` chars with span ``alpha==0``, then drop
-    chars with no non-white pixel in a ``DETECT_DPI`` colour render (white-on-white,
-    text under a blank/white image). Re-group surviving chars into words per line.
-    """
+
+def _visible_layer_plain(page) -> str:
+    """The visibly rendered text layer as plain text ("" when it cannot be read)."""
     try:
         mat = _text_layer_ink_matrix(page)
     except Exception:
         logger.debug("text-layer ink matrix failed", exc_info=True)
-        return Counter(), set(), 0
+        return ""
     page_pix = None
     from socr.core.born_digital import upright_rotation_for
 
@@ -766,23 +832,52 @@ def _tokens_from_page_text_layer(page) -> tuple[Counter, set[str], int]:
         except Exception:
             logger.debug("text-layer ink page render failed", exc_info=True)
     try:
-        plain = _plain_text_from_visible_chars(page, mat, page_pix)
+        return _plain_text_from_visible_chars(page, mat, page_pix)
     except Exception:
         logger.debug("visible char assembly failed", exc_info=True)
-        plain = ""
-    return _tokens_and_dash_led(plain)
+        return ""
 
 
-def collect_table_tokens(markdown: str) -> TableTokens | None:
-    """Extract numeric multiset and content-label tokens from markdown tables."""
+def _tokens_from_page_text_layer(page) -> tuple[Counter, set[str], int]:
+    """Tokenise the visibly rendered text layer for born-digital evidence (#1099).
+
+    Character-level: drop ``rawdict`` chars with span ``alpha==0``, then drop
+    chars with no non-white pixel in a ``DETECT_DPI`` colour render (white-on-white,
+    text under a blank/white image). Re-group surviving chars into words per line.
+    """
+    return _tokens_and_dash_led(_visible_layer_plain(page))
+
+
+def _block_has_header_separator(lines: list[str], block) -> bool:
+    """True when the line after the block's first is a markdown separator row."""
+    nxt = block.start + 1
+    return nxt <= block.end and _is_separator_row(_split_row(lines[nxt]))
+
+
+def collect_table_tokens(markdown: str, *, headers_real: bool = True) -> TableTokens | None:
+    """Extract numeric multiset and content-label tokens from markdown tables.
+
+    ``headers_real=False`` says the caller knows the tables' first rows are not headers (an HTML
+    table without ``<th>``, converted to markdown with a synthetic separator row).
+    """
     blocks = _evidence_table_blocks(markdown)
     if not blocks:
         return None
+    lines = markdown.splitlines()
 
     raw_numeric: list[str] = []
     raw_content: set[str] = set()
+    headers: list[TableHeader] = []
     for block in blocks:
+        h_bare: Counter = Counter()
+        h_label: Counter = Counter()
+        in_header = True
         for row_idx, row in enumerate(block.grid):
+            # #1355: the header region is row 0 plus the rows right after it whose first (stub)
+            # cell is empty: a spanning header written over two rows. The first row with a stub
+            # label is data.
+            if row_idx and in_header and row and row[0].strip():
+                in_header = False
             for cell in row:
                 cell = cell.strip()
                 if not cell or cell in ("---", "—"):
@@ -792,6 +887,10 @@ def collect_table_tokens(markdown: str) -> TableTokens | None:
                 normalized = _normalize_cell(cell)
                 if is_numeric_token(normalized):
                     raw_numeric.append(normalized)
+                    if in_header:
+                        h_bare.update(_numeric_multiset_from_tokens([normalized]))
+                elif in_header:
+                    h_label.update(plain_text_tokens(cell)[0])
                 # Content-label tokens come from data rows only (row 0 is the
                 # header).  Generic header words ("Category", "Description") are
                 # not reliable hallucination signals and rarely appear in OCR
@@ -804,6 +903,14 @@ def collect_table_tokens(markdown: str) -> TableTokens | None:
                     if token is not None:
                         raw_content.add(token)
 
+        headers.append(
+            TableHeader(
+                bare=h_bare,
+                label=h_label,
+                real=headers_real and _block_has_header_separator(lines, block),
+            )
+        )
+
     numeric = _numeric_multiset_from_tokens(raw_numeric)
     has_numeric = bool(numeric)
     is_alpha_only = not has_numeric and bool(raw_content)
@@ -812,6 +919,7 @@ def collect_table_tokens(markdown: str) -> TableTokens | None:
         content=frozenset(raw_content),
         has_numeric=has_numeric,
         is_alpha_only=is_alpha_only,
+        headers=tuple(headers),
     )
 
 
@@ -1066,6 +1174,9 @@ def _merge_source_bundles(
         witness_state=witness_state,
         witness_detail=detail,
         ambiguous_numeric=ambiguous,
+        pixel_numeric=Counter(pixel_witness.numeric),
+        layer_numeric=Counter(text_layer.numeric),
+        layer_digit_keys=text_layer.layer_digit_keys,
     )
 
 
@@ -1080,7 +1191,8 @@ def build_born_digital_evidence(
     exclusion while still letting prose on the page satisfy ``has_content_evidence``
     and block spurious full-page OCR when the only gap is an image-embedded table.
     """
-    n_text, c_text, amb_text = _tokens_from_page_text_layer(page)
+    plain_layer = _visible_layer_plain(page)
+    n_text, c_text, amb_text = _tokens_and_dash_led(plain_layer)
     text_bundle = SourceEvidenceBundle(
         numeric=n_text,
         content=frozenset(c_text),
@@ -1088,6 +1200,7 @@ def build_born_digital_evidence(
         table_regions_detected=False,
         witness_state=WITNESS_NOT_ATTEMPTED,
         ambiguous_numeric=amb_text,
+        layer_digit_keys=_digit_keys_of_text(plain_layer),
     )
     pixel_bundle = build_scanned_evidence(
         page,
@@ -1280,6 +1393,7 @@ def widen_scanned_evidence(
         return bundle, (), 0
     base_missing = _unsupported_numeric_count(tokens.numeric, bundle.numeric)
     read: list[int] = []
+    seen: set[str] = set()
     for dpi in _EXTRA_EVIDENCE_OCR_DPIS:
         rung = build_scanned_evidence(
             page,
@@ -1296,11 +1410,20 @@ def widen_scanned_evidence(
             # it contributes nothing and is not recorded as a resolution read.
             continue
         read.append(dpi)
+        seen.update(rung.numeric)
         if _multiset_supported(tokens.numeric, rung.numeric):
             # One reading supports every token on its own. The rung's numeric
             # evidence replaces the base's; its labels and witness state do not.
-            return replace(bundle, numeric=Counter(rung.numeric)), tuple(read), base_missing
-    return bundle, tuple(read), 0
+            return (
+                replace(
+                    bundle,
+                    numeric=Counter(rung.numeric),
+                    pixel_numeric=(None if bundle.pixel_numeric is None else Counter(rung.numeric)),
+                ),
+                tuple(read),
+                base_missing,
+            )
+    return replace(bundle, rung_tokens=frozenset(seen)), tuple(read), 0
 
 
 def _resolve_witness_state(states: list[str]) -> str:
@@ -1332,6 +1455,123 @@ def _multiset_supported(output: Counter, evidence: Counter) -> bool:
     return True
 
 
+def _digit_key(token: str) -> str:
+    """The digits of a normalised numeric token, sign and decimal point dropped (#1355).
+
+    Leading zeros are dropped as well, because the tokenisers WRITE one: ``.7`` is normalised
+    to ``0.7`` (``strip_presentation``, #1082/GH-206) while a witness that lost the point reads
+    ``7``. Without folding it the two would never meet. Trailing zeros are kept: ``12.0`` and
+    ``120`` share a key (a lost point) but ``12.0`` and ``12`` do not, since a missing trailing
+    digit is not a lost sign or point.
+    """
+    digits = "".join(ch for ch in token if ch in string.digits)
+    return digits.lstrip("0") or "0"
+
+
+def _marks(token: str) -> frozenset[str]:
+    """The sign and decimal point a normalised numeric token carries (#1355 review)."""
+    return frozenset(ch for ch in token if ch in "-.")
+
+
+def _witness_may_stand_for(witness_token: str, emitted_token: str) -> bool:
+    """True when *witness_token* is *emitted_token* with a sign and/or point DELETED.
+
+    String-level: the witness token must be a subsequence of the emitted one and every deleted
+    character must be a ``-`` or ``.``. A point in another place (``1.25`` for ``12.5``), a
+    missing digit, or a mark the emitted token lacks (witness ``-4.1``, emitted ``4.1``: a witness
+    that read the cell more completely than the readers did, ``-.7`` shipped as ``-7`` being a
+    documented model error) is never a stand-in.
+
+    Leading zeros are digits, not marks, so ``7`` does not stand for ``0.07`` or ``0.7`` (a
+    conservative refusal: a witness that lost both the zero and the point is not a lost mark).
+    ``07`` does stand for ``0.7``; the tokenisers write ``.7`` as ``0.7``, so ``.7`` meets ``0.7``
+    directly.
+    """
+    if witness_token == emitted_token:
+        return True
+    j = 0
+    for ch in emitted_token:
+        if j < len(witness_token) and witness_token[j] == ch:
+            j += 1
+        elif ch not in "-.":
+            return False
+    return j == len(witness_token)
+
+
+def corroborate_unsupported_numeric(
+    emitted: Counter,
+    evidence: Counter,
+    second: Counter,
+    *,
+    standin: Counter | None = None,
+    exact_keys: frozenset[str] = frozenset(),
+    finer: frozenset[str] = frozenset(),
+) -> tuple[Counter, Counter]:
+    """#1355: split the emitted tokens the witness leaves unsupported into
+    ``(corroborated, still_unsupported)``. Both are multisets of tokens.
+
+    The witness reads a 150 dpi raster and drops minus signs and decimal points, so a correct
+    ``-4.1`` can meet the witness as ``41``. An unsupported emitted token counts as corroborated
+    only when BOTH hold:
+
+    - ``second`` (the earlier disputed reading's tokens) carries that token at least as many
+      times as it was emitted;
+    - the witness evidence holds a token that is the emitted token with a sign and/or point
+      removed (``_witness_may_stand_for``: same digits, witness marks a subset of the emitted
+      marks) and is still unconsumed, after every directly supported emitted token and every
+      earlier corroboration has taken its own. One witness ``41`` can therefore stand behind
+      one ``-4.1``, never two.
+
+    A token whose digits the witness does not hold stays unsupported, and so does one the
+    witness holds WITH a mark the emitted token lacks (witness ``-4.1``, emitted ``4.1``): that
+    is a disagreement about the number, not a lost sign or point.
+
+    On a bundle that merges the exact text layer with pixel readings, ``standin`` is the
+    pixel-read tokens and ``exact_keys`` the digit keys of every number in the text layer. Only a
+    ``standin`` token may stand behind an emitted one, and an emitted token whose digits the text
+    layer holds in ANY form is never corroborated: the layer is an exact source, so it already
+    made its statement about that number. ``finer`` is every token the higher-resolution re-reads
+    (#1357) saw: one that has the emitted token's digits but is not the emitted token or a
+    mark-deleted form of it (a sign the emitted token lacks, a point elsewhere) vetoes it. Directly supported tokens still consume from ``evidence`` (the merged multiset).
+    Both default to the pure-pixel case: every evidence token stands in, nothing vetoes.
+    """
+    spare: Counter = Counter(evidence)
+    unsupported: Counter = Counter()
+    for tok, count in emitted.items():
+        direct = min(count, spare.get(tok, 0))
+        spare[tok] -= direct
+        if count > direct:
+            unsupported[tok] = count - direct
+    corroborated: Counter = Counter()
+    still: Counter = Counter()
+    # Most marks first: a token with more marks fits fewer witness tokens, so it picks first, and
+    # among compatible witness tokens the most-marked is taken, leaving the least-marked (which
+    # stands for the most emitted tokens) for the rest.
+    for tok in sorted(unsupported, key=lambda t: (-len(_marks(t)), t)):
+        for _ in range(unsupported[tok]):
+            candidates = [
+                w
+                for w, n in spare.items()
+                if n > 0
+                and (standin is None or standin.get(w, 0) > 0)
+                and _witness_may_stand_for(w, tok)
+            ]
+            if (
+                second.get(tok, 0) >= emitted[tok]
+                and candidates
+                and _digit_key(tok) not in exact_keys
+                and not any(
+                    _digit_key(r) == _digit_key(tok) and not _witness_may_stand_for(r, tok)
+                    for r in finer
+                )
+            ):
+                spare[max(candidates, key=lambda w: (len(_marks(w)), w))] -= 1
+                corroborated[tok] += 1
+            else:
+                still[tok] += 1
+    return corroborated, still
+
+
 def _content_supported(output: frozenset[str], evidence: frozenset[str]) -> bool:
     """True when every emitted content-label token appears in evidence."""
     if not output:
@@ -1342,8 +1582,17 @@ def _content_supported(output: frozenset[str], evidence: frozenset[str]) -> bool
 def verify_table_tokens(
     bundle: SourceEvidenceBundle,
     tokens: TableTokens,
+    *,
+    second_reading: SecondReading | None = None,
+    engine: str = "",
 ) -> SourceEvidenceResult:
-    """Fail-closed check: emitted table tokens must be supported by evidence."""
+    """Fail-closed check: emitted table tokens must be supported by evidence.
+
+    ``second_reading`` (#1355) is passed only for a paid reading run after a witness dispute.
+    It can corroborate a numeric token the witness lost a sign or point on
+    (``corroborate_unsupported_numeric``), and only when BOTH engines are known and differ:
+    ``engine`` is the engine of the reading under check. A content-label dispute is never touched.
+    """
     if not bundle.has_content_evidence:
         # #658: an empty bundle has two very different causes. Say which one.
         # The page fails closed either way -- an unwitnessed table is still
@@ -1368,16 +1617,34 @@ def verify_table_tokens(
             reason="no local content evidence available for scanned table",
         )
 
+    corroborated: Counter = Counter()
     if tokens.has_numeric and not _multiset_supported(tokens.numeric, bundle.numeric):
         missing = [
             tok for tok, count in tokens.numeric.items() if bundle.numeric.get(tok, 0) < count
         ]
-        return SourceEvidenceResult(
-            verifiable=True,
-            passed=False,
-            reason=f"numeric tokens unsupported by page evidence: {missing[:5]}",
-            disputed_values=tuple(str(m) for m in missing),
-        )
+        still: Counter = Counter(tokens.numeric)
+        if (
+            second_reading is not None
+            and second_reading.engine
+            and engine
+            and second_reading.engine != engine
+        ):
+            corroborated, still = corroborate_unsupported_numeric(
+                tokens.numeric,
+                bundle.numeric,
+                second_reading.numeric,
+                standin=bundle.pixel_numeric,
+                exact_keys=bundle.layer_digit_keys
+                | frozenset(_digit_key(t) for t in bundle.layer_numeric),
+                finer=bundle.rung_tokens,
+            )
+        if still:
+            return SourceEvidenceResult(
+                verifiable=True,
+                passed=False,
+                reason=f"numeric tokens unsupported by page evidence: {missing[:5]}",
+                disputed_values=tuple(str(m) for m in missing),
+            )
 
     if tokens.is_alpha_only and not _content_supported(tokens.content, bundle.content):
         # No numeric token exists to anchor the #659 unverified-label
@@ -1407,6 +1674,19 @@ def verify_table_tokens(
             verifiable=False,
             passed=False,
             reason="table cells contain no verifiable tokens",
+        )
+
+    if corroborated:
+        return SourceEvidenceResult(
+            verifiable=True,
+            passed=True,
+            reason=(
+                "source evidence supports emitted table tokens, except numeric tokens its own "
+                "reading lost a sign or decimal point on, which a second reading corroborates"
+            ),
+            content_unverified=content_unverified,
+            corroborated_values=tuple(sorted(corroborated.elements())),
+            corroborated_by=second_reading.engine if second_reading is not None else "",
         )
 
     return SourceEvidenceResult(
@@ -1447,6 +1727,8 @@ def verify_scanned_table(
     ocr_image_fn: OcrImageFn | None = None,
     native_trusted: bool | None = None,
     layer_is_evidence: bool = True,
+    second_reading: SecondReading | None = None,
+    engine: str = "",
 ) -> SourceEvidenceResult:
     """Full scanned-page pipeline: defer native, else verify or fail closed.
 
@@ -1533,19 +1815,32 @@ def verify_scanned_table(
                 ocr_image_fn=ocr_image_fn,
                 include_text_layer=False,
             )
+            pixel_only = True
         else:
             bundle = build_born_digital_evidence(page, ocr_image_fn=ocr_image_fn)
+            pixel_only = False
     else:
+        pixel_only = not (native_trusted is not False and layer_is_evidence)
         bundle = build_scanned_evidence(
             page,
             ocr_image_fn=ocr_image_fn,
             include_text_layer=native_trusted is not False and layer_is_evidence,
             text_layer_from_words=False,
         )
+    # #1355: a second reading only stands in for a LOSSY RASTER witness. The pixel-only bundle is
+    # one throughout; the born-digital bundle is one PER TOKEN (its ``pixel_numeric`` /
+    # ``layer_numeric`` split); the scanned bundle that folds the text layer into ``numeric`` is
+    # not one.
+    corroborates = pixel_only or bundle.pixel_numeric is not None
     bundle, extra_dpis, resolved = widen_scanned_evidence(
         page, bundle, tokens, ocr_image_fn=ocr_image_fn
     )
-    result = verify_table_tokens(bundle, tokens)
+    result = verify_table_tokens(
+        bundle,
+        tokens,
+        second_reading=second_reading if corroborates else None,
+        engine=engine,
+    )
     if extra_dpis:
         result = replace(result, extra_resolutions=extra_dpis, extra_resolution_tokens=resolved)
     return result

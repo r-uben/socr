@@ -27,6 +27,8 @@ from __future__ import annotations
 import concurrent.futures
 import copy
 import logging
+import re
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol
@@ -181,7 +183,21 @@ def _collect_evidence_table_tokens(text: str):
     check_text, html_unparsed = html_table_for_check(text or "")
     if html_unparsed:
         return None
-    return collect_table_tokens(check_text)
+    return collect_table_tokens(check_text, headers_real=_html_tables_have_headers(text or ""))
+
+
+_HTML_TABLE_BLOCK_RE = re.compile(r"<table\b.*?(?:</table>|\Z)", re.IGNORECASE | re.DOTALL)
+
+
+def _html_tables_have_headers(text: str) -> bool:
+    """#1355: True when every HTML table in *text* has a ``<th>`` cell (vacuously with none).
+
+    ``convert_html_tables`` writes a separator row after row 0 of every table, ``<th>`` or not,
+    so the converted markdown cannot say whether row 0 is a header. The raw text can.
+    """
+    return all(
+        re.search(r"<th\b", block, re.IGNORECASE) for block in _HTML_TABLE_BLOCK_RE.findall(text)
+    )
 
 
 def accepted_winner_has_passed_table(output: PageOutput) -> bool:
@@ -246,10 +262,33 @@ def winner_accounts_for_marked_tables(winner: PageOutput, marked: PageOutput) ->
     winner_table = _collect_evidence_table_tokens(winner.text or "")
     if winner_table is None:
         return False
+    credit = _header_label_credit(winner_table, _collect_evidence_table_tokens(marked.text or ""))
     for tok, need in supported.items():
-        if winner_table.numeric.get(tok, 0) < need:
+        if winner_table.numeric.get(tok, 0) + credit.get(tok, 0) < need:
             return False
     return True
+
+
+def _header_label_credit(winner_table, marked_table) -> Counter:
+    """#1355: bare header numbers of the marked tables that the winner's header carries in a label.
+
+    A paid reading writes ``2001 (Percent change<sup>1</sup>)`` where the free reading wrote
+    ``2001``; the tokeniser reads the former as a label cell, so the year looked dropped. The
+    credit for a token is, per table, the smaller of (a) how often the MARKED table's own header
+    row holds it as a bare number and (b) how often the same-index WINNER table's header row
+    holds it inside a label. Only where both tables have a real header row (a markdown separator
+    row, ``<th>`` for HTML) and both sides have the same number of tables so the index pairs
+    them. A data-row number never earns credit, nor does a number from another table.
+    """
+    credit: Counter = Counter()
+    if marked_table is None or len(marked_table.headers) != len(winner_table.headers):
+        return credit
+    for m_hdr, w_hdr in zip(marked_table.headers, winner_table.headers, strict=True):
+        if not (m_hdr.real and w_hdr.real):
+            continue
+        for tok, n in m_hdr.bare.items():
+            credit[tok] += min(n, w_hdr.label.get(tok, 0))
+    return credit
 
 
 def _disputed_table_obligations(marked: PageOutput) -> tuple[frozenset[str], frozenset[str]] | None:
@@ -835,6 +874,8 @@ def route_page(
     paid_escalation_blocked = False
     paid_block_tag = ""
     witness_disputed = False
+    #: #1355: the earlier reading(s) a witness dispute refuted, as ``(engine, text)``.
+    disputed_readings: list[tuple[str, str]] = []
     sig = sparse_signals or SparsePageSignals()
 
     for prof in ladder:
@@ -966,6 +1007,13 @@ def route_page(
         if on_candidate is not None:
             on_candidate(page_num, output)
 
+        if after_dispute:
+            # #1355: hand the witness the most recent refuted reading by ANOTHER engine, so it
+            # can corroborate a sign or decimal point its own reading lost. Never set on a free
+            # reading, so a free rung is never rescued by it.
+            output.witness_second_reading = next(
+                (r for r in reversed(disputed_readings) if r[0] != output.engine), None
+            )
         try:
             decision = judge.assess(output, prof)
         except Exception as exc:  # a judge blowing up must not kill the document
@@ -1003,6 +1051,8 @@ def route_page(
                 )
             )
             continue
+        finally:
+            output.witness_second_reading = None
 
         # #713 round 2 (Astra P1-2): the judge COMPLETED. Record that typed
         # outcome on the attempt's own output BEFORE the attempt is appended,
@@ -1084,6 +1134,7 @@ def route_page(
         )
         if blocks_paid_escalation(decision.reason):
             witness_disputed = True
+            disputed_readings.append((output.engine or "", output.text or ""))
         if tag:
             paid_escalation_blocked = True
             paid_block_tag = tag
@@ -1307,6 +1358,23 @@ class _UnverifiedTableRejection:
         )
 
 
+def _second_reading_of(output: PageOutput):
+    """#1355: the earlier disputed reading ``route_page`` attached to *output*, as the witness
+    reads it; ``None`` when there is none (every reading except a paid one after a dispute)."""
+    attached = output.witness_second_reading
+    if attached is None:
+        return None
+    from socr.tables.source_evidence import (
+        SecondReading,
+        collect_table_tokens,
+        html_table_for_check,
+    )
+
+    engine, text = attached
+    tokens = collect_table_tokens(html_table_for_check(text or "")[0])
+    return SecondReading(engine=engine, numeric=tokens.numeric if tokens is not None else Counter())
+
+
 class SourceEvidenceTableJudge(_UnverifiedTableRejection):
     """Fail-closed source-evidence gate for VLM-emitted markdown tables (GH-90).
 
@@ -1387,6 +1455,8 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                 ocr_image_fn=self._ocr_image_fn,
                 native_trusted=trusted,
                 layer_is_evidence=layer_ok,
+                second_reading=_second_reading_of(output),
+                engine=output.engine or "",
             )
         except _VERIFIER_FATAL:
             raise
@@ -1515,6 +1585,28 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                 confidence=0.0,
                 # #1125-r2: source-evidence reject is not page_judge_completed
                 judge_outcome=JUDGE_OUTCOME_SOURCE_EVIDENCE,
+            )
+
+        if result.corroborated_values:
+            # #1355: the witness did not support these tokens itself. The sidecar field is the
+            # record a reader keeps; the event is its audit-log twin (and is replayed on resume).
+            from socr.tables.source_evidence import CORROBORATED_KIND
+
+            output.table_witness_corroboration = {
+                "tokens": list(result.corroborated_values),
+                "corroborated_by": result.corroborated_by,
+                "engine": output.engine or "",
+            }
+            self._emit_event(
+                page_num=page_num,
+                kind=CORROBORATED_KIND,
+                engine=output.engine or "",
+                detail=(
+                    f"numeric tokens {list(result.corroborated_values)} are not supported by the "
+                    "page evidence itself (it lost a sign or decimal point) and stand on the "
+                    f"earlier {result.corroborated_by} reading of this page"
+                ),
+                data=dict(output.table_witness_corroboration),
             )
 
         if result.extra_resolutions:

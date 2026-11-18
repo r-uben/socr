@@ -682,6 +682,18 @@ class PageOutput:
     #: attempt boundary so it travels with the bytes). The verdict derives a mark from it
     #: whenever this output ships, accepted or not; see ``verdict._paid_after_dispute_clause``.
     paid_after_witness_dispute: bool = False
+    #: #1355: set by ``route_page`` on a paid reading run after a witness dispute, for the length
+    #: of one judge call: ``(engine, text)`` of the EARLIER disputed reading of this page. The
+    #: witness reads it to decide whether that second reading corroborates a sign or decimal point
+    #: its own reading lost. NEVER serialised (``to_dict`` does not write it) and cleared by the
+    #: router as soon as the judge returns, so it is not part of a page's record.
+    witness_second_reading: tuple[str, str] | None = None
+    #: #1355: the numeric tokens the witness did NOT support itself but a second reading by
+    #: another engine carried and the witness's own digits allowed (a lost minus sign or decimal
+    #: point). ``{"tokens": [...], "corroborated_by": <engine>, "engine": <this reading's engine>}``;
+    #: ``None`` on every other page. Persisted, so a reader of the sidecar can tell the witness
+    #: did not itself support these tokens. The page still ships marked ``reading_dispute``.
+    table_witness_corroboration: dict | None = None
     #: #1359: this paid reading (``paid_after_witness_dispute``) carries no table although the
     #: earlier reading, which the image check disputed, did. Set only when the deterministic
     #: no-loss condition held (``agentic.paid_reading_keeps_disputed_table_tokens``) and the floor
@@ -816,6 +828,9 @@ class PageOutput:
         # unconditional key would change the fingerprint of pages that never had a dispute.
         if self.paid_after_witness_dispute:
             d["paid_after_witness_dispute"] = True
+        # #1355: same omit-when-unset convention and reason.
+        if self.table_witness_corroboration:
+            d["table_witness_corroboration"] = self.table_witness_corroboration
         # #1359: same omit-when-unset convention.
         if self.paid_reading_omits_disputed_table:
             d["paid_reading_omits_disputed_table"] = True
@@ -888,6 +903,11 @@ class PageOutput:
                 str(v) for v in d.get("table_disputed_values", ()) if str(v)
             ),
             paid_after_witness_dispute=d.get("paid_after_witness_dispute") is True,
+            table_witness_corroboration=(
+                d.get("table_witness_corroboration")
+                if isinstance(d.get("table_witness_corroboration"), dict)
+                else None
+            ),
             paid_reading_omits_disputed_table=d.get("paid_reading_omits_disputed_table") is True,
             paid_after_table_withhold=d.get("paid_after_table_withhold") is True,
             table_ditto_columns=list(d.get("table_ditto_columns", [])),

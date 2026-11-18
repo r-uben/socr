@@ -149,6 +149,12 @@ EXPECTED_RESUME_KINDS = frozenset(
         # surfaced these.
         "equation_latex_accepted",
         "equation_latex_rejected_kept_crop",
+        # #1355: the record of which numeric tokens the witness did not support itself but a
+        # second reading corroborated. Emitted by the page judge inside ``route_page``, which a
+        # terminal resumed page skips; the sidecar's ``table_witness_corroboration`` field is
+        # restored, so losing the event would lose only the audit-log twin. A deliberate
+        # addition, like the ones above.
+        "source_evidence_table_corroborated",
     }
 )
 
@@ -179,4 +185,5 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 75 with #1276's four figure-presence kinds merged onto #1306's two.
     # 76 with #1253 B3's native_table_model_retry.
     # 77 with #1361's paid_reading_after_table_withhold.
-    assert len(EXPECTED_RESUME_KINDS) == 77
+    # 78 with #1355's source_evidence_table_corroborated.
+    assert len(EXPECTED_RESUME_KINDS) == 78
