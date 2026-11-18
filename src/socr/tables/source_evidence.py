@@ -288,6 +288,15 @@ class SourceEvidenceBundle:
     #: #1085: dash-led numbers the witness read but that support nothing. Counts
     #: as a reading (``has_content_evidence``), never as support.
     ambiguous_numeric: int = 0
+    #: #1355: numeric tokens read from PIXELS (crop/full-page OCR) only. ``None`` on a bundle
+    #: that does not separate its sources (the pixel-only bundle, where every token is a pixel
+    #: token, and the scanned bundle that folds the text layer into ``numeric``); set by
+    #: ``_merge_source_bundles``, where ``numeric`` is the per-token MAX of the text layer and the
+    #: pixels and so cannot say which source a token came from.
+    pixel_numeric: Counter | None = None
+    #: #1355: numeric tokens of the exact text layer, kept apart from the pixels so a disputed
+    #: token the layer states itself is never corroborated. Empty unless ``pixel_numeric`` is set.
+    layer_numeric: Counter = field(default_factory=Counter)
 
     @property
     def no_reading(self) -> bool:
@@ -1086,6 +1095,8 @@ def _merge_source_bundles(
         witness_state=witness_state,
         witness_detail=detail,
         ambiguous_numeric=ambiguous,
+        pixel_numeric=Counter(pixel_witness.numeric),
+        layer_numeric=Counter(text_layer.numeric),
     )
 
 
@@ -1319,7 +1330,15 @@ def widen_scanned_evidence(
         if _multiset_supported(tokens.numeric, rung.numeric):
             # One reading supports every token on its own. The rung's numeric
             # evidence replaces the base's; its labels and witness state do not.
-            return replace(bundle, numeric=Counter(rung.numeric)), tuple(read), base_missing
+            return (
+                replace(
+                    bundle,
+                    numeric=Counter(rung.numeric),
+                    pixel_numeric=(None if bundle.pixel_numeric is None else Counter(rung.numeric)),
+                ),
+                tuple(read),
+                base_missing,
+            )
     return bundle, tuple(read), 0
 
 
@@ -1384,7 +1403,12 @@ def _witness_may_stand_for(witness_token: str, emitted_token: str) -> bool:
 
 
 def corroborate_unsupported_numeric(
-    emitted: Counter, evidence: Counter, second: Counter
+    emitted: Counter,
+    evidence: Counter,
+    second: Counter,
+    *,
+    standin: Counter | None = None,
+    exact: Counter | None = None,
 ) -> tuple[Counter, Counter]:
     """#1355: split the emitted tokens the witness leaves unsupported into
     ``(corroborated, still_unsupported)``. Both are multisets of tokens.
@@ -1404,7 +1428,15 @@ def corroborate_unsupported_numeric(
     A token whose digits the witness does not hold stays unsupported, and so does one the
     witness holds WITH a mark the emitted token lacks (witness ``-4.1``, emitted ``4.1``): that
     is a disagreement about the number, not a lost sign or point.
+
+    On a bundle that merges the exact text layer with pixel readings, ``standin`` is the
+    pixel-read tokens and ``exact`` the text layer's. Only a ``standin`` token may stand behind an
+    emitted one, and an emitted token whose digits the text layer holds in ANY form is never
+    corroborated: the layer is an exact source, so it already made its statement about that
+    number. Directly supported tokens still consume from ``evidence`` (the merged multiset).
+    Both default to the pure-pixel case: every evidence token stands in, nothing vetoes.
     """
+    exact_keys = frozenset(_digit_key(t) for t in (exact or ()))
     spare: Counter = Counter(evidence)
     unsupported: Counter = Counter()
     for tok, count in emitted.items():
@@ -1419,8 +1451,18 @@ def corroborate_unsupported_numeric(
     # stands for the most emitted tokens) for the rest.
     for tok in sorted(unsupported, key=lambda t: (-len(_marks(t)), t)):
         for _ in range(unsupported[tok]):
-            candidates = [w for w, n in spare.items() if n > 0 and _witness_may_stand_for(w, tok)]
-            if second.get(tok, 0) >= emitted[tok] and candidates:
+            candidates = [
+                w
+                for w, n in spare.items()
+                if n > 0
+                and (standin is None or standin.get(w, 0) > 0)
+                and _witness_may_stand_for(w, tok)
+            ]
+            if (
+                second.get(tok, 0) >= emitted[tok]
+                and candidates
+                and _digit_key(tok) not in exact_keys
+            ):
                 spare[max(candidates, key=lambda w: (len(_marks(w)), w))] -= 1
                 corroborated[tok] += 1
             else:
@@ -1486,7 +1528,11 @@ def verify_table_tokens(
             and second_reading.engine != engine
         ):
             corroborated, still = corroborate_unsupported_numeric(
-                tokens.numeric, bundle.numeric, second_reading.numeric
+                tokens.numeric,
+                bundle.numeric,
+                second_reading.numeric,
+                standin=bundle.pixel_numeric,
+                exact=bundle.layer_numeric,
             )
         if still:
             return SourceEvidenceResult(
@@ -1677,15 +1723,18 @@ def verify_scanned_table(
             include_text_layer=native_trusted is not False and layer_is_evidence,
             text_layer_from_words=False,
         )
-    # #1355 review: a second reading only stands in for a LOSSY RASTER witness. A bundle that
-    # includes the exact text layer (or its whole-page number pool) is not one.
+    # #1355: a second reading only stands in for a LOSSY RASTER witness. The pixel-only bundle is
+    # one throughout; the born-digital bundle is one PER TOKEN (its ``pixel_numeric`` /
+    # ``layer_numeric`` split); the scanned bundle that folds the text layer into ``numeric`` is
+    # not one.
+    corroborates = pixel_only or bundle.pixel_numeric is not None
     bundle, extra_dpis, resolved = widen_scanned_evidence(
         page, bundle, tokens, ocr_image_fn=ocr_image_fn
     )
     result = verify_table_tokens(
         bundle,
         tokens,
-        second_reading=second_reading if pixel_only else None,
+        second_reading=second_reading if corroborates else None,
         engine=engine,
     )
     if extra_dpis:
