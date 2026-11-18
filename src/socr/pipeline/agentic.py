@@ -27,6 +27,7 @@ from __future__ import annotations
 import concurrent.futures
 import copy
 import logging
+import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -182,7 +183,21 @@ def _collect_evidence_table_tokens(text: str):
     check_text, html_unparsed = html_table_for_check(text or "")
     if html_unparsed:
         return None
-    return collect_table_tokens(check_text)
+    return collect_table_tokens(check_text, headers_real=_html_tables_have_headers(text or ""))
+
+
+_HTML_TABLE_BLOCK_RE = re.compile(r"<table\b.*?(?:</table>|\Z)", re.IGNORECASE | re.DOTALL)
+
+
+def _html_tables_have_headers(text: str) -> bool:
+    """#1355: True when every HTML table in *text* has a ``<th>`` cell (vacuously with none).
+
+    ``convert_html_tables`` writes a separator row after row 0 of every table, ``<th>`` or not,
+    so the converted markdown cannot say whether row 0 is a header. The raw text can.
+    """
+    return all(
+        re.search(r"<th\b", block, re.IGNORECASE) for block in _HTML_TABLE_BLOCK_RE.findall(text)
+    )
 
 
 def accepted_winner_has_passed_table(output: PageOutput) -> bool:
@@ -247,13 +262,33 @@ def winner_accounts_for_marked_tables(winner: PageOutput, marked: PageOutput) ->
     winner_table = _collect_evidence_table_tokens(winner.text or "")
     if winner_table is None:
         return False
+    credit = _header_label_credit(winner_table, _collect_evidence_table_tokens(marked.text or ""))
     for tok, need in supported.items():
-        # #1355: a header cell that carries the number inside a label (``2001 (Percent
-        # change<sup>1</sup>)``) still carries it. Header row of the winner's own table blocks only.
-        carried = winner_table.numeric.get(tok, 0) + winner_table.header_label_numeric.get(tok, 0)
-        if carried < need:
+        if winner_table.numeric.get(tok, 0) + credit.get(tok, 0) < need:
             return False
     return True
+
+
+def _header_label_credit(winner_table, marked_table) -> Counter:
+    """#1355: bare header numbers of the marked tables that the winner's header carries in a label.
+
+    A paid reading writes ``2001 (Percent change<sup>1</sup>)`` where the free reading wrote
+    ``2001``; the tokeniser reads the former as a label cell, so the year looked dropped. The
+    credit for a token is, per table, the smaller of (a) how often the MARKED table's own header
+    row holds it as a bare number and (b) how often the same-index WINNER table's header row
+    holds it inside a label. Only where both tables have a real header row (a markdown separator
+    row, ``<th>`` for HTML) and both sides have the same number of tables so the index pairs
+    them. A data-row number never earns credit, nor does a number from another table.
+    """
+    credit: Counter = Counter()
+    if marked_table is None or len(marked_table.headers) != len(winner_table.headers):
+        return credit
+    for m_hdr, w_hdr in zip(marked_table.headers, winner_table.headers, strict=True):
+        if not (m_hdr.real and w_hdr.real):
+            continue
+        for tok, n in m_hdr.bare.items():
+            credit[tok] += min(n, w_hdr.label.get(tok, 0))
+    return credit
 
 
 def _disputed_table_obligations(marked: PageOutput) -> tuple[frozenset[str], frozenset[str]] | None:

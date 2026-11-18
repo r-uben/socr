@@ -154,12 +154,12 @@ def test_a_token_outside_the_pixel_stand_ins_cannot_stand_for_the_emitted_one() 
     emitted, second = Counter({"-4.1": 1}), Counter({"-4.1": 1})
     # evidence token 41 is not among the pixel tokens
     got, still = corroborate_unsupported_numeric(
-        emitted, Counter({"41": 1}), second, standin=Counter(), exact=Counter()
+        emitted, Counter({"41": 1}), second, standin=Counter(), exact_keys=frozenset()
     )
     assert (sum(got.values()), still) == (0, Counter({"-4.1": 1}))
     # control: designate it as pixel-read
     got, still = corroborate_unsupported_numeric(
-        emitted, Counter({"41": 1}), second, standin=Counter({"41": 1}), exact=Counter()
+        emitted, Counter({"41": 1}), second, standin=Counter({"41": 1}), exact_keys=frozenset()
     )
     assert (got, sum(still.values())) == (Counter({"-4.1": 1}), 0)
 
@@ -167,6 +167,10 @@ def test_a_token_outside_the_pixel_stand_ins_cannot_stand_for_the_emitted_one() 
 def test_the_exact_layer_digit_key_vetoes_whatever_the_marks() -> None:
     emitted, second = Counter({"-4.1": 1}), Counter({"-4.1": 1})
     got, still = corroborate_unsupported_numeric(
-        emitted, Counter({"41": 1}), second, standin=Counter({"41": 1}), exact=Counter({"0.41": 1})
+        emitted,
+        Counter({"41": 1}),
+        second,
+        standin=Counter({"41": 1}),
+        exact_keys=frozenset({"41"}),
     )
     assert sum(got.values()) == 0 and still == Counter({"-4.1": 1})

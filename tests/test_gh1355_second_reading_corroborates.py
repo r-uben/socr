@@ -49,8 +49,7 @@ def C(*tokens: str) -> Counter:
         ("1.1", "11"),  # point lost
         ("-5.2", "52"),
         ("-12.0", "120"),  # trailing zero kept: only the point moved
-        ("-0.7", "-7"),  # ``.7`` is written ``0.7`` by the tokeniser; the witness read ``7``
-        ("0.7", "7"),
+        ("0.7", "07"),  # the zero survived; only the point was lost
     ],
 )
 def test_sign_or_point_loss_is_corroborated(emitted: str, witness: str) -> None:
@@ -364,9 +363,10 @@ def test_a_witness_that_is_more_complete_than_the_emitted_token_never_corroborat
     corroborated, still = corroborate_unsupported_numeric(C(emitted), C(witness), C(emitted))
     assert corroborated == C()
     assert still == C(emitted)
-    # the DIFFERENCE is the direction: swap the two tokens and the same digits corroborate
+    # the DIFFERENCE is the direction: swap the two tokens and the same digits corroborate, except
+    # where the lost token is a leading-zero fraction (``7`` does not stand for ``0.7``, round 2)
     swapped, _ = corroborate_unsupported_numeric(C(witness), C(emitted), C(witness))
-    assert swapped == C(witness)
+    assert swapped == (C() if "0." in witness else C(witness))
 
 
 def test_the_page_that_prints_a_negative_fraction_is_not_waved_through() -> None:
@@ -383,17 +383,17 @@ def test_the_page_that_prints_a_negative_fraction_is_not_waved_through() -> None
 
 
 def test_a_witness_token_goes_to_the_emitted_token_it_can_stand_for() -> None:
-    # witness ``7`` can stand for either ``-7`` (nothing to add) or ``0.7`` (a point to add);
+    # witness ``41`` can stand for either ``-4.1`` (a sign and a point to add) or ``4.1`` (a point);
     # one witness token, two emitted tokens, only one is corroborated and none is double-counted
     corroborated, still = corroborate_unsupported_numeric(
-        C("-0.7", "0.7"), C("7"), C("-0.7", "0.7")
+        C("-4.1", "4.1"), C("41"), C("-4.1", "4.1")
     )
     assert sum(corroborated.values()) == 1 and sum(still.values()) == 1
-    # with a second witness token both are
+    # with a second witness token (``-41`` can only stand for ``-4.1``) both are
     corroborated, still = corroborate_unsupported_numeric(
-        C("-0.7", "0.7"), C("7", "-7"), C("-0.7", "0.7")
+        C("-4.1", "4.1"), C("41", "-41"), C("-4.1", "4.1")
     )
-    assert corroborated == C("-0.7", "0.7") and still == C()
+    assert corroborated == C("-4.1", "4.1") and still == C()
 
 
 @pytest.mark.parametrize("engine", ["", "gemini"])
