@@ -357,6 +357,20 @@ def body_shows_a_picture(body: str) -> bool:
     return any(line.lstrip().startswith("![") for line in (body or "").splitlines())
 
 
+def whole_page_box(pdf_path, page_num: int) -> list:
+    """The one box the #1385 picture is cut from: the whole page, as ``[fitz.Rect]``.
+
+    ``[]`` on any failure, which the caller reads as "no picture can be made" and marks.
+    """
+    from socr.core.pdf import open_pdf
+
+    try:
+        with open_pdf(pdf_path) as doc:
+            return [doc[page_num - 1].rect]
+    except Exception:  # noqa: BLE001 -- the caller marks the page
+        return []
+
+
 def locate_figure_regions(pdf_path, page_num: int, max_per_page: int) -> list:
     """The figure regions on ONE page, as fitz rects. THE locator, for both callers.
 
@@ -460,40 +474,44 @@ def _chart_skeleton_decision(
     )
 
 
-def _uncaptioned_crop_decision(locate, render) -> FigureDecision | None:
+def _uncaptioned_crop_decision(locate, render, page_box) -> FigureDecision | None:
     """#1385: the body names no figure and carries no axis ticks. ``None`` when the locator
-    finds no region.
+    finds no region, or when the caller supplies no whole-page box.
 
-    The locator's own region is the positive evidence (it applies the extractor's area gate),
-    and the owner ruled 2026-11-19 that it is enough for a page a MODEL read: ship a crop of the
-    region, cut from the source page, and mark the page. Nothing is read from the crop.
+    The locator's regions are EVIDENCE that the page has a figure (owner ruling 2026-11-19);
+    they are not the crop geometry. Round 1 cropped the located regions and the census showed
+    that clips axis labels and misses panels (Fed p28: 1 of 6, p51: 2 of 6), so a page shipped
+    one crop of six charts under a mark that said a figure shipped. The picture is of the WHOLE
+    page, cut from the source, which cannot miss a panel or a label. Nothing in it is read.
     """
-    bboxes = locate()
-    if not bboxes:
+    located = locate()
+    if not located:
         return None
-    refs = tuple(render(bboxes))
+    box = page_box() if page_box is not None else []
+    if not box:
+        return None
+    refs = tuple(render(list(box)))
     if not refs:
         return FigureDecision(
             (),
             (),
-            len(bboxes),
+            len(located),
             (),
             (CHART_SKELETON_LABEL,),
             UNCAPTIONED_CROP_LOST_KIND,
-            f"this page names no figure, {len(bboxes)} figure region(s) were located on it, "
-            "and NO crop could be saved: the figure is preserved nowhere",
+            f"this page names no figure, {len(located)} figure region(s) were located on it, "
+            "and NO picture of the page could be saved: its graphics are preserved nowhere",
         )
     return FigureDecision(
         (),
         (),
-        len(bboxes),
+        len(located),
         refs,
         (CHART_SKELETON_LABEL,),
         UNCAPTIONED_CROP_KIND,
-        f"this page names no figure and its reading shows none; {len(bboxes)} figure "
-        f"region(s) were located and {len(refs)} crop(s) ship, cut from the page; the crops "
-        "are pictures, not readings, so their values are not transcribed, and socr cannot "
-        "say they cover every figure the page carries",
+        f"this page names no figure and its reading shows none; {len(located)} figure "
+        "region(s) were located on it, so a picture of the full page ships, cut from the "
+        "source; nothing in the picture was read or verified",
     )
 
 
@@ -502,7 +520,9 @@ def _uncaptioned_crop_decision(locate, render) -> FigureDecision | None:
 CHART_TABLE_ARBITRATION_KIND = "chart_table_arbitration"
 
 
-def decide(body: str, locate, render, *, chart_region_owns: bool = False) -> FigureDecision | None:
+def decide(
+    body: str, locate, render, *, chart_region_owns: bool = False, page_box=None
+) -> FigureDecision | None:
     """The whole rule, in one place. ``None`` when this page is not this lane's.
 
     ``locate()`` returns the figure regions on the page (fitz rects); ``render(bboxes)`` returns
@@ -543,7 +563,7 @@ def decide(body: str, locate, render, *, chart_region_owns: bool = False) -> Fig
         # #1385: not on a page the chart-region lane owns. That lane puts its crop at the
         # chart's own position and skips any page this lane already cropped, so acting here
         # would displace it. Same evidence both callers have, no new threshold.
-        return None if chart_region_owns else _uncaptioned_crop_decision(locate, render)
+        return None if chart_region_owns else _uncaptioned_crop_decision(locate, render, page_box)
     strict = figure_captions(body, strict=True)
     bboxes = locate()
     regions = len(bboxes)
@@ -651,14 +671,13 @@ _CLAUSE_REASON: dict[str, str] = {
         "read it from the page image"
     ),
     UNCAPTIONED_CROP_KIND: (
-        "the page's reading shows no picture, and a crop of the figure region(s) located on "
-        "the page ships; a crop is a picture, not a reading, so its values are not "
-        "transcribed, and socr cannot say the crops cover every chart this page carries; "
-        "read it from the page image"
+        "the page contains graphics and shows them as a picture of the full page; nothing in "
+        "the picture was read or verified, so its values are not transcribed; read it from "
+        "the page image"
     ),
     UNCAPTIONED_CROP_LOST_KIND: (
-        "the page's reading shows no picture, a figure region was located, and no crop of it "
-        "could be saved; it is preserved nowhere; read it from the page image"
+        "the page contains graphics, no picture of the page could be saved, so they are "
+        "preserved nowhere; read it from the page image"
     ),
 }
 
@@ -770,14 +789,14 @@ def document_note(
     if uncaptioned_shipped:
         parts.append(
             f"page(s) {', '.join(str(n) for n in uncaptioned_shipped)} name no figure and show "
-            "none in the reading, a crop of the located figure region ships rather than a "
-            "reading of it, so its values are not transcribed, and the page is marked"
+            "none in the reading, contain graphics, and ship a picture of the full page that "
+            "nothing read or verified, and the page is marked"
         )
     if uncaptioned_lost:
         parts.append(
             f"page(s) {', '.join(str(n) for n in uncaptioned_lost)} name no figure and show "
-            "none in the reading, a figure region was located and its crop could not be saved, "
-            "so it is preserved nowhere, and the page is marked"
+            "none in the reading, contain graphics, and no picture of the page could be saved, "
+            "so they are preserved nowhere, and the page is marked"
         )
     if placeholder:
         parts.append(

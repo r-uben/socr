@@ -60,6 +60,11 @@ def _no_words_check(monkeypatch):
 #: What a model keeps of a chart page: titles and units, no caption, no axis numbers.
 BODY = "## Average Real GDP\n\nQuarterly\n\n## Consumer Prices\n\nMonthly 4.2"
 _REGION = [(100.0, 120.0, 500.0, 420.0)]
+_PAGE = [(0.0, 0.0, 612.0, 792.0)]
+
+
+def _box():
+    return _PAGE
 
 
 def test_the_fixture_is_uncaptioned_and_tickless() -> None:
@@ -79,8 +84,8 @@ def test_loaded_source_is_this_checkout() -> None:
 
 
 def test_decide_difference_region_found_vs_not() -> None:
-    assert decide(BODY, lambda: [], lambda b: ["figures/x.png"]) is None
-    crop = decide(BODY, lambda: _REGION, lambda b: ["figures/x.png"])
+    assert decide(BODY, lambda: [], lambda b: ["figures/x.png"], page_box=_box) is None
+    crop = decide(BODY, lambda: _REGION, lambda b: ["figures/x.png"], page_box=_box)
     assert crop is not None
     assert crop.kind == UNCAPTIONED_CROP_KIND
     assert crop.refs == ("figures/x.png",) and crop.regions == 1
@@ -89,13 +94,30 @@ def test_decide_difference_region_found_vs_not() -> None:
 
 
 def test_a_region_whose_crop_cannot_be_saved_is_marked_as_lost() -> None:
-    lost = decide(BODY, lambda: _REGION, lambda b: [])
+    lost = decide(BODY, lambda: _REGION, lambda b: [], page_box=_box)
     assert lost is not None
     assert lost.kind == UNCAPTIONED_CROP_LOST_KIND and lost.refs == () and lost.marks
 
 
+def test_the_picture_is_cut_from_the_whole_page_not_from_the_located_regions() -> None:
+    """Round 2: the locator's boxes clip axis labels and miss panels, so they are evidence only."""
+    seen = []
+
+    def render(boxes):
+        seen.append(list(boxes))
+        return ["figures/x.png"]
+
+    decision = decide(BODY, lambda: _REGION, render, page_box=_box)
+    assert seen == [_PAGE] and decision is not None and decision.regions == 1
+    # No whole-page box, no picture and no claim.
+    assert decide(BODY, lambda: _REGION, render) is None
+    assert seen == [_PAGE], "nothing was rendered without a page box"
+
+
 def test_a_captioned_page_keeps_the_1187_answer() -> None:
-    decision = decide(f"Figure 7: Bias.\n\n{BODY}", lambda: _REGION, lambda b: ["f.png"])
+    decision = decide(
+        f"Figure 7: Bias.\n\n{BODY}", lambda: _REGION, lambda b: ["f.png"], page_box=_box
+    )
     assert decision is not None and decision.kind != UNCAPTIONED_CROP_KIND
 
 
@@ -120,7 +142,8 @@ def test_the_mark_says_a_crop_is_not_a_reading() -> None:
     lost = clause_records(1, (CHART_SKELETON_LABEL,), UNCAPTIONED_CROP_LOST_KIND)[0]
     assert crop["check"] == Check.FIGURE_TEXT.value
     assert crop["result"] == CheckResult.UNKNOWN.value, "never a pass"
-    assert "not a reading" in crop["reason"] and "names it" not in crop["reason"]
+    assert "picture of the full page" in crop["reason"] and "names it" not in crop["reason"]
+    assert "nothing in the picture was read or verified" in crop["reason"]
     assert "preserved nowhere" in lost["reason"] and crop["reason"] != lost["reason"]
 
 
@@ -128,6 +151,7 @@ def test_the_document_note_words_these_pages_apart() -> None:
     note = document_note([4], [4, 5, 6], uncaptioned_shipped=[5], uncaptioned_lost=[6])
     assert "page(s) 4 ship a crop" in note and "page(s) 4 name a figure" in note
     assert "page(s) 5 name no figure" in note and "page(s) 6 name no figure" in note
+    assert "picture of the full page" in note
     assert "4, 5" not in note and "5, 6" not in note
     assert ";" not in note
 
@@ -224,7 +248,10 @@ def test_the_cli_reports_the_page(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(_Engine, "BODY", BODY)
     _process(tmp_path, monkeypatch, "cli", draw_figure=True, quiet=False)
     printed = " ".join(capsys.readouterr().out.split())
-    assert "name no figure and show none: a crop of the located region ships" in printed
+    assert (
+        "name no figure and show none: the page contains graphics and a picture of the full page ships"
+        in printed
+    )
     assert "named a figure" not in printed
 
 
@@ -269,8 +296,10 @@ def test_the_tool_crops_and_marks_and_a_second_run_changes_nothing(
 
 
 def test_decide_abstains_on_a_page_the_chart_region_lane_owns() -> None:
-    owned = decide(BODY, lambda: _REGION, lambda b: ["f.png"], chart_region_owns=True)
-    free = decide(BODY, lambda: _REGION, lambda b: ["f.png"])
+    owned = decide(
+        BODY, lambda: _REGION, lambda b: ["f.png"], page_box=_box, chart_region_owns=True
+    )
+    free = decide(BODY, lambda: _REGION, lambda b: ["f.png"], page_box=_box)
     assert owned is None and free is not None and free.kind == UNCAPTIONED_CROP_KIND
 
 
@@ -336,3 +365,57 @@ def test_the_live_gate_abstains_when_save_figures_runs_the_figure_phase(tmp_path
         pipe._agentic_unshipped_figure_page(state, 1, page, _out(BODY), tmp_path / "figs")
         kinds.append(page.unshipped_figure_kind)
     assert kinds == [UNCAPTIONED_CROP_KIND, ""]
+
+
+TABLE_BODY = "## Table 1\n\n| Item | 2019 | 2020 |\n| --- | --- | --- |\n| Output | 4.2 | 3.1 |\n| Prices | 2.0 | 1.5 |"
+
+
+def test_the_picture_is_the_whole_page(tmp_path: Path, monkeypatch) -> None:
+    import fitz
+
+    from socr.figures.extractor import RENDER_DPI
+
+    monkeypatch.setattr(_Engine, "BODY", BODY)
+    side, text, _m, out = _process(tmp_path, monkeypatch, "whole", draw_figure=True)
+    assert len(side["unshipped_figure_refs"]) == 1, "one picture, whatever the located regions"
+    png = next(iter(out.rglob("figures"))) / Path(side["unshipped_figure_refs"][0]).name
+    pix = fitz.Pixmap(str(png))
+    assert (pix.width, pix.height) == (
+        round(612 * RENDER_DPI / 72),
+        round(792 * RENDER_DPI / 72),
+    ), "the whole US-letter page at the figure setting's resolution"
+
+
+def test_a_table_page_keeps_its_table_text_and_clauses_byte_for_byte(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The lane adds a picture and a figure mark and removes or edits nothing else."""
+    monkeypatch.setattr(_Engine, "BODY", TABLE_BODY)
+    with_side, with_text, _m, _o = _process(tmp_path, monkeypatch, "tw", draw_figure=True)
+    no_side, no_text, _m2, _o2 = _process(tmp_path, monkeypatch, "tn", draw_figure=False)
+    assert with_side["unshipped_figure_kind"] == UNCAPTIONED_CROP_KIND
+    assert not no_side.get("unshipped_figure_kind")
+
+    def strip(text: str) -> str:
+        lines = [
+            ln
+            for ln in text.split("\n")
+            if "figure_text=UNKNOWN" not in ln and not ln.startswith("![")
+        ]
+        return "\n".join(lines)
+
+    # Block-level equality: collapse the blank lines the removed mark and picture leave.
+    def squash(text: str) -> str:
+        return "\n".join(ln for ln in text.split("\n") if ln.strip())
+
+    assert squash(strip(with_text)) == squash(no_text)
+    assert "Output" in with_text and "4.2" in with_text
+
+    def clauses(side: dict) -> list[dict]:
+        return [
+            c
+            for c in side["verdict"]["clauses"]
+            if c["check"] not in (Check.FIGURE_TEXT.value, "page_judge")
+        ]
+
+    assert clauses(with_side) == clauses(no_side)

@@ -58,6 +58,7 @@ from socr.figures.unshipped_figures import (
     decide,
     document_note,
     locate_figure_regions,
+    whole_page_box,
 )
 
 #: Sidecar keys this lane writes. A page carrying ANY of them has been answered, whatever the
@@ -331,6 +332,7 @@ def refinalize_page(
         body,
         lambda: locate_figure_regions(pdf, page_num, max_per_page),
         _render,
+        page_box=lambda: whole_page_box(pdf, page_num),
         # The live lane reads ``_page_has_tables``; a finished run's sidecar keeps the table
         # region count and the chart-region lane's own events, which say the same thing.
         chart_region_owns=bool(sidecar.get("native_table_region_count"))

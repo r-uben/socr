@@ -14669,6 +14669,7 @@ class UnifiedPipeline:
             decide,
             locate_figure_regions,
             page_was_read_by_a_model,
+            whole_page_box,
         )
 
         body = (getattr(page_out, "text", "") or "") if page_out is not None else ""
@@ -14718,6 +14719,7 @@ class UnifiedPipeline:
             body,
             lambda: locate_figure_regions(state.handle.path, page_num, per_page),
             _render,
+            page_box=lambda: whole_page_box(state.handle.path, page_num),
             # The chart-region lane's own candidate set is the pages with a table signal
             # (``_preserve_chart_regions``), and the arbitration event marks its mixed pages.
             # With ``--save-figures`` the ordinary figure phase runs and owns the page's
@@ -23200,14 +23202,15 @@ class UnifiedPipeline:
                     )
                 if _uc_shipped:
                     console.print(
-                        f"  [red]{len(_uc_shipped)} page(s) name no figure and show none: a "
-                        f"crop of the located region ships, its values untranscribed; the "
-                        f"page is marked: {_uc_shipped}[/red]"
+                        f"  [red]{len(_uc_shipped)} page(s) name no figure and show none: the "
+                        f"page contains graphics and a picture of the full page ships, "
+                        f"nothing in it read or verified; the page is marked: "
+                        f"{_uc_shipped}[/red]"
                     )
                 if _uc_lost:
                     console.print(
-                        f"  [red]{len(_uc_lost)} page(s) name no figure, a figure region was "
-                        f"located and its crop could not be saved; it is preserved nowhere; "
+                        f"  [red]{len(_uc_lost)} page(s) name no figure, contain graphics and "
+                        f"no picture of the page could be saved; they are preserved nowhere; "
                         f"the page is marked: {_uc_lost}[/red]"
                     )
                 if _uf_skeleton:
