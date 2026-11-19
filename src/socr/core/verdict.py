@@ -1491,6 +1491,15 @@ def numbers_dropped_note(pages: list[int]) -> str:
 
 NO_OWN_TEXT_REASON = "this page has no text layer of its own to check the reading's numbers against"
 NO_NUMBER_REASON = "the reading ships no number to check against the page's text layer"
+#: #1378: the page prints no number a check could doubt. The reading ships none, the page's own
+#: layer holds none the reading does not already hold (``reference_only == 0``), the layer is a
+#: clean one, and the ink-vs-layer coverage (#1050) found no ink outside the layer's visible
+#: characters, so no numeral can sit on the page unread by the layer. NOT a PASS: agreement over
+#: nothing stays vacuous (``compared == 0``); the check simply does not apply.
+NO_NUMBER_ON_PAGE_REASON = (
+    "neither the reading nor this page's own text layer prints a number, and the layer accounts "
+    "for all of the page's ink (text coverage passed): there is no number to check"
+)
 #: The same, on a page whose own layer DOES print numbers: the reading may have dropped
 #: them. Counted, not named -- they include page numbers and running heads, and checking
 #: drops is issue #1218 (owner/orchestrator ruling, 2026-10-20).
@@ -1623,7 +1632,8 @@ def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | Non
     * No text layer of its own: UNKNOWN. The seam for #1208: an independent reader's
       agreement would be the evidence that clears this; nothing produces one yet.
     * The reading ships no number: UNKNOWN. Agreement over nothing is vacuous (the owner's
-      ruling: CHECKED requires ``compared > 0``).
+      ruling: CHECKED requires ``compared > 0``). Except (#1378) a page whose layer holds no
+      further number and whose ink the layer fully covers: no clause (``_page_prints_no_number``).
     * Numbers the layer has and the reading lacks are NOT checked here (issue #1218).
     * A shipped number the layer does not hold: FAIL, and every one is NAMED -- UNKNOWN
       when the detector refused the layer or found its digits damaged (still named).
@@ -1654,6 +1664,25 @@ def _not_a_reading(
             check, f"{NO_PROVIDER_LADDER_REASON}: no model reading exists to compare", scope
         )
     return _not_applicable(check, NOT_A_MODEL_READING_REASON, scope)
+
+
+def _page_prints_no_number(record: Any, p: Any) -> bool:
+    """#1378: whether a reading that ships no number faces a page that prints none either.
+
+    All four hold, each one fail-closed: the layer holds no number the reading lacks; the
+    layer is a clean one (born-digital, or refused for its shape alone after every damage scan
+    passed -- a damaged layer can have lost its digits, so its silence is no evidence); and
+    the #1050 ink coverage PASSED, i.e. every ink component of the page image lies under a
+    visible character of that layer. Without the last, a scan whose layer is a short
+    earlier-OCR or partial text could hide numerals it never extracted. An absent, ``flagged``
+    or ``unknown`` coverage verdict keeps the page warned."""
+    from socr.core.text_coverage import VERDICT_PASSED
+
+    if record.reference_only:
+        return False
+    if _layer_is_damaged(p) and not _layer_is_shape_refused(p):
+        return False
+    return getattr(p, "text_coverage_verdict", "") == VERDICT_PASSED
 
 
 def text_layer_numbers_outcome(
@@ -1693,6 +1722,8 @@ def text_layer_numbers_outcome(
         reading_numbers_text(output.text, output.page_num),
         provenance=PROVENANCE_OWN_CHARACTERS,
     )
+    if record.compared == 0 and _page_prints_no_number(record, p):
+        return _not_applicable(check, NO_NUMBER_ON_PAGE_REASON)
     if record.compared == 0:
         layer_count = record.reference_only
         reason = (

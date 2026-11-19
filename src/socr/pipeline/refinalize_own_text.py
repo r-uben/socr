@@ -167,6 +167,8 @@ def _page_state(sidecar: dict, pa):
             setattr(p, name, getattr(pa, name))
     # #1270: tolerant of a stand-in analysis that predates the field; absent is "not shown".
     p.layer_refused_for_shape_alone = bool(getattr(pa, "layer_refused_for_shape_alone", False))
+    # #1378: the run's own ink-vs-layer verdict; absent (an older sidecar) keeps a page warned.
+    p.text_coverage_verdict = str(sidecar.get("text_coverage") or "")
     # #1306: the footnote wrapper strip reads the painted glyphs; None (not read) keeps wrappers.
     p.painted_layer_text = getattr(pa, "painted_layer_text", None)
     p.prior_ocr_layer_suspect = bool(
