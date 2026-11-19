@@ -1491,14 +1491,16 @@ def numbers_dropped_note(pages: list[int]) -> str:
 
 NO_OWN_TEXT_REASON = "this page has no text layer of its own to check the reading's numbers against"
 NO_NUMBER_REASON = "the reading ships no number to check against the page's text layer"
-#: #1378: the page prints no number a check could doubt. The reading ships none, the page's own
-#: layer holds none the reading does not already hold (``reference_only == 0``), the layer is a
-#: clean one, and the ink-vs-layer coverage (#1050) found no ink outside the layer's visible
-#: characters, so no numeral can sit on the page unread by the layer. NOT a PASS: agreement over
-#: nothing stays vacuous (``compared == 0``); the check simply does not apply.
+#: #1378: the page prints no number a check could doubt. The digit characters of the reading are
+#: exactly those of the page's own layer (both may be none), the layer is a clean one, and the
+#: page carries no raster, no drawing and no glyph-sized ink outside the layer's visible
+#: characters (``text_coverage.CoveragePage.ink_fully_accounted``), so no numeral can sit on the
+#: page unread by the layer. NOT a PASS: agreement over nothing stays vacuous (``compared == 0``);
+#: the check simply does not apply.
 NO_NUMBER_ON_PAGE_REASON = (
-    "neither the reading nor this page's own text layer prints a number, and the layer accounts "
-    "for all of the page's ink (text coverage passed): there is no number to check"
+    "the reading and this page's own text layer print the same digits (none besides any "
+    "reference label), and the page holds no raster, no drawing and no glyph-sized ink outside "
+    "that layer: there is no number to check"
 )
 #: The same, on a page whose own layer DOES print numbers: the reading may have dropped
 #: them. Counted, not named -- they include page numbers and running heads, and checking
@@ -1666,23 +1668,38 @@ def _not_a_reading(
     return _not_applicable(check, NOT_A_MODEL_READING_REASON, scope)
 
 
-def _page_prints_no_number(record: Any, p: Any) -> bool:
+def _digit_characters(text: str) -> str:
+    """Every digit character of *text*, in order, whatever the number tokeniser makes of them."""
+    return "".join(ch for ch in text if ch.isdigit())
+
+
+def _page_prints_no_number(output: PageOutput, reference: str, record: Any, p: Any) -> bool:
     """#1378: whether a reading that ships no number faces a page that prints none either.
 
-    All four hold, each one fail-closed: the layer holds no number the reading lacks; the
-    layer is a clean one (born-digital, or refused for its shape alone after every damage scan
-    passed -- a damaged layer can have lost its digits, so its silence is no evidence); and
-    the #1050 ink coverage PASSED, i.e. every ink component of the page image lies under a
-    visible character of that layer. Without the last, a scan whose layer is a short
-    earlier-OCR or partial text could hide numerals it never extracted. An absent, ``flagged``
-    or ``unknown`` coverage verdict keeps the page warned."""
-    from socr.core.text_coverage import VERDICT_PASSED
-
+    Fail-closed on each: (1) the DIGIT CHARACTERS of the reading equal those of the layer, in
+    order (both may be empty; ``I-58`` on both sides qualifies). This does not use the number
+    tokeniser, so a glued ``USD25``, ``Q4`` or ``FY2023`` (which it reads as no number), a layer
+    number fused to a dot leader, or a dash it does not split can not slip through; (2) the layer
+    holds no number the reading lacks; (3) the layer is clean (born-digital, or refused for its
+    shape alone after every damage scan passed) and carries no cosmetic-encoding flag, since a
+    fused pair can hide a digit; (4) the strict ink fact: no raster, no drawing, and no
+    glyph-sized ink outside the layer (``_ink_is_accounted_for``)."""
     if record.reference_only:
+        return False
+    if _digit_characters(reading_numbers_text(output.text, output.page_num)) != _digit_characters(
+        reference
+    ):
         return False
     if _layer_is_damaged(p) and not _layer_is_shape_refused(p):
         return False
-    return getattr(p, "text_coverage_verdict", "") == VERDICT_PASSED
+    if any(_flag(p, f) for f in _COSMETIC_LAYER_FLAGS):
+        return False
+    return _ink_is_accounted_for(p)
+
+
+def _ink_is_accounted_for(p: Any) -> bool:
+    """The run's own strict fact (``PageState.text_ink_fully_accounted``); absent is not shown."""
+    return getattr(p, "text_ink_fully_accounted", False) is True
 
 
 def text_layer_numbers_outcome(
@@ -1722,7 +1739,7 @@ def text_layer_numbers_outcome(
         reading_numbers_text(output.text, output.page_num),
         provenance=PROVENANCE_OWN_CHARACTERS,
     )
-    if record.compared == 0 and _page_prints_no_number(record, p):
+    if record.compared == 0 and _page_prints_no_number(output, reference, record, p):
         return _not_applicable(check, NO_NUMBER_ON_PAGE_REASON)
     if record.compared == 0:
         layer_count = record.reference_only
@@ -1936,17 +1953,14 @@ def _clean_short_layer_is_evidence(p: Any) -> bool:
     heading) still counts as the page's words, for a PASS.
 
     Three facts, all recorded by the run: the refusal was for shape alone after every damage scan
-    passed (``_layer_is_shape_refused``); the #1050 ink coverage PASSED, so every ink component of
-    the page image lies under a visible character of that layer (a short running head over a
-    scanned body leaves the body's ink uncovered and is ``flagged``); and no unmapped symbol
-    glyph (``_word_layer_is_damaged``'s second clause). Only the PASS uses this: a MISSING word
-    is still UNKNOWN on such a layer, as before."""
-    from socr.core.text_coverage import VERDICT_PASSED
-
+    passed (``_layer_is_shape_refused``); the strict ink fact holds (``_ink_is_accounted_for``: no
+    raster, no drawing, no glyph-sized ink outside the layer -- the #1050 ``passed`` verdict is NOT
+    enough, it lets a lone number or a grid of figures through); and no unmapped symbol glyph.
+    Only the PASS uses this: a MISSING word is still UNKNOWN on such a layer, as before."""
     return (
         _layer_is_shape_refused(p)
         and not _flag(p, "has_unrecovered_symbol_glyphs")
-        and getattr(p, "text_coverage_verdict", "") == VERDICT_PASSED
+        and _ink_is_accounted_for(p)
     )
 
 

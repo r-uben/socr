@@ -133,6 +133,12 @@ class CoveragePage:
     regions: list[CoverageRegion] = field(default_factory=list)
     error: str = ""
     seconds: float = 0.0
+    #: #1378: the STRICT fact, stricter than ``verdict == passed``: the page carries no raster
+    #: image and no vector drawing (neither can hold glyphs outside the layer's text) AND ZERO
+    #: glyph-sized ink components lie outside the layer's visible characters, counted before the
+    #: word-run filter that ``passed`` stops at. ``passed`` alone lets a lone number, a grid of
+    #: figures or a chart's tick labels through, because none forms a word-like run.
+    ink_fully_accounted: bool = False
 
     @property
     def kept(self) -> list[CoverageRegion]:
@@ -370,8 +376,11 @@ def _locate_kind(page, mat, px) -> str:
     return "vector_or_bare"
 
 
-def _regions_from_ink(page, mat, ink, layer) -> list[CoverageRegion]:
-    """Envelope-filter one polarity's ink into coverage regions."""
+def _residual_components(ink, layer):
+    """One polarity's ink split by the layer: ``(labels, stats, resid_idx, covered_idx,
+    glyph_like)``. A component is COVERED when more than ``COVER_MAJORITY`` of its pixels lie under
+    a visible layer character; the rest are residual, and ``glyph_like`` marks the residual ones
+    whose size is a glyph's (the filter both the region finder and the strict check use)."""
     import cv2
 
     n, labels, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8), connectivity=8)
@@ -379,15 +388,10 @@ def _regions_from_ink(page, mat, ink, layer) -> list[CoverageRegion]:
     tot = np.bincount(labels.ravel(), minlength=n).astype(np.float64)
     with np.errstate(invalid="ignore", divide="ignore"):
         frac = np.where(tot > 0, hit / tot, 0.0)
-    x, y, w, h, area = (stats[:, i] for i in range(5))
     idx = np.arange(1, n)
     resid_idx = idx[frac[idx] < COVER_MAJORITY]
     covered_idx = idx[frac[idx] >= COVER_MAJORITY]
-    h_med = (
-        float(np.median(h[covered_idx]))
-        if len(covered_idx) >= H_MED_MIN_COVERED
-        else GLYPH_H_P50_PX
-    )
+    h, w = stats[:, 3], stats[:, 2]
     rh, rw = h[resid_idx], w[resid_idx]
     # page.rotation swaps pixmap axes. Filter on the orientation-
     # invariant pair so a 16 pt Helvetica-Oblique raster that flags
@@ -403,6 +407,18 @@ def _regions_from_ink(page, mat, ink, layer) -> list[CoverageRegion]:
     thin = short <= MAX_THICK_PX
     long_ = long > GLYPH_H_P98_PX
     glyph_like &= ~(thin & long_)
+    return labels, stats, resid_idx, covered_idx, glyph_like
+
+
+def _regions_from_ink(page, mat, ink, layer) -> list[CoverageRegion]:
+    """Envelope-filter one polarity's ink into coverage regions."""
+    labels, stats, resid_idx, covered_idx, glyph_like = _residual_components(ink, layer)
+    x, y, w, h, area = (stats[:, i] for i in range(5))
+    h_med = (
+        float(np.median(h[covered_idx]))
+        if len(covered_idx) >= H_MED_MIN_COVERED
+        else GLYPH_H_P50_PX
+    )
     # Solids that fill more of their box than ``_MIN_FILL_FRAC`` and are
     # thicker than a rule are still glyphs when they sit in the height band;
     # the fill envelope below drops dashed-line rows, not this cut.
@@ -879,6 +895,31 @@ def preceding_text_snippet(page, region_pdf, *, tail_words: int = ANCHOR_TAIL_WO
     return " ".join(words[-tail_words:])
 
 
+def page_ink_is_fully_accounted(page, mat, dark, light, layer) -> bool:
+    """#1378: see ``CoveragePage.ink_fully_accounted``. Fail closed: any doubt is ``False``."""
+    try:
+        if page.get_image_info():
+            return False
+        for d in page.get_drawings():
+            rect = d.get("rect")
+            if rect is None or rect.is_empty:
+                continue
+            x0, y0, x1, y1 = _to_pix(rect, page, mat)
+            short, long = min(x1 - x0, y1 - y0), max(x1 - x0, y1 - y0)
+            # A RULE (thin and longer than a glyph: the same cut ``_residual_components`` drops
+            # from the ink) cannot carry a glyph; any other path might be outlined text.
+            if not (short <= MAX_THICK_PX and long > GLYPH_H_P98_PX):
+                return False
+        for ink in (dark, light):
+            *_, glyph_like = _residual_components(ink, layer)
+            if bool(glyph_like.any()):
+                return False
+        return True
+    except Exception as exc:
+        logger.debug("text coverage: strict check failed closed (%s)", exc)
+        return False
+
+
 def analyze_page(page, *, group: bool = True) -> CoveragePage:
     """Ink-vs-layer check on one page. Never raises; failures are ``unknown``.
 
@@ -912,6 +953,8 @@ def analyze_page(page, *, group: bool = True) -> CoveragePage:
             verdict=VERDICT_FLAGGED if regions else VERDICT_PASSED,
             regions=regions,
             seconds=round(time.perf_counter() - t0, 3),
+            ink_fully_accounted=not regions
+            and page_ink_is_fully_accounted(page, mat, dark, light, layer),
         )
     except Exception as exc:
         logger.debug("text coverage: page failed closed (%s)", exc)

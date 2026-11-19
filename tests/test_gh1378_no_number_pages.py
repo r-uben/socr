@@ -34,11 +34,12 @@ CONTENTS = "\n".join(
 
 
 def _page(layer: str, *, coverage: str = "passed", born_digital: bool = False, shape: bool = True):
+    """``coverage`` is the strict ink fact: "passed" -> accounted for, anything else -> not."""
     p = PageState(page_num=1)
     p.own_layer_text = layer
     p.is_born_digital = born_digital
     p.layer_refused_for_shape_alone = shape
-    p.text_coverage_verdict = coverage
+    p.text_ink_fully_accounted = coverage == "passed"
     return p
 
 
@@ -205,3 +206,216 @@ def test_a_divider_page_is_independently_confirmed_only_with_a_words_pass() -> N
         ]
         assert independent_page_evidence(entries, text) is confirmed
     assert Check.TEXT_LAYER_WORDS.value == "text_layer_words"
+
+
+# --- the strict ink fact, built from real PDFs (blocking review finding) --------------------
+
+import fitz  # noqa: E402
+
+from socr.core.text_coverage import analyze_page  # noqa: E402
+
+TITLE = "International Developments"
+
+
+def _title_page(doc: fitz.Document, title: str = TITLE) -> fitz.Page:
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 80), title, fontsize=18)
+    return page
+
+
+def _raster_of(draw, *, dpi: int = 150, size=(400, 260)) -> fitz.Pixmap:
+    scratch = fitz.open()
+    sp = scratch.new_page(width=size[0], height=size[1])
+    draw(sp)
+    return sp.get_pixmap(dpi=dpi)
+
+
+def _with_raster(draw, *, dpi: int = 150) -> fitz.Page:
+    doc = fitz.open()
+    page = _title_page(doc)
+    page.insert_image(fitz.Rect(72, 200, 472, 460), pixmap=_raster_of(draw, dpi=dpi))
+    return page
+
+
+def _grid(values, fontsize, color=(0, 0, 0)):
+    def draw(sp):
+        for r, row in enumerate(values):
+            for c, v in enumerate(row):
+                sp.insert_text((20 + 70 * c, 30 + 40 * r), v, fontsize=fontsize, color=color)
+
+    return draw
+
+
+DECIMALS = [[f"{r}.{c}{r + c}" for c in range(5)] for r in range(1, 5)]
+INTEGERS = [[str(10 + r * 5 + c) for c in range(5)] for r in range(4)]
+
+
+def _single(text, fontsize):
+    def draw(sp):
+        sp.insert_text((60, 120), text, fontsize=fontsize)
+
+    return draw
+
+
+def _bars(sp):
+    for i, v in enumerate((30, 80, 55, 100)):
+        sp.draw_rect(fitz.Rect(40 + 80 * i, 220 - v, 90 + 80 * i, 220), fill=(0, 0, 0))
+        sp.insert_text((50 + 80 * i, 235), str(10 * (i + 3)), fontsize=10)
+
+
+def _ticks(sp):
+    sp.draw_line((30, 200), (380, 200))
+    for i, y in enumerate(range(2015, 2024, 2)):
+        sp.insert_text((30 + 70 * i, 218), str(y), fontsize=9)
+    for j in range(5):
+        sp.insert_text((4, 200 - 40 * j), str(j * 10), fontsize=9)
+
+
+REVIEWER_RASTERS = {
+    "decimals_10pt": (_grid(DECIMALS, 10), 150),
+    "integers_10pt": (_grid(INTEGERS, 10), 150),
+    "decimals_grey": (_grid(DECIMALS, 10, (0.75, 0.75, 0.75)), 150),
+    "decimals_72dpi": (_grid(DECIMALS, 10), 72),
+    "chart_ticks_years": (_ticks, 150),
+    "bar_value_labels": (_bars, 150),
+    "single_value": (_single("3.25", 12), 150),
+    "page_number": (_single("17", 12), 150),
+    "year_48pt": (_single("2023", 48), 150),
+}
+
+
+def test_the_covered_title_page_is_accounted_for() -> None:
+    doc = fitz.open()
+    cov = analyze_page(_title_page(doc))
+    assert cov.verdict == "passed"
+    assert cov.ink_fully_accounted is True
+
+
+@pytest.mark.parametrize("name", sorted(REVIEWER_RASTERS))
+def test_a_raster_of_numbers_under_a_title_layer_is_never_accounted_for(name) -> None:
+    """The reviewer's repro: ``passed`` holds for most of these (no word-like run), the strict
+    fact never does, and so the page stays warned end to end."""
+    draw, dpi = REVIEWER_RASTERS[name]
+    page = _with_raster(draw, dpi=dpi)
+    cov = analyze_page(page)
+    assert cov.ink_fully_accounted is False
+    p = _page(TITLE)
+    p.text_coverage_verdict = cov.verdict
+    p.text_ink_fully_accounted = cov.ink_fully_accounted
+    assert _result(_read(f"# {TITLE}"), p) is CheckResult.UNKNOWN
+    # the difference: the same page with the fact granted would have exited
+    p.text_ink_fully_accounted = True
+    assert _result(_read(f"# {TITLE}"), p) is None
+
+
+def test_the_verdict_alone_is_not_the_fact() -> None:
+    """At least one reviewer input is ``passed`` yet not accounted for: the tests above are not
+    vacuous against the old predicate."""
+    passed = [
+        n
+        for n, (draw, dpi) in REVIEWER_RASTERS.items()
+        if analyze_page(_with_raster(draw, dpi=dpi)).verdict == "passed"
+    ]
+    assert passed
+
+
+def test_a_vector_drawing_is_never_accounted_for() -> None:
+    doc = fitz.open()
+    page = _title_page(doc)
+    page.draw_rect(fitz.Rect(72, 200, 100, 220), fill=(0, 0, 0))
+    assert analyze_page(page).ink_fully_accounted is False
+
+
+def test_glyph_sized_ink_outside_the_layer_is_never_accounted_for(monkeypatch) -> None:
+    """The ink rule alone (no raster, no drawing): the number line is real ink, and the layer the
+    analysis is given omits it, as a layer short of the page's glyphs would."""
+    from socr.core import text_coverage
+
+    doc = fitz.open()
+    page = _title_page(doc)
+    page.insert_text((72, 300), "3.25", fontsize=12)
+    real = text_coverage.visible_char_boxes
+
+    def title_only(pg):
+        vis, inv = real(pg)
+        return [b for b in vis if b[1] < 150], inv
+
+    assert analyze_page(page).ink_fully_accounted is True
+    monkeypatch.setattr(text_coverage, "visible_char_boxes", title_only)
+    assert analyze_page(page).ink_fully_accounted is False
+
+
+# --- the exit does not depend on the number tokeniser ---------------------------------------
+
+GLUED = [
+    "USD25",
+    "EUR50",
+    "No.12",
+    "Dec.31",
+    "Vol.12",
+    "bp25",
+    "T-10",
+    "Q4",
+    "M2-1",
+    "VI-1.5",
+    "VIII-100",
+    "MMIV-12",
+    "$5bn",
+    "3.2pp",
+    "1.5x",
+    "FY2023",
+    "up2.3%",
+]
+
+
+@pytest.mark.parametrize("glued", GLUED)
+def test_a_glued_number_in_the_reading_stays_warned(glued) -> None:
+    p = _page("Selected figures")
+    assert _result(_read(f"Selected figures {glued}"), p) is CheckResult.UNKNOWN
+    # the difference: the same page and reading without the glued number exits
+    assert _result(_read("Selected figures"), p) is None
+
+
+def test_the_same_digits_on_both_sides_still_exit() -> None:
+    p = _page("(Page I-58 is intentionally blank.)")
+    assert _result(_read("(Page I-58 is intentionally blank.)"), p) is None
+
+
+def test_an_en_dash_layer_value_is_not_claimed_by_a_reading_label() -> None:
+    p = _page("Section VIII\u20131 Total 1", shape=True)
+    assert _result(_read("Section VIII-1 Total"), p) is CheckResult.UNKNOWN
+
+
+def test_a_layer_number_fused_to_a_dot_leader_is_not_dropped() -> None:
+    p = _page("Summary.....41")
+    assert _result(_read("Summary"), p) is CheckResult.UNKNOWN
+
+
+def test_a_cosmetic_encoding_flag_on_a_born_digital_layer_keeps_the_page_warned() -> None:
+    p = _page("Summary", born_digital=True, shape=False)
+    assert _result(_read("Summary"), p) is None
+    p.has_encoding_hygiene_suspect = True
+    assert _result(_read("Summary"), p) is CheckResult.UNKNOWN
+
+
+# --- the refinalize seam (the line the review found untested) -------------------------------
+
+
+def test_refinalize_reads_the_strict_fact_from_the_sidecar() -> None:
+    from socr.core.born_digital import PageAssessment
+
+    from socr.pipeline.refinalize_own_text import _page_state
+
+    sidecar = {"page_num": 1, "text_ink_fully_accounted": True, "text_coverage": "passed"}
+    pa = PageAssessment(page_num=1, is_born_digital=False, native_text="", confidence=0.0)
+    assert _page_state(sidecar, pa).text_ink_fully_accounted is True
+    old = {"page_num": 1, "text_coverage": "passed"}
+    assert _page_state(old, pa).text_ink_fully_accounted is False
+
+
+def test_a_thin_rule_does_not_stop_a_page_being_accounted_for() -> None:
+    """p029 and p043 carry two hairline rules; a rule cannot hold a glyph."""
+    doc = fitz.open()
+    page = _title_page(doc)
+    page.draw_rect(fitz.Rect(111, 103, 500, 104), fill=(0, 0, 0))
+    assert analyze_page(page).ink_fully_accounted is True

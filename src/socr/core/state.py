@@ -241,6 +241,9 @@ class PageState:
     #: ``flagged`` / ``unknown``. Runtime; a WARNING page is never resumed as
     #: terminal SUCCESS.
     text_coverage_verdict: str = ""
+    #: #1378: ``text_coverage.CoveragePage.ink_fully_accounted`` -- no raster, no drawing, and no
+    #: glyph-sized ink outside the layer. Stricter than ``passed``; absent means not shown.
+    text_ink_fully_accounted: bool = False
     text_ink_unread: bool = False
     text_coverage_unknown: bool = False
     #: #165: sparse, span-level coverage evidence from whichever recovery lane
