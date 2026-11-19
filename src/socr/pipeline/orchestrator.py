@@ -178,6 +178,8 @@ from socr.core.verdict import (
     pages_not_success_note as _pages_not_success_note,
     NUMBERS_DISAGREE_EVENT_DETAIL,
     NUMBERS_DISAGREE_KIND,
+    PRIOR_OCR_AGREEMENT_EVENT_DETAIL,
+    PRIOR_OCR_AGREEMENT_KIND,
     INVALID_FINAL_EMISSION_NOTE_PREFIX,
     NUMBERS_DROPPED_EVENT_DETAIL,
     NUMBERS_DROPPED_KIND,
@@ -18708,6 +18710,15 @@ class UnifiedPipeline:
         # router-only flag would leave the meter counting such pages CHECKED.
         if ps is not None and getattr(ps, "prior_ocr_layer_suspect", False):
             payload["prior_ocr_layer_suspect"] = True
+            # #1381: the page was confirmed by agreement with that layer. Sparse: absent otherwise.
+            if winning_out is not None:
+                from socr.core.verdict import (
+                    PRIOR_OCR_AGREEMENT_KIND as _AGREE_KEY,
+                    prior_ocr_layer_agreement as _agrees,
+                )
+
+                if _agrees(winning_out, ps):
+                    payload[_AGREE_KEY] = True
             # The owner's ruling, "so we don't lose job done": the earlier OCR layer is
             # retained HERE, numbers included, where it is never shipped, so Part B can
             # recover that work by re-finalizing from it with no re-OCR. Stored on every
@@ -21529,12 +21540,27 @@ class UnifiedPipeline:
         # mark, while the meter's own rule flagged the same page). That makes the page's
         # mark and the document's status read the same condition rather than two that have
         # to be kept in step.
+        # #1381: the pages whose earlier OCR layer an independent fresh reading confirmed, exactly
+        # (``verdict.prior_ocr_layer_agreement``: the one predicate the page's clause uses). They
+        # are recorded as confirmed, not as retained-unchecked, so the document status and the
+        # page verdict state the same thing.
+        from socr.core.verdict import prior_ocr_layer_agreement as _prior_ocr_agreement
+
+        prior_ocr_agreement_pages = sorted(
+            r.output.page_num
+            for r in pre_records
+            if r.output.page_num in state.pages
+            and getattr(state.pages[r.output.page_num], "prior_ocr_layer_suspect", False)
+            and r.output.page_num not in failed_pages
+            and _prior_ocr_agreement(r.output, state.pages[r.output.page_num])
+        )
         prior_ocr_retained_pages = [
             n
             for n, p in sorted(state.pages.items())
             if getattr(p, "prior_ocr_layer_suspect", False)
             and p.best_output
             and n not in failed_pages
+            and n not in prior_ocr_agreement_pages
         ]
         # #1185: a model reading that ships a number its page's own (born-digital) text
         # layer does not hold. The page is WARNING and names the numbers; the document
@@ -22188,6 +22214,7 @@ class UnifiedPipeline:
             or minus_retained_pages
             or invisible_retained_pages
             or prior_ocr_retained_pages
+            or prior_ocr_agreement_pages
             or numbers_disagree_pages
             or numbers_dropped_pages
             or words_missing_pages
@@ -22366,6 +22393,18 @@ class UnifiedPipeline:
                             else "OCR unavailable or every rung failed"
                         )
                         + "); the text ships WARNING, unverified",
+                    )
+                )
+            for n in prior_ocr_agreement_pages:
+                state.events.append(
+                    AuditEvent(
+                        page_num=n,
+                        kind=PRIOR_OCR_AGREEMENT_KIND,
+                        engine=state.pages[n].best_output.engine
+                        if state.pages[n].best_output
+                        else "",
+                        detail=PRIOR_OCR_AGREEMENT_EVENT_DETAIL,
+                        data={PRIOR_OCR_AGREEMENT_KIND: True},
                     )
                 )
             for n in prior_ocr_retained_pages:

@@ -1270,6 +1270,119 @@ def _prior_ocr_layer_clause(output: PageOutput, p: Any) -> VerdictClause | None:
     return _prior_ocr_layer_outcome(output, p).clause
 
 
+#: #1381: the owner's ruling (2026-11-18). Agreement of an independent fresh reading with the
+#: earlier OCR layer settles the clause; the layer is not evidence on its own, and two readings can
+#: agree and both be wrong, which is why the reason says so.
+PRIOR_OCR_AGREEMENT_REASON = (
+    "a fresh reading of the page image agrees word for word and number for number with the "
+    "earlier OCR layer (two readings can agree and both be wrong)"
+)
+#: The audit event a document records for each page confirmed this way (#1381), and the sidecar key.
+PRIOR_OCR_AGREEMENT_KIND = "prior_ocr_layer_agreement"
+PRIOR_OCR_AGREEMENT_EVENT_DETAIL = (
+    "this page's text layer is an earlier OCR run; a fresh reading of the page image agrees with "
+    "it exactly (every word, short token, number as written, in order), so the page is confirmed "
+    "by agreement with a prior OCR layer. The layer itself is still not evidence: no other check "
+    "reads it (#1381)"
+)
+#: Engines whose reading cannot be shown independent of the page's embedded layer from this code:
+#: marker is handed a one-page PDF and reads the embedded layer unless ``--force-ocr``
+#: (``engines/marker.py``: ``fingerprint_determinants``, ``_build_command``).
+LAYER_DEPENDENT_ENGINES = frozenset({"marker"})
+
+_HTML_TAG_RE = re.compile(r"<\s*/?\s*[A-Za-z][^>]*>")
+_ORDERED_RUN_RE = re.compile(r"[^\W\d_]+|\d+")
+#: A number as written, sign and decimal point included: ``-.7`` and ``-7`` are two writings.
+_NUMBER_WRITING_RE = re.compile(r"[-\u2212]?(?:\d[\d.,]*|\.\d[\d.,]*)")
+
+
+def _number_writings(text: str) -> list[str]:
+    """Every number of *text* as written, in order, trailing sentence punctuation dropped."""
+    return [m.group().rstrip(".,") for m in _NUMBER_WRITING_RE.finditer(text)]
+
+
+def _ordered_runs(text: str) -> list[str]:
+    """Every letter run and digit run of *text*, case-folded, in order, so a reordering of any
+    two words (long or short) changes the list."""
+    return _ORDERED_RUN_RE.findall(text.replace("\u00ad", "").casefold())
+
+
+def _same_digits_and_short_tokens(reading: str, reference: str) -> bool:
+    """The #1378/#1379 comparison, one definition: the raw digit characters and the short tokens
+    (``II``, ``C``, ``XIII``, ``\u00bd``), each in order, are equal."""
+    from socr.tables.layer_words import short_tokens_in_order
+
+    return _digit_characters(reading) == _digit_characters(reference) and short_tokens_in_order(
+        reading
+    ) == short_tokens_in_order(reference)
+
+
+def _reading_matches_layer_exactly(reading: str, layer: str) -> bool:
+    """Two-way exact agreement: the #1379 digit and short-token equality, the compared words
+    (:func:`word_tokens_in_order`) equal as ordered lists (which is both multiset directions at
+    once), and every letter/digit run and every number as written equal in order. Nothing is
+    rescued (no hyphen join, no ligature variant, no fused or split word): ``missing_words`` rescues
+    them on purpose and is one-directional, so it is not the comparison for "exact"."""
+    from socr.tables.layer_words import has_line_break_hyphen, word_tokens_in_order
+
+    if has_line_break_hyphen(reading) or has_line_break_hyphen(layer):
+        return False
+    return (
+        _same_digits_and_short_tokens(reading, layer)
+        and word_tokens_in_order(reading) == word_tokens_in_order(layer)
+        and _ordered_runs(reading) == _ordered_runs(layer)
+        and _number_writings(reading) == _number_writings(layer)
+    )
+
+
+def prior_ocr_layer_agreement(output: PageOutput, p: Any) -> bool:
+    """#1381: whether this scanned page's earlier OCR layer is confirmed by an independent reading.
+
+    Every condition, fail-closed:
+
+    * the layer is a POSITIVE finding (``prior_ocr_layer_found``) and neither detector scan failed
+      (``prior_ocr_layer_scan_failed``, ``invisible_text_scan_failed`` stay UNKNOWN);
+    * the shipped page is a model reading from an engine that reads the rendered page image
+      (``_is_model_reading``: a native lane, a chart picture, ``reconciled(...)`` and
+      ``native+equations`` are not), never :data:`LAYER_DEPENDENT_ENGINES`, and it is the page's
+      own page-major attempt (``p.best_output``), not a slice of a whole-document run, which hands
+      the engine the PDF and its layer;
+    * the reading holds no HTML (wrapped tables compare as markup, not words);
+    * the retained layer is non-empty, and :func:`_reading_matches_layer_exactly` holds.
+    """
+    from socr.core.manifest import (
+        _base_engine_name,
+        is_page_failed_marker,
+        prior_ocr_layer_found,
+        retained_prior_ocr_layer,
+    )
+
+    if not (_flag(p, "prior_ocr_layer_suspect") and prior_ocr_layer_found(p)):
+        return False
+    if _flag(p, "prior_ocr_layer_scan_failed") or _flag(p, "invisible_text_scan_failed"):
+        return False
+    if not _is_model_reading(output):
+        return False
+    engine = _base_engine_name(output.engine or "")
+    if engine in LAYER_DEPENDENT_ENGINES:
+        return False
+    attempt = getattr(p, "best_output", None)
+    if attempt is None or _base_engine_name(getattr(attempt, "engine", "") or "") != engine:
+        return False
+    text = output.text or ""
+    if not text.strip() or is_page_failed_marker(text):
+        return False
+    reading = reading_numbers_text(
+        _HTML_COMMENT_RE.sub(" ", _IMAGE_LINK_RE.sub(" ", text)), output.page_num
+    )
+    if _HTML_TAG_RE.search(reading):
+        return False
+    layer = retained_prior_ocr_layer(p)
+    if not isinstance(layer, str) or not layer.strip():
+        return False
+    return _reading_matches_layer_exactly(reading, layer)
+
+
 PRIOR_OCR_NO_LAYER_REASON = (
     "this page has no text layer of its own, so none can be an earlier OCR run"
 )
@@ -1281,6 +1394,8 @@ def _prior_ocr_layer_outcome(output: PageOutput, p: Any) -> CheckOutcome:
     (``BornDigitalDetector.assess``), and a failed scan counts as suspect, so a page that has
     its own layer and is not suspect is a recorded negative, not an absence."""
     if _flag(p, "prior_ocr_layer_suspect"):
+        if prior_ocr_layer_agreement(output, p):
+            return _passed(Check.PRIOR_OCR_LAYER, reason=PRIOR_OCR_AGREEMENT_REASON)
         return _found(
             VerdictClause(
                 check=Check.PRIOR_OCR_LAYER,
@@ -1686,15 +1801,11 @@ def _page_prints_no_number(output: PageOutput, reference: str, record: Any, p: A
     glyph-sized ink outside the layer (``_ink_is_accounted_for``)."""
     if record.reference_only:
         return False
-    from socr.tables.layer_words import short_tokens_in_order
-
     reading = reading_numbers_text(output.text, output.page_num)
-    if _digit_characters(reading) != _digit_characters(reference):
-        return False
     # The words check ignores letter runs under ``MIN_WORD_LETTERS`` and every non-decimal numeral
     # (``II`` -> ``III``, ``Annex C`` -> ``G``, ``XII`` -> ``XIII``, ``1/2``), and the digit rule
     # sees none of them: the SHORT tokens must match too, in order.
-    if short_tokens_in_order(reading) != short_tokens_in_order(reference):
+    if not _same_digits_and_short_tokens(reading, reference):
         return False
     if _layer_is_damaged(p) and not _layer_is_shape_refused(p):
         return False
@@ -2341,6 +2452,19 @@ def independent_page_evidence(entries: Iterable[TraceEntry], text: str) -> bool:
             e.check == check.value and e.scope == SCOPE_PAGE and e.result in wanted for e in checked
         )
 
+    # #1381 (owner ruling 2026-11-18): the one other independent confirmation. A scan's earlier OCR
+    # layer cannot be the words/numbers reference (it is suspect, so those checks do not run), but
+    # an exact two-way agreement of an independent fresh reading with it is the evidence the ruling
+    # accepts. Keyed on the entry's own reason, which only :func:`_prior_ocr_layer_outcome` emits,
+    # and (like every PASS above) only when computed on this very text.
+    if any(
+        e.check == Check.PRIOR_OCR_LAYER.value
+        and e.scope == SCOPE_PAGE
+        and e.result is TraceResult.PASS
+        and e.reason == PRIOR_OCR_AGREEMENT_REASON
+        for e in checked
+    ):
+        return True
     return at_page(Check.TEXT_LAYER_WORDS, TraceResult.PASS) and at_page(
         Check.TEXT_LAYER_NUMBERS, TraceResult.PASS, TraceResult.NOT_APPLICABLE
     )

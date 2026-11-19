@@ -383,6 +383,10 @@ def _prior_ocr_unchecked(page: Page) -> list[str]:
     needs a comparison against an INDEPENDENT reading, and Part A ships no comparator, so
     every flagged page is unchecked here. Part B's agreement record is what will clear it.
     """
+    # #1381: a page whose layer an exact, independent fresh reading confirmed records it
+    # (``verdict.PRIOR_OCR_AGREEMENT_KIND``) and is not unchecked on this account.
+    if page.sidecar.get("prior_ocr_layer_agreement") is True:
+        return []
     return [PRIOR_OCR_UNCHECKED] if page.sidecar.get("prior_ocr_layer_suspect") else []
 
 

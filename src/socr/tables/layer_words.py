@@ -202,6 +202,12 @@ def reference_from_words(
     return WordReference(" ".join(body), " ".join(figure))
 
 
+def has_line_break_hyphen(text: str) -> bool:
+    """Whether *text* breaks a word across lines with a hyphen (``condi-`` / ``tions``). Whether the
+    two halves are one word is a guess, so an exact comparison refuses such a text (#1381)."""
+    return _BREAK_HYPHEN_RE.search(text or "") is not None
+
+
 def word_tokens_in_order(text: str) -> list[str]:
     """The compared words of *text*, case-folded, in order. A soft hyphen inside a word is
     dropped (a line-end one is handled by :func:`reference_from_words` first)."""
