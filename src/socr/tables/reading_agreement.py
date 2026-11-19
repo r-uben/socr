@@ -180,6 +180,15 @@ _WORD_DIGIT_RE = re.compile(
 _LABEL_DIGIT_RE = re.compile(
     r"(?<![^\W\d_])(?<!\\)([^\W\d_]{1,3})(\.|[-\u2212])?(\d{1,2})(?![\d%]|,\d|\.\d)"
 )
+#: #1378: a Roman-numeral section prefix longer than three letters (``VIII-1``, ``XIII-12``),
+#: the Fed's page references. ``_LABEL_DIGIT_RE`` stops at three letters, so the reading side
+#: dropped ``VIII-1`` as a non-number word while the layer side's ``_WORD_DIGIT_RE`` split it
+#: and counted its ``1``: the two sides tokenised one string two ways. Only a WELL-FORMED
+#: Roman numeral qualifies, so ``Korea-8`` and ``MIXED-4`` stay values-or-nothing as before.
+_ROMAN = r"M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})"
+_ROMAN_LABEL_RE = re.compile(
+    rf"(?<![^\W\d_])(?<!\\)(?=[IVXLCDM]{{4,}}[-\u2212]\d)({_ROMAN})([-\u2212])(\d{{1,2}})(?![\d%]|,\d|\.\d)"
+)
 _ORDINAL_LABEL_RE = re.compile(r"(?<![\w.,\\])(\d{1,2})(Q|H|st|nd|rd|th)(?![^\W\d_])")
 #: a one-letter-name subscript written in maths (``$Q_1$``, ``$M_2$``): a PDF layer prints it
 #: flat (``Q1``), so it is joined into the same label before subscripts are dropped as names.
@@ -351,6 +360,7 @@ def _numeric_tokens(text: str, reading: bool) -> tuple[tuple[str, str, bool], ..
         # Only the label split: the layer's other splits (``2018:II``, ``5.¹¹``, ``<0.01``)
         # exposed reading tokens whose layer writing is not split the same way, and every
         # one measured on run 23319732 was a false dispute.
+        text = _ROMAN_LABEL_RE.sub(lambda m: f"{m[1]}{m[2]} {_LABEL}{m[3]}", text)
         text = _LABEL_DIGIT_RE.sub(lambda m: f"{m[1]}{m[2] or ''} {_LABEL}{m[3]}", text)
         text = _ORDINAL_LABEL_RE.sub(lambda m: f" {_LABEL}{m[1]} {m[2]}", text)
     text = _STARS_RE.sub("", text)

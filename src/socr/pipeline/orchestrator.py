@@ -15225,6 +15225,7 @@ class UnifiedPipeline:
                 if page_num in unloadable_pages or page_num in blank_pages:
                     continue
                 ps.text_coverage_verdict = "unknown"
+                ps.text_ink_fully_accounted = False
                 ps.text_coverage_unknown = True
             return
         for i, cov in enumerate(pages):
@@ -15236,6 +15237,7 @@ class UnifiedPipeline:
             if ps is None:
                 continue
             ps.text_coverage_verdict = cov.verdict
+            ps.text_ink_fully_accounted = bool(cov.ink_fully_accounted)
             ps.text_ink_unread = cov.verdict == "flagged"
             ps.text_coverage_unknown = cov.verdict == "unknown"
 
@@ -15661,6 +15663,7 @@ class UnifiedPipeline:
                 ps.text_ink_unread = False
                 ps.text_coverage_unknown = True
                 ps.text_coverage_verdict = "unknown"
+                ps.text_ink_fully_accounted = False
             return
         if not (bo.engine or "").startswith(("native", "chart_asset")):
             return
@@ -15731,6 +15734,7 @@ class UnifiedPipeline:
             ps.text_ink_unread = False
             ps.text_coverage_unknown = True
             ps.text_coverage_verdict = "unknown"
+            ps.text_ink_fully_accounted = False
             no_img = uncovered_text_marker_no_image(page_num)
             body = bo.text or ""
             extra = None
@@ -18678,6 +18682,9 @@ class UnifiedPipeline:
         _coverage = (getattr(ps, "text_coverage_verdict", "") or "") if ps else ""
         if _coverage:
             payload["text_coverage"] = _coverage
+        # #1378: sparse (only where true), so every other sidecar keeps its bytes.
+        if ps is not None and getattr(ps, "text_ink_fully_accounted", False):
+            payload["text_ink_fully_accounted"] = True
         # #1294: the words check records a PASS as well as a FAIL. Sparse: absent where the
         # check did not apply (no own layer, a failed marker, a table socr withheld).
         if winning_out is not None and ps is not None:

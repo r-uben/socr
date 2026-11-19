@@ -209,6 +209,37 @@ def word_tokens_in_order(text: str) -> list[str]:
     return [w.casefold() for w in _WORD_RE.findall(text)]
 
 
+#: The letters a Roman numeral is written with. A numeral is a NUMBER (``Part II``, ``Chapter
+#: XIII``), however many letters it takes, so it is never excused as a long word.
+_ROMAN_LETTERS = frozenset("ivxlcdm")
+
+
+def short_tokens_in_order(text: str) -> list[str]:
+    """#1378: the tokens :func:`word_tokens` does NOT compare, in order, case-folded: every letter
+    run of fewer than :data:`MIN_WORD_LETTERS` letters (``II``, ``Two``, ``C``), every run made only
+    of Roman-numeral letters whatever its length (``XIII``), and every character that is a number
+    without being a decimal digit (``\u00bd``, ``\u2167``). The words check ignores all of these, so
+    ``Part II`` against ``Part III`` or ``Annex C`` against ``Annex G`` differ only here."""
+    out: list[str] = []
+    run: list[str] = []
+
+    def close() -> None:
+        low = "".join(run).casefold()
+        run.clear()
+        if low and (len(low) < MIN_WORD_LETTERS or set(low) <= _ROMAN_LETTERS):
+            out.append(low)
+
+    for ch in text or "":
+        if ch.isalpha():
+            run.append(ch)
+            continue
+        close()
+        if ch.isnumeric() and not ch.isdecimal():
+            out.append(ch)
+    close()
+    return out
+
+
 def word_reference_from_page(page, *, repeated_slots, folio_slots) -> WordReference:
     """The reference for :func:`missing_words`, read from a PyMuPDF page.
 

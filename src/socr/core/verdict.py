@@ -1491,6 +1491,17 @@ def numbers_dropped_note(pages: list[int]) -> str:
 
 NO_OWN_TEXT_REASON = "this page has no text layer of its own to check the reading's numbers against"
 NO_NUMBER_REASON = "the reading ships no number to check against the page's text layer"
+#: #1378: the page prints no number a check could doubt. The digit characters of the reading are
+#: exactly those of the page's own layer (both may be none), the layer is a clean one, and the
+#: page carries no raster, no drawing and no glyph-sized ink outside the layer's visible
+#: characters (``text_coverage.CoveragePage.ink_fully_accounted``), so no numeral can sit on the
+#: page unread by the layer. NOT a PASS: agreement over nothing stays vacuous (``compared == 0``);
+#: the check simply does not apply.
+NO_NUMBER_ON_PAGE_REASON = (
+    "the reading and this page's own text layer print the same digits (none besides any "
+    "reference label), and the page holds no raster, no drawing and no glyph-sized ink outside "
+    "that layer: there is no number to check"
+)
 #: The same, on a page whose own layer DOES print numbers: the reading may have dropped
 #: them. Counted, not named -- they include page numbers and running heads, and checking
 #: drops is issue #1218 (owner/orchestrator ruling, 2026-10-20).
@@ -1623,7 +1634,8 @@ def text_layer_numbers_clause(output: PageOutput, p: Any) -> VerdictClause | Non
     * No text layer of its own: UNKNOWN. The seam for #1208: an independent reader's
       agreement would be the evidence that clears this; nothing produces one yet.
     * The reading ships no number: UNKNOWN. Agreement over nothing is vacuous (the owner's
-      ruling: CHECKED requires ``compared > 0``).
+      ruling: CHECKED requires ``compared > 0``). Except (#1378) a page whose layer holds no
+      further number and whose ink the layer fully covers: no clause (``_page_prints_no_number``).
     * Numbers the layer has and the reading lacks are NOT checked here (issue #1218).
     * A shipped number the layer does not hold: FAIL, and every one is NAMED -- UNKNOWN
       when the detector refused the layer or found its digits damaged (still named).
@@ -1654,6 +1666,46 @@ def _not_a_reading(
             check, f"{NO_PROVIDER_LADDER_REASON}: no model reading exists to compare", scope
         )
     return _not_applicable(check, NOT_A_MODEL_READING_REASON, scope)
+
+
+def _digit_characters(text: str) -> str:
+    """Every digit character of *text*, in order, whatever the number tokeniser makes of them."""
+    return "".join(ch for ch in text if ch.isdigit())
+
+
+def _page_prints_no_number(output: PageOutput, reference: str, record: Any, p: Any) -> bool:
+    """#1378: whether a reading that ships no number faces a page that prints none either.
+
+    Fail-closed on each: (1) the DIGIT CHARACTERS of the reading equal those of the layer, in
+    order (both may be empty; ``I-58`` on both sides qualifies). This does not use the number
+    tokeniser, so a glued ``USD25``, ``Q4`` or ``FY2023`` (which it reads as no number), a layer
+    number fused to a dot leader, or a dash it does not split can not slip through; (2) the layer
+    holds no number the reading lacks; (3) the layer is clean (born-digital, or refused for its
+    shape alone after every damage scan passed) and carries no cosmetic-encoding flag, since a
+    fused pair can hide a digit; (4) the strict ink fact: no raster, no drawing, and no
+    glyph-sized ink outside the layer (``_ink_is_accounted_for``)."""
+    if record.reference_only:
+        return False
+    from socr.tables.layer_words import short_tokens_in_order
+
+    reading = reading_numbers_text(output.text, output.page_num)
+    if _digit_characters(reading) != _digit_characters(reference):
+        return False
+    # The words check ignores letter runs under ``MIN_WORD_LETTERS`` and every non-decimal numeral
+    # (``II`` -> ``III``, ``Annex C`` -> ``G``, ``XII`` -> ``XIII``, ``1/2``), and the digit rule
+    # sees none of them: the SHORT tokens must match too, in order.
+    if short_tokens_in_order(reading) != short_tokens_in_order(reference):
+        return False
+    if _layer_is_damaged(p) and not _layer_is_shape_refused(p):
+        return False
+    if any(_flag(p, f) for f in _COSMETIC_LAYER_FLAGS):
+        return False
+    return _ink_is_accounted_for(p)
+
+
+def _ink_is_accounted_for(p: Any) -> bool:
+    """The run's own strict fact (``PageState.text_ink_fully_accounted``); absent is not shown."""
+    return getattr(p, "text_ink_fully_accounted", False) is True
 
 
 def text_layer_numbers_outcome(
@@ -1693,6 +1745,8 @@ def text_layer_numbers_outcome(
         reading_numbers_text(output.text, output.page_num),
         provenance=PROVENANCE_OWN_CHARACTERS,
     )
+    if record.compared == 0 and _page_prints_no_number(output, reference, record, p):
+        return _not_applicable(check, NO_NUMBER_ON_PAGE_REASON)
     if record.compared == 0:
         layer_count = record.reference_only
         reason = (
@@ -1900,6 +1954,38 @@ def _word_layer_is_damaged(p: Any) -> bool:
     return not _flag(p, "is_born_digital") or _flag(p, "has_unrecovered_symbol_glyphs")
 
 
+def _clean_short_layer_is_evidence(p: Any, reading: str) -> bool:
+    """#1378: whether a layer the page analysis refused for its SHAPE alone (a divider or a short
+    heading) still counts as the page's words, for a PASS.
+
+    Three facts: the refusal was for shape alone after every damage scan passed
+    (``_layer_is_shape_refused``, which already excludes unmapped symbol glyphs); the strict ink
+    fact holds (``_ink_is_accounted_for``: no raster, no drawing, no ink outside the layer -- the
+    #1050 ``passed`` verdict is NOT enough, it lets a lone number or a grid of figures through);
+    and the agreement runs BOTH ways (``_reading_adds_nothing``): the words check only counts layer
+    words missing from the reading, so a divider whose reading adds a sentence would pass it.
+    Only the PASS uses this: a MISSING word is still UNKNOWN on such a layer, as before. The
+    one-directional check on ordinary born-digital pages is unchanged (follow-up)."""
+    return (
+        _layer_is_shape_refused(p)
+        and _ink_is_accounted_for(p)
+        and _reading_adds_nothing(p, reading)
+    )
+
+
+def _reading_adds_nothing(p: Any, reading: str) -> bool:
+    """The reading carries no word, and no short token, the layer lacks, as multisets over the
+    layer's whole text (markup is not a token)."""
+    from socr.tables.layer_words import short_tokens_in_order, word_tokens
+
+    layer = "\n".join(
+        str(getattr(p, name, "") or "") for name in ("own_layer_text", "own_layer_figure_words")
+    )
+    return not (word_tokens(reading) - word_tokens(layer)) and not (
+        Counter(short_tokens_in_order(reading)) - Counter(short_tokens_in_order(layer))
+    )
+
+
 def _stripped_footnote_words(output: PageOutput, p: Any) -> str:
     """#1306: the words of the hidden footnote wrappers the damaged-layer guard stripped from
     this page, which its own layer (the words reference) holds twice (hidden and printed) and
@@ -2018,7 +2104,9 @@ def _missing_words_outcome(
     # PASS only for a check that RAN with something to compare, on a layer whose words are
     # evidence. A damaged layer is asked first: agreement with it proves nothing (the numbers
     # check does the same), and it is not a clause (the verdict is unchanged), so it is NOT_RUN.
-    if _word_layer_is_damaged(p):
+    if _word_layer_is_damaged(p) and not _clean_short_layer_is_evidence(
+        p, reading_numbers_text(shipped, output.page_num)
+    ):
         return missing, _not_run(check, WORDS_LAYER_NOT_EVIDENCE_REASON)
     owed = _words_owed(output, p)
     if owed == 0:
