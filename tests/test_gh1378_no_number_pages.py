@@ -133,3 +133,75 @@ def test_guard_numbers_in_the_reading_are_still_compared() -> None:
     """The exit is for ``compared == 0`` only: a number the layer lacks is still a FAIL/UNKNOWN."""
     p = _page("Rate", born_digital=True, shape=False)
     assert _result(_read("Rate was 9.31"), p) is CheckResult.FAIL
+
+
+# --- the words check confirms a clean short layer (second commit) -------------------------
+
+from socr.core.marks import Check  # noqa: E402
+from socr.core.verdict import (  # noqa: E402
+    WORDS_LAYER_NOT_EVIDENCE_REASON,
+    independent_page_evidence,
+    text_layer_words_outcome,
+)
+
+
+def _with_words(p: PageState, words: str) -> PageState:
+    p.own_layer_word_reference = words
+    return p
+
+
+def _words(text: str, p: PageState):
+    return text_layer_words_outcome(_read(text), p).entry
+
+
+def test_words_agree_on_a_clean_short_layer_is_a_pass() -> None:
+    p = _with_words(_page("International Developments"), "international developments")
+    entry = _words("# International Developments", p)
+    assert entry.result.value == "PASS"
+    p_open = _with_words(
+        _page("International Developments", coverage=""), "international developments"
+    )
+    other = _words("# International Developments", p_open)
+    assert other.result.value == "NOT_RUN"
+    assert other.reason == WORDS_LAYER_NOT_EVIDENCE_REASON
+
+
+def test_one_word_differs_keeps_the_page_warned() -> None:
+    p = _with_words(_page("International Developments"), "international developments")
+    outcome = text_layer_words_outcome(_read("# International Development"), p)
+    assert outcome.clause is not None
+    assert outcome.clause.result is CheckResult.UNKNOWN
+
+
+@pytest.mark.parametrize("verdict", ["flagged", "unknown", ""])
+def test_a_short_layer_with_coverage_not_passed_is_not_evidence(verdict) -> None:
+    """A short running head over a scanned body: the body's ink is uncovered, so ``flagged``."""
+    p = _with_words(_page("Running head", coverage=verdict), "running head")
+    assert _words("Running head", p).result.value == "NOT_RUN"
+
+
+def test_a_layer_not_shown_clean_is_not_evidence_even_with_coverage() -> None:
+    p = _with_words(_page("Summary", shape=False), "summary")
+    assert _words("Summary", p).result.value == "NOT_RUN"
+    sym = _with_words(_page("Summary"), "summary")
+    sym.has_unrecovered_symbol_glyphs = True
+    assert _words("Summary", sym).result.value == "NOT_RUN"
+
+
+def test_a_divider_page_is_independently_confirmed_only_with_a_words_pass() -> None:
+    """Numbers N/A alone is no confirmation (the page stays uncorroborated); with a words PASS
+    on the same text it is."""
+    from socr.core.verdict import stamp_text_digest
+
+    text = "# International Developments"
+    for coverage, confirmed in (("passed", True), ("", False)):
+        p = _with_words(
+            _page("International Developments", coverage=coverage), "international developments"
+        )
+        out = _read(text)
+        entries = [
+            stamp_text_digest(text_layer_words_outcome(out, p).entry, text),
+            stamp_text_digest(text_layer_numbers_outcome(out, p).entry, text),
+        ]
+        assert independent_page_evidence(entries, text) is confirmed
+    assert Check.TEXT_LAYER_WORDS.value == "text_layer_words"

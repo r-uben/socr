@@ -1931,6 +1931,25 @@ def _word_layer_is_damaged(p: Any) -> bool:
     return not _flag(p, "is_born_digital") or _flag(p, "has_unrecovered_symbol_glyphs")
 
 
+def _clean_short_layer_is_evidence(p: Any) -> bool:
+    """#1378: whether a layer the page analysis refused for its SHAPE alone (a divider or a short
+    heading) still counts as the page's words, for a PASS.
+
+    Three facts, all recorded by the run: the refusal was for shape alone after every damage scan
+    passed (``_layer_is_shape_refused``); the #1050 ink coverage PASSED, so every ink component of
+    the page image lies under a visible character of that layer (a short running head over a
+    scanned body leaves the body's ink uncovered and is ``flagged``); and no unmapped symbol
+    glyph (``_word_layer_is_damaged``'s second clause). Only the PASS uses this: a MISSING word
+    is still UNKNOWN on such a layer, as before."""
+    from socr.core.text_coverage import VERDICT_PASSED
+
+    return (
+        _layer_is_shape_refused(p)
+        and not _flag(p, "has_unrecovered_symbol_glyphs")
+        and getattr(p, "text_coverage_verdict", "") == VERDICT_PASSED
+    )
+
+
 def _stripped_footnote_words(output: PageOutput, p: Any) -> str:
     """#1306: the words of the hidden footnote wrappers the damaged-layer guard stripped from
     this page, which its own layer (the words reference) holds twice (hidden and printed) and
@@ -2049,7 +2068,7 @@ def _missing_words_outcome(
     # PASS only for a check that RAN with something to compare, on a layer whose words are
     # evidence. A damaged layer is asked first: agreement with it proves nothing (the numbers
     # check does the same), and it is not a clause (the verdict is unchanged), so it is NOT_RUN.
-    if _word_layer_is_damaged(p):
+    if _word_layer_is_damaged(p) and not _clean_short_layer_is_evidence(p):
         return missing, _not_run(check, WORDS_LAYER_NOT_EVIDENCE_REASON)
     owed = _words_owed(output, p)
     if owed == 0:
