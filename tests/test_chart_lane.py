@@ -753,6 +753,10 @@ def _run_chart_detection_case(tmp_path: Path, *, fail_detector: bool):
 
     with (
         marks,
+        # #1385: the fixture PDF really draws a chart, so the #1385 lane would (rightly) crop and
+        # mark this uncaptioned model-read page in BOTH arms. This test pins the chart-DETECTION
+        # failure status alone, so that lane's locator is switched off in both.
+        patch("socr.figures.unshipped_figures.locate_figure_regions", return_value=[]),
         patch("socr.pipeline.orchestrator.route_page", return_value=routed_decision),
         patch.object(pipeline, "_available_engines_for_agentic", return_value=[PROFILE_QWEN_LOCAL]),
         patch.object(pipeline, "_run_native_cell_binding_check"),

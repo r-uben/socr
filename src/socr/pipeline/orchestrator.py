@@ -465,6 +465,9 @@ UNSHIPPED_FIGURE_RENDERED_KIND = _unshipped_figures.RENDERED_KIND
 UNSHIPPED_FIGURE_RENDER_FAILED_KIND = _unshipped_figures.RENDER_FAILED_KIND
 #: #1225: marked like the others, but it names no figure, so the note and the CLI word it apart.
 UNSHIPPED_FIGURE_CHART_SKELETON_KIND = _unshipped_figures.CHART_SKELETON_KIND
+#: #1385: an uncaptioned chart's crop, and the same page when no crop could be saved.
+UNSHIPPED_FIGURE_UNCAPTIONED_CROP_KIND = _unshipped_figures.UNCAPTIONED_CROP_KIND
+UNSHIPPED_FIGURE_UNCAPTIONED_LOST_KIND = _unshipped_figures.UNCAPTIONED_CROP_LOST_KIND
 #: The three ``PageState`` fields / sidecar keys this lane owns.
 _UNSHIPPED_FIGURE_FIELDS = (
     "unshipped_figure_refs",
@@ -7565,6 +7568,8 @@ class UnifiedPipeline:
         shipped: list[int] = []
         marked: list[int] = []
         skeleton: list[int] = []
+        uncaptioned_shipped: list[int] = []
+        uncaptioned_lost: list[int] = []
         chart_shipped, chart_lost, placeholder = UnifiedPipeline._presence_pages(state)
         for event in state.events:
             kind = getattr(event, "kind", "")
@@ -7583,6 +7588,10 @@ class UnifiedPipeline:
                 marked.append(int(page))
             if kind == UNSHIPPED_FIGURE_CHART_SKELETON_KIND:
                 skeleton.append(int(page))
+            if kind == UNSHIPPED_FIGURE_UNCAPTIONED_CROP_KIND:
+                uncaptioned_shipped.append(int(page))
+            if kind == UNSHIPPED_FIGURE_UNCAPTIONED_LOST_KIND:
+                uncaptioned_lost.append(int(page))
         return (
             _unshipped_figures.document_note(
                 shipped,
@@ -7591,6 +7600,8 @@ class UnifiedPipeline:
                 chart_shipped=chart_shipped,
                 chart_lost=chart_lost,
                 placeholder=placeholder,
+                uncaptioned_shipped=uncaptioned_shipped,
+                uncaptioned_lost=uncaptioned_lost,
             )
             or None
         )
@@ -14707,6 +14718,17 @@ class UnifiedPipeline:
             body,
             lambda: locate_figure_regions(state.handle.path, page_num, per_page),
             _render,
+            # The chart-region lane's own candidate set is the pages with a table signal
+            # (``_preserve_chart_regions``), and the arbitration event marks its mixed pages.
+            # With ``--save-figures`` the ordinary figure phase runs and owns the page's
+            # figures (and their descriptions), so there is no gap for this lane to fill.
+            chart_region_owns=self._page_has_tables(page_num, ps)
+            or bool(self.config.save_figures)
+            or any(
+                getattr(e, "page_num", None) == page_num
+                and e.kind == _unshipped_figures.CHART_TABLE_ARBITRATION_KIND
+                for e in state.events
+            ),
         )
         if decision is None or decision.kind == recorded:
             return
@@ -23117,6 +23139,22 @@ class UnifiedPipeline:
                         and getattr(e, "page_num", None) is not None
                     }
                 )
+                _uc_pages = {
+                    k: sorted(
+                        {
+                            int(e.page_num)
+                            for e in state.events
+                            if getattr(e, "kind", "") == k
+                            and getattr(e, "page_num", None) is not None
+                        }
+                    )
+                    for k in (
+                        UNSHIPPED_FIGURE_UNCAPTIONED_CROP_KIND,
+                        UNSHIPPED_FIGURE_UNCAPTIONED_LOST_KIND,
+                    )
+                }
+                _uc_shipped = _uc_pages[UNSHIPPED_FIGURE_UNCAPTIONED_CROP_KIND]
+                _uc_lost = _uc_pages[UNSHIPPED_FIGURE_UNCAPTIONED_LOST_KIND]
                 _pr_shipped, _pr_lost, _pr_placeholder = self._presence_pages(state)
                 _uf_marked = sorted(
                     {
@@ -23126,6 +23164,8 @@ class UnifiedPipeline:
                         and getattr(e, "page_num", None) is not None
                     }
                     - set(_uf_skeleton)
+                    - set(_uc_shipped)
+                    - set(_uc_lost)
                     - set(_pr_lost)
                     - set(_pr_placeholder)
                 )
@@ -23157,6 +23197,18 @@ class UnifiedPipeline:
                         f"  [red]{len(_pr_placeholder)} page(s) carry an unmatched figure "
                         f"placeholder (a figure the reading marked, with no picture of it); "
                         f"the page is marked: {_pr_placeholder}[/red]"
+                    )
+                if _uc_shipped:
+                    console.print(
+                        f"  [red]{len(_uc_shipped)} page(s) name no figure and show none: a "
+                        f"crop of the located region ships, its values untranscribed; the "
+                        f"page is marked: {_uc_shipped}[/red]"
+                    )
+                if _uc_lost:
+                    console.print(
+                        f"  [red]{len(_uc_lost)} page(s) name no figure, a figure region was "
+                        f"located and its crop could not be saved; it is preserved nowhere; "
+                        f"the page is marked: {_uc_lost}[/red]"
                     )
                 if _uf_skeleton:
                     console.print(

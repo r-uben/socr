@@ -199,7 +199,8 @@ def _never_locate():
 
 
 def test_decide_difference_ticks_vs_none() -> None:
-    assert decide(NO_TICKS, _never_locate, lambda b: []) is None
+    # #1385: a page with no ticks now asks the locator; with no region found it is still None.
+    assert decide(NO_TICKS, lambda: [], lambda b: []) is None
     decision = decide(SKELETON, _never_locate, lambda b: [])
     assert decision is not None
     assert decision.kind == CHART_SKELETON_KIND

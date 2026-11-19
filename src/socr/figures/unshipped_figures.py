@@ -139,8 +139,21 @@ NOT_FOUND_KIND = "unshipped_figure_not_found"
 #: #1225: the body names no figure, but carries a chart's axis ticks with nothing plotted
 #: between them. Mark only -- see :func:`decide`.
 CHART_SKELETON_KIND = "unshipped_figure_chart_skeleton"
+#: #1385: the body names no figure and carries no axis ticks, but the locator found a figure
+#: region on the page. ``CROP_KIND`` ships a crop of it; ``CROP_LOST_KIND`` is the same page
+#: when no crop could be saved. Both MARK, like every outcome of this lane.
+UNCAPTIONED_CROP_KIND = "unshipped_figure_uncaptioned_crop"
+UNCAPTIONED_CROP_LOST_KIND = "unshipped_figure_uncaptioned_crop_lost"
 EVENT_KINDS: frozenset[str] = frozenset(
-    {RENDERED_KIND, RENDER_FAILED_KIND, UNLOCATED_KIND, NOT_FOUND_KIND, CHART_SKELETON_KIND}
+    {
+        RENDERED_KIND,
+        RENDER_FAILED_KIND,
+        UNLOCATED_KIND,
+        NOT_FOUND_KIND,
+        CHART_SKELETON_KIND,
+        UNCAPTIONED_CROP_KIND,
+        UNCAPTIONED_CROP_LOST_KIND,
+    }
 )
 #: The kinds that MARK the page. Everything this lane acts on is in here except the
 #: abstention: a crop is a picture, not a reading, and this lane cannot say its crops cover
@@ -149,10 +162,17 @@ EVENT_KINDS: frozenset[str] = frozenset(
 #: shipping the whole page image, so claiming CHECKED on it was the stronger claim from the
 #: weaker evidence.
 MARKED_KINDS: frozenset[str] = frozenset(
-    {RENDERED_KIND, RENDER_FAILED_KIND, UNLOCATED_KIND, CHART_SKELETON_KIND}
+    {
+        RENDERED_KIND,
+        RENDER_FAILED_KIND,
+        UNLOCATED_KIND,
+        CHART_SKELETON_KIND,
+        UNCAPTIONED_CROP_KIND,
+        UNCAPTIONED_CROP_LOST_KIND,
+    }
 )
 #: The subset that ships a picture. The document note and the CLI need the two apart.
-SHIPPED_KINDS: frozenset[str] = frozenset({RENDERED_KIND})
+SHIPPED_KINDS: frozenset[str] = frozenset({RENDERED_KIND, UNCAPTIONED_CROP_KIND})
 
 
 #: #1225: the label a chart-skeleton mark names. Such a page names no figure, so there is no
@@ -440,7 +460,49 @@ def _chart_skeleton_decision(
     )
 
 
-def decide(body: str, locate, render) -> FigureDecision | None:
+def _uncaptioned_crop_decision(locate, render) -> FigureDecision | None:
+    """#1385: the body names no figure and carries no axis ticks. ``None`` when the locator
+    finds no region.
+
+    The locator's own region is the positive evidence (it applies the extractor's area gate),
+    and the owner ruled 2026-11-19 that it is enough for a page a MODEL read: ship a crop of the
+    region, cut from the source page, and mark the page. Nothing is read from the crop.
+    """
+    bboxes = locate()
+    if not bboxes:
+        return None
+    refs = tuple(render(bboxes))
+    if not refs:
+        return FigureDecision(
+            (),
+            (),
+            len(bboxes),
+            (),
+            (CHART_SKELETON_LABEL,),
+            UNCAPTIONED_CROP_LOST_KIND,
+            f"this page names no figure, {len(bboxes)} figure region(s) were located on it, "
+            "and NO crop could be saved: the figure is preserved nowhere",
+        )
+    return FigureDecision(
+        (),
+        (),
+        len(bboxes),
+        refs,
+        (CHART_SKELETON_LABEL,),
+        UNCAPTIONED_CROP_KIND,
+        f"this page names no figure and its reading shows none; {len(bboxes)} figure "
+        f"region(s) were located and {len(refs)} crop(s) ship, cut from the page; the crops "
+        "are pictures, not readings, so their values are not transcribed, and socr cannot "
+        "say they cover every figure the page carries",
+    )
+
+
+#: The audit event that says a chart competed with a table on this page and the position-
+#: preserving chart-region lane owns the chart (``chart_table_arbitration``, GH-150 B1).
+CHART_TABLE_ARBITRATION_KIND = "chart_table_arbitration"
+
+
+def decide(body: str, locate, render, *, chart_region_owns: bool = False) -> FigureDecision | None:
     """The whole rule, in one place. ``None`` when this page is not this lane's.
 
     ``locate()`` returns the figure regions on the page (fitz rects); ``render(bboxes)`` returns
@@ -475,7 +537,13 @@ def decide(body: str, locate, render) -> FigureDecision | None:
     """
     captions = figure_captions(body)
     if not captions:
-        return _chart_skeleton_decision(body, (), ())
+        skeleton = _chart_skeleton_decision(body, (), ())
+        if skeleton is not None:
+            return skeleton
+        # #1385: not on a page the chart-region lane owns. That lane puts its crop at the
+        # chart's own position and skips any page this lane already cropped, so acting here
+        # would displace it. Same evidence both callers have, no new threshold.
+        return None if chart_region_owns else _uncaptioned_crop_decision(locate, render)
     strict = figure_captions(body, strict=True)
     bboxes = locate()
     regions = len(bboxes)
@@ -582,6 +650,16 @@ _CLAUSE_REASON: dict[str, str] = {
         "this page's text carries a chart's axis ticks and no picture of the chart ships; "
         "read it from the page image"
     ),
+    UNCAPTIONED_CROP_KIND: (
+        "the page's reading shows no picture, and a crop of the figure region(s) located on "
+        "the page ships; a crop is a picture, not a reading, so its values are not "
+        "transcribed, and socr cannot say the crops cover every chart this page carries; "
+        "read it from the page image"
+    ),
+    UNCAPTIONED_CROP_LOST_KIND: (
+        "the page's reading shows no picture, a figure region was located, and no crop of it "
+        "could be saved; it is preserved nowhere; read it from the page image"
+    ),
 }
 
 
@@ -629,6 +707,8 @@ def document_note(
     chart_shipped: list[int] | None = None,
     chart_lost: list[int] | None = None,
     placeholder: list[int] | None = None,
+    uncaptioned_shipped: list[int] | None = None,
+    uncaptioned_lost: list[int] | None = None,
 ) -> str:
     """The lane's ``metadata.json`` note, built from the pages in each class.
 
@@ -652,7 +732,13 @@ def document_note(
     chart_shipped = sorted(set(chart_shipped or ()))
     chart_lost = sorted(set(chart_lost or ()))
     placeholder = sorted(set(placeholder or ()))
-    marked = [n for n in marked if n not in {*skeleton, *chart_lost, *placeholder}]
+    uncaptioned_shipped = sorted(set(uncaptioned_shipped or ()))
+    uncaptioned_lost = sorted(set(uncaptioned_lost or ()))
+    # #1385: those pages ship (or lose) a crop and are marked, but name no figure, so they are
+    # taken out of the ``shipped`` and ``marked`` sentences, which both say otherwise.
+    own = {*uncaptioned_shipped, *uncaptioned_lost}
+    shipped = [n for n in shipped if n not in own]
+    marked = [n for n in marked if n not in {*skeleton, *chart_lost, *placeholder, *own}]
     parts = []
     if shipped:
         parts.append(
@@ -680,6 +766,18 @@ def document_note(
         parts.append(
             f"page(s) {', '.join(str(n) for n in chart_lost)} draw a chart with axis ticks "
             "whose crop could not be saved, so it is preserved nowhere, and are marked"
+        )
+    if uncaptioned_shipped:
+        parts.append(
+            f"page(s) {', '.join(str(n) for n in uncaptioned_shipped)} name no figure and show "
+            "none in the reading, a crop of the located figure region ships rather than a "
+            "reading of it, so its values are not transcribed, and the page is marked"
+        )
+    if uncaptioned_lost:
+        parts.append(
+            f"page(s) {', '.join(str(n) for n in uncaptioned_lost)} name no figure and show "
+            "none in the reading, a figure region was located and its crop could not be saved, "
+            "so it is preserved nowhere, and the page is marked"
         )
     if placeholder:
         parts.append(

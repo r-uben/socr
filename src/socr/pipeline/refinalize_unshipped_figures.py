@@ -45,11 +45,14 @@ from socr.core.verdict import (
 )
 from socr.figures.unshipped_figures import (
     CHART_SKELETON_KIND,
+    CHART_TABLE_ARBITRATION_KIND,
     EVENT_KINDS,
     MARKED_KINDS,
     NOT_FOUND_KIND,
     NOTE_PREFIX,
     RENDER_FAILED_KIND,
+    UNCAPTIONED_CROP_KIND,
+    UNCAPTIONED_CROP_LOST_KIND,
     UNLOCATED_KIND,
     crop_filename,
     decide,
@@ -100,6 +103,8 @@ class PageChange:
             RENDER_FAILED_KIND: "marked: a region was located and no crop could be saved",
             UNLOCATED_KIND: "marked: no figure region could be located",
             CHART_SKELETON_KIND: "marked: a chart's axis ticks ship with no picture of it",
+            UNCAPTIONED_CROP_KIND: "crop shipped AND marked: an uncaptioned chart's crop is not a reading",
+            UNCAPTIONED_CROP_LOST_KIND: "marked: a region was located and no crop could be saved",
         }.get(self.kind, "crop shipped AND marked: the crops are not proven complete")
 
     @property
@@ -322,7 +327,19 @@ def refinalize_page(
             if asset.rendered and asset.rel_path
         ]
 
-    decision = decide(body, lambda: locate_figure_regions(pdf, page_num, max_per_page), _render)
+    decision = decide(
+        body,
+        lambda: locate_figure_regions(pdf, page_num, max_per_page),
+        _render,
+        # The live lane reads ``_page_has_tables``; a finished run's sidecar keeps the table
+        # region count and the chart-region lane's own events, which say the same thing.
+        chart_region_owns=bool(sidecar.get("native_table_region_count"))
+        or any(
+            e.get("kind") in (CHART_TABLE_ARBITRATION_KIND, "chart_region_preserved")
+            for e in sidecar.get("audit_events") or ()
+            if isinstance(e, dict)
+        ),
+    )
     if decision is None or decision.kind == NOT_FOUND_KIND:
         return None
     for name, value in decision.state_fields.items():
@@ -426,6 +443,10 @@ def _answered_sidecars(pages_dir: Path, pending: dict[int, dict]) -> list[dict]:
     return out
 
 
+def _kind_pages(answered: list[dict], kind: str) -> list[int]:
+    return [int(d["page_num"]) for d in answered if d.get("unshipped_figure_kind") == kind]
+
+
 def _lane_pages(answered: list[dict]) -> tuple[list[int], list[int], list[int]]:
     """``(pages that shipped a crop, pages that are marked, chart-skeleton pages)``. The third
     is a subset of the second, kept apart because the note words it apart (#1225)."""
@@ -467,6 +488,8 @@ def answered_document_note(answered: list[dict]) -> str:
         chart_shipped=chart_shipped,
         chart_lost=chart_lost,
         placeholder=placeholder,
+        uncaptioned_shipped=_kind_pages(answered, UNCAPTIONED_CROP_KIND),
+        uncaptioned_lost=_kind_pages(answered, UNCAPTIONED_CROP_LOST_KIND),
     )
 
 
