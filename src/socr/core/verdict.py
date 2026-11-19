@@ -1686,9 +1686,15 @@ def _page_prints_no_number(output: PageOutput, reference: str, record: Any, p: A
     glyph-sized ink outside the layer (``_ink_is_accounted_for``)."""
     if record.reference_only:
         return False
-    if _digit_characters(reading_numbers_text(output.text, output.page_num)) != _digit_characters(
-        reference
-    ):
+    from socr.tables.layer_words import short_tokens_in_order
+
+    reading = reading_numbers_text(output.text, output.page_num)
+    if _digit_characters(reading) != _digit_characters(reference):
+        return False
+    # The words check ignores letter runs under ``MIN_WORD_LETTERS`` and every non-decimal numeral
+    # (``II`` -> ``III``, ``Annex C`` -> ``G``, ``XII`` -> ``XIII``, ``1/2``), and the digit rule
+    # sees none of them: the SHORT tokens must match too, in order.
+    if short_tokens_in_order(reading) != short_tokens_in_order(reference):
         return False
     if _layer_is_damaged(p) and not _layer_is_shape_refused(p):
         return False
@@ -1948,19 +1954,35 @@ def _word_layer_is_damaged(p: Any) -> bool:
     return not _flag(p, "is_born_digital") or _flag(p, "has_unrecovered_symbol_glyphs")
 
 
-def _clean_short_layer_is_evidence(p: Any) -> bool:
+def _clean_short_layer_is_evidence(p: Any, reading: str) -> bool:
     """#1378: whether a layer the page analysis refused for its SHAPE alone (a divider or a short
     heading) still counts as the page's words, for a PASS.
 
-    Three facts, all recorded by the run: the refusal was for shape alone after every damage scan
-    passed (``_layer_is_shape_refused``); the strict ink fact holds (``_ink_is_accounted_for``: no
-    raster, no drawing, no glyph-sized ink outside the layer -- the #1050 ``passed`` verdict is NOT
-    enough, it lets a lone number or a grid of figures through); and no unmapped symbol glyph.
-    Only the PASS uses this: a MISSING word is still UNKNOWN on such a layer, as before."""
+    Three facts: the refusal was for shape alone after every damage scan passed
+    (``_layer_is_shape_refused``, which already excludes unmapped symbol glyphs); the strict ink
+    fact holds (``_ink_is_accounted_for``: no raster, no drawing, no ink outside the layer -- the
+    #1050 ``passed`` verdict is NOT enough, it lets a lone number or a grid of figures through);
+    and the agreement runs BOTH ways (``_reading_adds_nothing``): the words check only counts layer
+    words missing from the reading, so a divider whose reading adds a sentence would pass it.
+    Only the PASS uses this: a MISSING word is still UNKNOWN on such a layer, as before. The
+    one-directional check on ordinary born-digital pages is unchanged (follow-up)."""
     return (
         _layer_is_shape_refused(p)
-        and not _flag(p, "has_unrecovered_symbol_glyphs")
         and _ink_is_accounted_for(p)
+        and _reading_adds_nothing(p, reading)
+    )
+
+
+def _reading_adds_nothing(p: Any, reading: str) -> bool:
+    """The reading carries no word, and no short token, the layer lacks, as multisets over the
+    layer's whole text (markup is not a token)."""
+    from socr.tables.layer_words import short_tokens_in_order, word_tokens
+
+    layer = "\n".join(
+        str(getattr(p, name, "") or "") for name in ("own_layer_text", "own_layer_figure_words")
+    )
+    return not (word_tokens(reading) - word_tokens(layer)) and not (
+        Counter(short_tokens_in_order(reading)) - Counter(short_tokens_in_order(layer))
     )
 
 
@@ -2082,7 +2104,9 @@ def _missing_words_outcome(
     # PASS only for a check that RAN with something to compare, on a layer whose words are
     # evidence. A damaged layer is asked first: agreement with it proves nothing (the numbers
     # check does the same), and it is not a clause (the verdict is unchanged), so it is NOT_RUN.
-    if _word_layer_is_damaged(p) and not _clean_short_layer_is_evidence(p):
+    if _word_layer_is_damaged(p) and not _clean_short_layer_is_evidence(
+        p, reading_numbers_text(shipped, output.page_num)
+    ):
         return missing, _not_run(check, WORDS_LAYER_NOT_EVIDENCE_REASON)
     owed = _words_owed(output, p)
     if owed == 0:

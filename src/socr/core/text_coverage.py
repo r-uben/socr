@@ -895,24 +895,61 @@ def preceding_text_snippet(page, region_pdf, *, tail_words: int = ANCHOR_TAIL_WO
     return " ".join(words[-tail_words:])
 
 
+def _drawing_extent(d) -> tuple[float, float, float, float] | None:
+    """A drawing's box in PDF points. An axis-aligned stroked line has an EMPTY ``rect`` (zero
+    area) that still carries its extent, so an empty rect is measured, never skipped."""
+    rect = d.get("rect")
+    if rect is None:
+        return None
+    return (rect.x0, rect.y0, rect.x1, rect.y1)
+
+
+def _is_horizontal_rule_px(w: float, h: float) -> bool:
+    """A rule: thinner than a stroke (``MAX_THICK_PX``) and longer than a glyph is tall
+    (``GLYPH_H_P98_PX``), lying ALONG the page's x axis. A vertical stroke is not one: a lone
+    ``1`` drawn as a line is indistinguishable from a vertical rule, so it is never excused."""
+    return h <= MAX_THICK_PX and w > GLYPH_H_P98_PX
+
+
 def page_ink_is_fully_accounted(page, mat, dark, light, layer) -> bool:
-    """#1378: see ``CoveragePage.ink_fully_accounted``. Fail closed: any doubt is ``False``."""
+    """#1378: see ``CoveragePage.ink_fully_accounted``. Fail closed: any doubt is ``False``.
+
+    Besides the layer's own characters, the page may hold only horizontal rules, as drawings and
+    as ink. Every other residual component of at least glyph width -- of ANY size, not only a
+    glyph's (a digit drawn as a 60 pt segment is larger than ``GLYPH_H_P98_PX``) -- fails."""
     try:
         if page.get_image_info():
             return False
+        rules: list[tuple[int, int, int, int]] = []
         for d in page.get_drawings():
-            rect = d.get("rect")
-            if rect is None or rect.is_empty:
+            box = _drawing_extent(d)
+            if box is None:
                 continue
-            x0, y0, x1, y1 = _to_pix(rect, page, mat)
-            short, long = min(x1 - x0, y1 - y0), max(x1 - x0, y1 - y0)
-            # A RULE (thin and longer than a glyph: the same cut ``_residual_components`` drops
-            # from the ink) cannot carry a glyph; any other path might be outlined text.
-            if not (short <= MAX_THICK_PX and long > GLYPH_H_P98_PX):
+            x0, y0, x1, y1 = _to_pix(box, page, mat)
+            if not _is_horizontal_rule_px(x1 - x0, y1 - y0):
                 return False
+            rules.append((x0, y0, x1, y1))
+        # The adaptive threshold's own radius: the light polarity rings a dark rule with a halo
+        # that wide on each side, as a component wider than the rule and as tall as its halo.
+        halo = ADAPT_BLOCK // 2 + 1  # + the rule box's own floor/ceil rounding
         for ink in (dark, light):
-            *_, glyph_like = _residual_components(ink, layer)
-            if bool(glyph_like.any()):
+            _labels, stats, resid_idx, _covered, _glyph = _residual_components(ink, layer)
+            for i in resid_idx:
+                cx, cy, w, h = (int(stats[i, k]) for k in range(4))
+                if max(w, h) < GLYPH_W_P02_PX or _is_horizontal_rule_px(w, h):
+                    continue
+                if any(
+                    cx <= rx0
+                    and cy <= ry0
+                    and cx + w >= rx1
+                    and cy + h >= ry1
+                    and cx >= rx0 - halo
+                    and cy >= ry0 - halo
+                    and cx + w <= rx1 + halo
+                    and cy + h <= ry1 + halo
+                    for rx0, ry0, rx1, ry1 in rules
+                ):
+                    continue
                 return False
         return True
     except Exception as exc:

@@ -419,3 +419,154 @@ def test_a_thin_rule_does_not_stop_a_page_being_accounted_for() -> None:
     page = _title_page(doc)
     page.draw_rect(fitz.Rect(111, 103, 500, 104), fill=(0, 0, 0))
     assert analyze_page(page).ink_fully_accounted is True
+
+
+# --- review round 2: short tokens, two-way agreement, drawn digits, run-side wiring ----------
+
+SHORT_TOKEN_PAIRS = [
+    ("Part II / International Developments", "Part I / International Developments", False),
+    ("Part II", "Part III", False),
+    ("Chapter XII", "Chapter XIII", False),
+    ("Chapter XIII", "Chapter XVII", False),
+    ("Chapter IV", "Chapter", False),
+    ("Part Two", "Part Ten", False),
+    ("Annex C", "Annex G", False),
+    ("Rate ½", "Rate", False),
+    ("Part Ⅷ", "Part", False),
+    ("Tier II capital " * 5, "Tier I capital " * 5, True),
+]
+
+
+@pytest.mark.parametrize(("layer", "reading", "born_digital"), SHORT_TOKEN_PAIRS)
+def test_a_short_token_that_differs_keeps_the_page_warned(layer, reading, born_digital) -> None:
+    p = _page(layer, born_digital=born_digital, shape=not born_digital)
+    assert _result(_read(reading), p) is CheckResult.UNKNOWN
+    # the difference: the same page and layer with the reading unchanged exits
+    assert _result(_read(layer), p) is None
+
+
+def _evidence(layer: str, reading: str) -> str:
+    p = _with_words(_page(layer), layer.casefold())
+    return text_layer_words_outcome(_read(reading), p).entry.result.value
+
+
+def test_a_reading_that_adds_words_is_not_confirmed_by_a_short_layer() -> None:
+    layer = "International Developments"
+    assert _evidence(layer, "# International Developments") == "PASS"
+    assert (
+        _evidence(layer, "# International Developments\n\nAn invented closing sentence.") != "PASS"
+    )
+    table = "| Region | Share |\n|---|---|\n| Alpha | beta |"
+    assert _evidence(layer, f"# International Developments\n\n{table}") != "PASS"
+
+
+def test_a_reading_that_adds_a_short_token_is_not_confirmed() -> None:
+    layer = "International Developments"
+    assert _evidence(layer, "# International Developments II") != "PASS"
+    assert _evidence(layer, "# International Developments") == "PASS"
+
+
+def test_markup_is_not_an_added_word() -> None:
+    assert _evidence("International Developments", "## **International** _Developments_") == "PASS"
+
+
+def _lcd_page(vertical_only: bool = False) -> fitz.Page:
+    """The digits ``1741`` drawn as 60 pt strokes of width 1: larger than any glyph, so the
+    glyph-sized residual test alone ignores them, and an axis-aligned stroke has an empty rect."""
+    doc = fitz.open()
+    page = _title_page(doc)
+    top = 200.0
+    if vertical_only:
+        page.draw_line((100, top), (100, top + 60), width=1)
+        return page
+    for k, strokes in enumerate(("v", "hv", "v", "v")):
+        x = 100 + 50 * k
+        if "v" in strokes:
+            page.draw_line((x, top), (x, top + 60), width=1)
+        if "h" in strokes:
+            page.draw_line((x, top), (x + 30, top), width=1)
+    return page
+
+
+def test_digits_drawn_as_strokes_are_never_accounted_for() -> None:
+    assert analyze_page(_lcd_page()).ink_fully_accounted is False
+    assert analyze_page(_lcd_page(vertical_only=True)).ink_fully_accounted is False
+
+
+def test_a_long_horizontal_stroke_is_a_rule_and_is_allowed() -> None:
+    doc = fitz.open()
+    page = _title_page(doc)
+    page.draw_line((100, 400), (460, 400), width=1)
+    assert analyze_page(page).ink_fully_accounted is True
+
+
+def test_the_run_side_records_the_strict_fact(tmp_path) -> None:
+    """The orchestrator sets the fact on the page and writes it to the sidecar only when true:
+    guards the wiring a verdict-level test cannot see (the setting, and the sidecar write). Drives
+    the two real methods directly, so no page is routed and no provider is reached."""
+    import json
+    from unittest.mock import patch
+
+    from test_gh1050_text_coverage import _pipeline
+
+    from socr.core.state import DocumentHandle, DocumentState
+
+    def run(name: str, *, raster: bool, check: bool = True):
+        doc = fitz.open()
+        page = _title_page(doc)
+        if raster:
+            page.insert_image(
+                fitz.Rect(72, 200, 472, 460), pixmap=_raster_of(_grid(DECIMALS, 10), dpi=150)
+            )
+        pdf = tmp_path / f"{name}.pdf"
+        doc.save(pdf)
+        with patch.object(DocumentHandle, "__post_init__", lambda self: None):
+            handle = DocumentHandle(path=pdf, page_count=1)
+        state = DocumentState(handle=handle)
+        state.pages[1] = PageState(page_num=1)
+        pipeline = _pipeline(check_text_coverage=check)
+        out_dir = tmp_path / f"out_{name}"
+        pipeline._prepare_text_coverage(state, out_dir, set(), set())
+        output = _read(f"# {TITLE}")
+        state.pages[1].attempts.append(output)
+        state.pages[1].best_output = output
+        sidecar = json.loads(pipeline._flush_page_sidecar(state, 1, out_dir).read_text())
+        return state.pages[1].text_ink_fully_accounted, sidecar
+
+    on, rec_on = run("on", raster=False)
+    raster, rec_raster = run("raster", raster=True)
+    off, rec_off = run("off", raster=False, check=False)
+    assert on is True and rec_on.get("text_ink_fully_accounted") is True
+    assert raster is False and "text_ink_fully_accounted" not in rec_raster
+    assert off is False and "text_ink_fully_accounted" not in rec_off
+
+
+def test_an_empty_rect_line_is_measured_from_its_points() -> None:
+    from socr.core.text_coverage import _drawing_extent
+
+    page = _lcd_page(vertical_only=True)
+    (drawing,) = page.get_drawings()
+    assert drawing["rect"].is_empty
+    x0, y0, x1, y1 = _drawing_extent(drawing)
+    assert (y1 - y0) == pytest.approx(60)
+
+
+def test_each_defence_catches_the_drawn_digits_on_its_own(monkeypatch) -> None:
+    """The drawing rule and the residual-ink rule both fail the page; neither leans on the other."""
+    from socr.core import text_coverage
+
+    page = _lcd_page()
+    assert analyze_page(page).ink_fully_accounted is False
+    # drawings hidden: the residual ink (components far larger than a glyph) must still fail it
+    monkeypatch.setattr(type(page), "get_drawings", lambda self: [])
+    assert analyze_page(page).ink_fully_accounted is False
+    monkeypatch.undo()
+    # residual ink hidden: the drawings must still fail it
+    real = text_coverage._residual_components
+
+    def nothing_residual(ink, layer):
+        labels, stats, resid, covered, glyph = real(ink, layer)
+        return labels, stats, resid[:0], covered, glyph[:0]
+
+    monkeypatch.setattr(text_coverage, "_residual_components", nothing_residual)
+    assert analyze_page(page).ink_fully_accounted is False
