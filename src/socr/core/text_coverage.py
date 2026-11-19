@@ -219,6 +219,33 @@ def visible_char_boxes(page) -> tuple[list, list]:
     return vis, inv
 
 
+def invisible_space_boxes(page) -> list:
+    """#1383: the boxes of the whitespace characters of the page's INVISIBLE layer, exactly as the
+    layer stores them (no widening, no synthesised gap). ``visible_char_boxes`` drops them; an
+    OCR layer's char boxes are advance-width boxes that drift against the scan's glyphs, so the
+    ink of a comma or a word's last letter often lies in the layer's following space box
+    (p071: ink 1.5-2.6 pt right of its character's box). Only the scan-mode completeness fact
+    uses them (``hidden_layer_ink_accounted``); the born-digital fact does not."""
+    out = []
+    raw = page.get_text("rawdict") or {}
+    for block in raw.get("blocks", ()):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", ()):
+            for span in line.get("spans", ()):
+                if not isinstance(span, dict) or span.get("alpha", 255) != 0:
+                    continue
+                for ch in span.get("chars", ()):
+                    c = ch.get("c")
+                    bbox = ch.get("bbox")
+                    if not c or not c.isspace() or not bbox or len(bbox) < 4:
+                        continue
+                    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                        continue
+                    out.append(bbox)
+    return out
+
+
 def _paint(shape, rects, page, mat):
     m = np.zeros(shape, dtype=bool)
     h, w = shape
@@ -1008,7 +1035,7 @@ def analyze_page(page, *, group: bool = True) -> CoveragePage:
                 mat,
                 dark,
                 light,
-                _paint(dark.shape, [*vis, *inv], page, mat),
+                _paint(dark.shape, [*vis, *inv, *invisible_space_boxes(page)], page, mat),
                 raster_is_scan=True,
             ),
         )

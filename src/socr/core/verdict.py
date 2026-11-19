@@ -1347,7 +1347,12 @@ def prior_ocr_layer_agreement(output: PageOutput, p: Any) -> bool:
       in both readings passes: raster ``(7)`` with layer ``7`` whose box covers it and a reading
       ``7``, likewise ``-7`` and ``1.5`` read as ``15``; small print inside a large box and a
       superscript inside a line box are accounted; a lone mark smaller than the residual size
-      floor outside every box is not seen. Each needs the old OCR and the fresh reading to
+      floor outside every box is not seen. The layer's own SPACE boxes count as covered (owner
+      ruling, #1383; ``text_coverage.invisible_space_boxes``): a comma, period or other mark that
+      both readings dropped and that lies under a space box is not seen either. The dangerous
+      case is a decimal point between digits under a space box: raster ``1.5``, layer ``1 5``
+      with a space box over the point, reading ``1 5`` agree exactly and the page is confirmed
+      (tests/test_gh1383_space_boxes.py pins it). Each needs the old OCR and the fresh reading to
       make the same error. Two readings can agree and both be wrong.
     * the retained layer is non-empty and the SHIPPED text (every line of it: nothing is excluded
       from the comparison, so nothing ships that was not compared) is exactly the layer
