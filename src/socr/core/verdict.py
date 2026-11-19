@@ -1273,6 +1273,7 @@ def _prior_ocr_layer_clause(output: PageOutput, p: Any) -> VerdictClause | None:
 #: #1381: the owner's ruling (2026-11-18). Agreement of an independent fresh reading with the
 #: earlier OCR layer settles the clause; the layer is not evidence on its own, and two readings can
 #: agree and both be wrong, which is why the reason says so.
+#: Known limit (#1383): see :func:`prior_ocr_layer_agreement`: ink under a layer box is not checked.
 PRIOR_OCR_AGREEMENT_REASON = (
     "a fresh reading of the page image agrees word for word and number for number with the "
     "earlier OCR layer (two readings can agree and both be wrong)"
@@ -1341,6 +1342,13 @@ def prior_ocr_layer_agreement(output: PageOutput, p: Any) -> bool:
       with the raster allowed, because the ink-vs-VISIBLE-layer fact of #1378 is never true on a
       scan: the raster is the page). Without it a layer that is a fragment of the page would
       agree with a reading that is the same fragment;
+    * KNOWN LIMIT (#1383, accepted in the owner's ruling): the completeness fact is about ink
+      OUTSIDE the layer's character boxes. Ink UNDER a box is never checked, so the same mistake
+      in both readings passes: raster ``(7)`` with layer ``7`` whose box covers it and a reading
+      ``7``, likewise ``-7`` and ``1.5`` read as ``15``; small print inside a large box and a
+      superscript inside a line box are accounted; a lone mark smaller than the residual size
+      floor outside every box is not seen. Each needs the old OCR and the fresh reading to
+      make the same error. Two readings can agree and both be wrong.
     * the retained layer is non-empty and the SHIPPED text (every line of it: nothing is excluded
       from the comparison, so nothing ships that was not compared) is exactly the layer
       (:func:`_reading_matches_layer_exactly`).
