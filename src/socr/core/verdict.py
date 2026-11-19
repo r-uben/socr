@@ -1290,22 +1290,6 @@ PRIOR_OCR_AGREEMENT_EVENT_DETAIL = (
 #: (``engines/marker.py``: ``fingerprint_determinants``, ``_build_command``).
 LAYER_DEPENDENT_ENGINES = frozenset({"marker"})
 
-_HTML_TAG_RE = re.compile(r"<\s*/?\s*[A-Za-z][^>]*>")
-_ORDERED_RUN_RE = re.compile(r"[^\W\d_]+|\d+")
-#: A number as written, sign and decimal point included: ``-.7`` and ``-7`` are two writings.
-_NUMBER_WRITING_RE = re.compile(r"[-\u2212]?(?:\d[\d.,]*|\.\d[\d.,]*)")
-
-
-def _number_writings(text: str) -> list[str]:
-    """Every number of *text* as written, in order, trailing sentence punctuation dropped."""
-    return [m.group().rstrip(".,") for m in _NUMBER_WRITING_RE.finditer(text)]
-
-
-def _ordered_runs(text: str) -> list[str]:
-    """Every letter run and digit run of *text*, case-folded, in order, so a reordering of any
-    two words (long or short) changes the list."""
-    return _ORDERED_RUN_RE.findall(text.replace("\u00ad", "").casefold())
-
 
 def _same_digits_and_short_tokens(reading: str, reference: str) -> bool:
     """The #1378/#1379 comparison, one definition: the raw digit characters and the short tokens
@@ -1318,21 +1302,23 @@ def _same_digits_and_short_tokens(reading: str, reference: str) -> bool:
 
 
 def _reading_matches_layer_exactly(reading: str, layer: str) -> bool:
-    """Two-way exact agreement: the #1379 digit and short-token equality, the compared words
-    (:func:`word_tokens_in_order`) equal as ordered lists (which is both multiset directions at
-    once), and every letter/digit run and every number as written equal in order. Nothing is
-    rescued (no hyphen join, no ligature variant, no fused or split word): ``missing_words`` rescues
-    them on purpose and is one-directional, so it is not the comparison for "exact"."""
-    from socr.tables.layer_words import has_line_break_hyphen, word_tokens_in_order
+    """Exact agreement: the two texts are the same sequence of whitespace-separated tokens,
+    every character of every token equal.
+
+    The ONLY normalisation is splitting on Unicode whitespace (``str.split()``): a line break,
+    an indent or a run of spaces is layout, not a character of the text. Nothing else is
+    folded or dropped: not punctuation, not a sign, a dash variant, a currency or percent mark,
+    a comparison operator, a bracket, a Markdown mark, nor a hyphenated line break (refused
+    outright, since whether its halves are one word is a guess). Splitting on whitespace and
+    not deleting it keeps ``10 2`` apart from ``102``. This is finer than #1379's digits,
+    short-token and word conjunction (it implies every part of it), so that conjunction is not
+    repeated here; ``missing_words`` is not used because it rescues hyphen joins, ligatures and
+    fused words on purpose and is one-directional."""
+    from socr.tables.layer_words import has_line_break_hyphen
 
     if has_line_break_hyphen(reading) or has_line_break_hyphen(layer):
         return False
-    return (
-        _same_digits_and_short_tokens(reading, layer)
-        and word_tokens_in_order(reading) == word_tokens_in_order(layer)
-        and _ordered_runs(reading) == _ordered_runs(layer)
-        and _number_writings(reading) == _number_writings(layer)
-    )
+    return reading.split() == layer.split()
 
 
 def prior_ocr_layer_agreement(output: PageOutput, p: Any) -> bool:
@@ -1348,13 +1334,19 @@ def prior_ocr_layer_agreement(output: PageOutput, p: Any) -> bool:
       own page-major attempt (``p.best_output``), not a slice of a whole-document run, which hands
       the engine the PDF and its layer;
     * the output is not a floor body (``table_floor_body``, ``scanned_prose_recovered``, ERROR),
-      which carries the layer's own prose under the model's engine label;
-    * the reading holds no HTML (wrapped tables compare as markup, not words);
-    * the retained layer is non-empty, and :func:`_reading_matches_layer_exactly` holds.
+      which carries the layer's own prose under the model's engine label, and no layer slice was
+      spliced into the text after the reading (``layer_text_spliced``);
+    * completeness: the scan's ink is accounted for by the layer's character boxes
+      (``text_hidden_layer_ink_accounted``, :func:`socr.core.text_coverage.page_ink_is_fully_accounted`
+      with the raster allowed, because the ink-vs-VISIBLE-layer fact of #1378 is never true on a
+      scan: the raster is the page). Without it a layer that is a fragment of the page would
+      agree with a reading that is the same fragment;
+    * the retained layer is non-empty and the SHIPPED text (every line of it: nothing is excluded
+      from the comparison, so nothing ships that was not compared) is exactly the layer
+      (:func:`_reading_matches_layer_exactly`).
     """
     from socr.core.manifest import (
         _base_engine_name,
-        is_page_failed_marker,
         prior_ocr_layer_found,
         retained_prior_ocr_layer,
     )
@@ -1371,28 +1363,19 @@ def prior_ocr_layer_agreement(output: PageOutput, p: Any) -> bool:
     attempt = getattr(p, "best_output", None)
     if attempt is None or _base_engine_name(getattr(attempt, "engine", "") or "") != engine:
         return False
-    # A floor body (the layer's own prose recovered around a withheld table) keeps the model's
-    # engine label on the output it replaces (``manifest.py`` ``replace(output, text=floor_text,
-    # status=ERROR, table_floor_body=True, scanned_prose_recovered=...)``): its words ARE the
-    # layer's, so its agreement with the layer proves nothing.
     if (
         output.status is PageStatus.ERROR
         or getattr(output, "table_floor_body", False)
         or getattr(output, "scanned_prose_recovered", False)
+        or _flag(p, "layer_text_spliced")
     ):
         return False
-    text = output.text or ""
-    if not text.strip() or is_page_failed_marker(text):
-        return False
-    reading = reading_numbers_text(
-        _HTML_COMMENT_RE.sub(" ", _IMAGE_LINK_RE.sub(" ", text)), output.page_num
-    )
-    if _HTML_TAG_RE.search(reading):
+    if not _flag(p, "text_hidden_layer_ink_accounted"):
         return False
     layer = retained_prior_ocr_layer(p)
     if not isinstance(layer, str) or not layer.strip():
         return False
-    return _reading_matches_layer_exactly(reading, layer)
+    return _reading_matches_layer_exactly(output.text or "", layer)
 
 
 PRIOR_OCR_NO_LAYER_REASON = (

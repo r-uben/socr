@@ -244,6 +244,12 @@ class PageState:
     #: #1378: ``text_coverage.CoveragePage.ink_fully_accounted`` -- no raster, no drawing, and no
     #: glyph-sized ink outside the layer. Stricter than ``passed``; absent means not shown.
     text_ink_fully_accounted: bool = False
+    #: #1381: ``CoveragePage.hidden_layer_ink_accounted`` -- every glyph-sized ink component of a
+    #: scan lies under a character box of its invisible layer. Absent means not shown.
+    text_hidden_layer_ink_accounted: bool = False
+    #: #1381: a slice of the page's own layer was appended to the shipped text after the reading
+    #: (the equation sidecar block). Such a text is not an independent reading of the page.
+    layer_text_spliced: bool = False
     text_ink_unread: bool = False
     text_coverage_unknown: bool = False
     #: #165: sparse, span-level coverage evidence from whichever recovery lane

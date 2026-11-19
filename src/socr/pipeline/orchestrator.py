@@ -15240,6 +15240,7 @@ class UnifiedPipeline:
                 continue
             ps.text_coverage_verdict = cov.verdict
             ps.text_ink_fully_accounted = bool(cov.ink_fully_accounted)
+            ps.text_hidden_layer_ink_accounted = bool(cov.hidden_layer_ink_accounted)
             ps.text_ink_unread = cov.verdict == "flagged"
             ps.text_coverage_unknown = cov.verdict == "unknown"
 
@@ -18687,6 +18688,8 @@ class UnifiedPipeline:
         # #1378: sparse (only where true), so every other sidecar keeps its bytes.
         if ps is not None and getattr(ps, "text_ink_fully_accounted", False):
             payload["text_ink_fully_accounted"] = True
+        if ps is not None and getattr(ps, "text_hidden_layer_ink_accounted", False):
+            payload["text_hidden_layer_ink_accounted"] = True
         # #1294: the words check records a PASS as well as a FAIL. Sparse: absent where the
         # check did not apply (no own layer, a failed marker, a table socr withheld).
         if winning_out is not None and ps is not None:
@@ -21550,8 +21553,6 @@ class UnifiedPipeline:
             r.output.page_num
             for r in pre_records
             if r.output.page_num in state.pages
-            and getattr(state.pages[r.output.page_num], "prior_ocr_layer_suspect", False)
-            and r.output.page_num not in failed_pages
             and _prior_ocr_agreement(r.output, state.pages[r.output.page_num])
         )
         prior_ocr_retained_pages = [
@@ -25724,6 +25725,8 @@ class UnifiedPipeline:
                         po.text = po.text + "\n\n" + _block
                     else:
                         po.text = _block
+                    # #1381: the block carries a slice of the page's own layer.
+                    state.pages[page_num].layer_text_spliced = True
 
                 # Provenance: emit audit event.
                 if _latex_attached:

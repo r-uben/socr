@@ -175,6 +175,25 @@ def _page_state(sidecar: dict, pa):
     p.prior_ocr_layer_suspect = bool(
         sidecar.get("prior_ocr_layer_suspect")
     ) or _analysis_finds_prior_ocr(pa)
+    # #1381: the inputs of ``prior_ocr_layer_agreement``, from the same two sources a run has
+    # them: the page analysis (the positive finding and the scan-failed flags) and the run's own
+    # record (the retained layer, the winning engine, the hidden-layer ink fact). Without them a
+    # page a run confirmed is re-derived as UNKNOWN here and turned back into a warning.
+    from socr.core.result import PageOutput
+
+    for name in (
+        "prior_ocr_layer",
+        "prior_ocr_layer_scan_failed",
+        "invisible_text_over_raster",
+        "invisible_text_scan_failed",
+    ):
+        setattr(p, name, bool(getattr(pa, name, False)))
+    layer = sidecar.get("prior_ocr_layer_text")
+    p.prior_ocr_layer_text = layer if isinstance(layer, str) else ""
+    p.text_hidden_layer_ink_accounted = sidecar.get("text_hidden_layer_ink_accounted") is True
+    winning = sidecar.get("winning_output")
+    if isinstance(winning, dict):
+        p.best_output = PageOutput.from_dict(winning)
     return p
 
 
