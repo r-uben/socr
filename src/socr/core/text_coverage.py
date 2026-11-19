@@ -139,6 +139,12 @@ class CoveragePage:
     #: word-run filter that ``passed`` stops at. ``passed`` alone lets a lone number, a grid of
     #: figures or a chart's tick labels through, because none forms a word-like run.
     ink_fully_accounted: bool = False
+    #: #1381: the same strict fact for a SCAN whose layer is invisible text over the scan's own
+    #: raster. ``ink_fully_accounted`` is never true there (the raster is the page, and the layer
+    #: is not a visible character). This one counts the invisible characters as the layer and
+    #: lets the raster be: every glyph-sized ink component of the rendered page lies under a
+    #: character box of the layer. False when the page has no invisible layer.
+    hidden_layer_ink_accounted: bool = False
 
     @property
     def kept(self) -> list[CoverageRegion]:
@@ -911,14 +917,18 @@ def _is_horizontal_rule_px(w: float, h: float) -> bool:
     return h <= MAX_THICK_PX and w > GLYPH_H_P98_PX
 
 
-def page_ink_is_fully_accounted(page, mat, dark, light, layer) -> bool:
+def page_ink_is_fully_accounted(page, mat, dark, light, layer, *, raster_is_scan=False) -> bool:
     """#1378: see ``CoveragePage.ink_fully_accounted``. Fail closed: any doubt is ``False``.
 
     Besides the layer's own characters, the page may hold only horizontal rules, as drawings and
     as ink. Every other residual component of at least glyph width -- of ANY size, not only a
-    glyph's (a digit drawn as a 60 pt segment is larger than ``GLYPH_H_P98_PX``) -- fails."""
+    glyph's (a digit drawn as a 60 pt segment is larger than ``GLYPH_H_P98_PX``) -- fails.
+
+    ``raster_is_scan`` (#1381): the caller's *layer* is the page's invisible text and the raster
+    is the scan that text was read from, so a raster is not evidence of ink outside the layer;
+    the residual-component test below, which is on the rendered page, still decides."""
     try:
-        if page.get_image_info():
+        if page.get_image_info() and not raster_is_scan:
             return False
         rules: list[tuple[int, int, int, int]] = []
         for d in page.get_drawings():
@@ -969,7 +979,7 @@ def analyze_page(page, *, group: bool = True) -> CoveragePage:
     t0 = time.perf_counter()
     try:
         gray, mat = _render_gray(page)
-        vis, _inv = visible_char_boxes(page)
+        vis, inv = visible_char_boxes(page)
         dark, light = _polarity_masks(gray)
         layer = _paint(dark.shape, vis, page, mat)
         regions: list[CoverageRegion] = []
@@ -992,6 +1002,15 @@ def analyze_page(page, *, group: bool = True) -> CoveragePage:
             seconds=round(time.perf_counter() - t0, 3),
             ink_fully_accounted=not regions
             and page_ink_is_fully_accounted(page, mat, dark, light, layer),
+            hidden_layer_ink_accounted=bool(inv)
+            and page_ink_is_fully_accounted(
+                page,
+                mat,
+                dark,
+                light,
+                _paint(dark.shape, [*vis, *inv], page, mat),
+                raster_is_scan=True,
+            ),
         )
     except Exception as exc:
         logger.debug("text coverage: page failed closed (%s)", exc)

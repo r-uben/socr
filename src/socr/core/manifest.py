@@ -335,6 +335,9 @@ class ManifestEntry:
     #: #1374: the page's shipped body is the LINE-ORDER floor body (its notice line). Omitted
     #: when False, so every manifest written before this field is byte-identical.
     floor_line_order_body: bool = False
+    #: #1381: the page's earlier OCR layer was confirmed by an exact, independent fresh reading.
+    #: Omitted when False, so every manifest written before this field is byte-identical.
+    prior_ocr_layer_agreement: bool = False
 
     def to_dict(self) -> dict:
         d = {
@@ -353,6 +356,8 @@ class ManifestEntry:
             d["assets"] = [a.to_dict() for a in self.assets]
         if self.floor_line_order_body:
             d["floor_line_order_body"] = True
+        if self.prior_ocr_layer_agreement:
+            d["prior_ocr_layer_agreement"] = True
         return d
 
     @classmethod
@@ -367,6 +372,7 @@ class ManifestEntry:
             journal=d.get("journal", []),
             disposition=disposition,
             floor_line_order_body=d.get("floor_line_order_body") is True,
+            prior_ocr_layer_agreement=d.get("prior_ocr_layer_agreement") is True,
         )
 
 
@@ -8631,6 +8637,8 @@ def build_manifest(
             whole_doc.engine,
         )
     # Model version per engine, so a model swap/drift invalidates the fingerprint.
+    from socr.core.verdict import prior_ocr_layer_agreement as _prior_ocr_agreement
+
     model_versions = {r.engine: r.model_version for r in state.engine_runs if r.model_version}
     for page_num in range(1, handle.page_count + 1):
         record = frozen_records[page_num - 1]
@@ -8730,6 +8738,7 @@ def build_manifest(
             disposition=record.disposition,
             assets=page_assets,
             floor_line_order_body=has_line_order_notice(page.text, page_num),
+            prior_ocr_layer_agreement=_prior_ocr_agreement(page, state.pages[page_num]),
         )
     return manifest
 
