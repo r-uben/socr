@@ -197,6 +197,22 @@ def test_a_reading_that_may_derive_from_the_layer_never_counts(engine: str) -> N
     assert _clause_result(LAYER, page, engine) is CheckResult.UNKNOWN
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"table_floor_body": True},
+        {"scanned_prose_recovered": True},
+        {"status": PageStatus.ERROR},
+    ],
+)
+def test_a_floor_body_under_a_model_label_never_counts(change: dict) -> None:
+    """The floor replaces the model's text with the layer's prose and keeps the engine label."""
+    control = _read(LAYER)
+    assert prior_ocr_layer_agreement(control, _page())
+    floor = PageOutput(**{**control.__dict__, **change})
+    assert not prior_ocr_layer_agreement(floor, _page())
+
+
 def test_consensus_of_an_image_reader_is_still_a_reading() -> None:
     assert _agrees(LAYER, engine="consensus(qwen)")
 

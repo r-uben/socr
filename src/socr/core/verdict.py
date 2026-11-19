@@ -1347,6 +1347,8 @@ def prior_ocr_layer_agreement(output: PageOutput, p: Any) -> bool:
       ``native+equations`` are not), never :data:`LAYER_DEPENDENT_ENGINES`, and it is the page's
       own page-major attempt (``p.best_output``), not a slice of a whole-document run, which hands
       the engine the PDF and its layer;
+    * the output is not a floor body (``table_floor_body``, ``scanned_prose_recovered``, ERROR),
+      which carries the layer's own prose under the model's engine label;
     * the reading holds no HTML (wrapped tables compare as markup, not words);
     * the retained layer is non-empty, and :func:`_reading_matches_layer_exactly` holds.
     """
@@ -1368,6 +1370,16 @@ def prior_ocr_layer_agreement(output: PageOutput, p: Any) -> bool:
         return False
     attempt = getattr(p, "best_output", None)
     if attempt is None or _base_engine_name(getattr(attempt, "engine", "") or "") != engine:
+        return False
+    # A floor body (the layer's own prose recovered around a withheld table) keeps the model's
+    # engine label on the output it replaces (``manifest.py`` ``replace(output, text=floor_text,
+    # status=ERROR, table_floor_body=True, scanned_prose_recovered=...)``): its words ARE the
+    # layer's, so its agreement with the layer proves nothing.
+    if (
+        output.status is PageStatus.ERROR
+        or getattr(output, "table_floor_body", False)
+        or getattr(output, "scanned_prose_recovered", False)
+    ):
         return False
     text = output.text or ""
     if not text.strip() or is_page_failed_marker(text):
