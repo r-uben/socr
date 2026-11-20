@@ -19653,6 +19653,7 @@ class UnifiedPipeline:
             # mode says, a page whose kind is the render failure is reprocessed.
             if is_permanently_unverifiable and str(meta.get("unshipped_figure_kind") or "") in (
                 UNSHIPPED_FIGURE_RENDER_FAILED_KIND,
+                UNSHIPPED_FIGURE_UNCAPTIONED_LOST_KIND,
                 _figure_presence.PRESENCE_RENDER_FAILED_KIND,
             ):
                 is_permanently_unverifiable = False

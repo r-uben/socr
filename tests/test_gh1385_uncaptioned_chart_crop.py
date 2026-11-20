@@ -419,3 +419,63 @@ def test_a_table_page_keeps_its_table_text_and_clauses_byte_for_byte(
         ]
 
     assert clauses(with_side) == clauses(no_side)
+
+
+# ---------------------------------------------------------------------------
+# Fresh versus resumed, through the production resume path
+# ---------------------------------------------------------------------------
+
+
+def _two_page_pdf(path: Path) -> Path:
+    import fitz
+
+    doc = fitz.open()
+    one = doc.new_page(width=612, height=792)
+    one.insert_text((72, 700), "The estimate is reported above, 4.2.", fontname="helv", fontsize=10)
+    shape = one.new_shape()
+    shape.draw_rect(fitz.Rect(100, 120, 500, 420))
+    shape.finish(color=(0, 0, 0), width=1.5)
+    for i in range(8):
+        x = 120 + i * 45
+        shape.draw_rect(fitz.Rect(x, 400 - (i + 1) * 30, x + 30, 410))
+        shape.finish(color=(0.8, 0.1, 0.1), fill=(0.8, 0.1, 0.1), width=1.5)
+    shape.commit()
+    two = doc.new_page(width=612, height=792)
+    two.insert_text((72, 72), "The estimate is reported above, 4.2.", fontname="helv", fontsize=10)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_fresh_and_resumed_give_the_same_events_metadata_and_bytes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from test_gh1187_unshipped_figure_pages import _crash_after_page_one_r4, _run_two_page
+
+    monkeypatch.setattr(_Engine, "BODY", BODY)
+    pdf = _two_page_pdf(tmp_path / "doc.pdf")
+    out = tmp_path / "out"
+    first: list[int] = []
+    _run_two_page(out, pdf, monkeypatch, pages_read=first)
+    side = json.loads(next(iter(out.rglob("pages/00001.json"))).read_text())
+    assert side["unshipped_figure_kind"] == UNCAPTIONED_CROP_KIND, "fixture premise"
+
+    def snapshot():
+        doc_md = next(p for p in out.rglob("*.md") if "pages" not in p.parts).read_text()
+        meta = json.loads(next(iter(out.rglob("metadata.json"))).read_text())
+        files = next(iter(meta["files"].values()))
+        audit = json.loads(next(iter(out.rglob("audit_log.json"))).read_text())
+        kinds = sorted(
+            (e.get("page_num"), e.get("kind"))
+            for e in audit.get("events", audit if isinstance(audit, list) else [])
+            if str(e.get("kind", "")).startswith("unshipped_figure")
+        )
+        return doc_md, files.get("status"), files.get("error"), kinds
+
+    fresh = snapshot()
+    assert fresh[3], "the fresh run recorded the lane's event"
+    _crash_after_page_one_r4(out)
+    resume: list[int] = []
+    _run_two_page(out, pdf, monkeypatch, pages_read=resume)
+    assert 1 not in resume and 2 in resume, "page 1 must come from the ledger, not a re-read"
+    assert snapshot() == fresh
