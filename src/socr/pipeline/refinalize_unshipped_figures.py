@@ -54,6 +54,7 @@ from socr.figures.unshipped_figures import (
     UNCAPTIONED_CROP_KIND,
     UNCAPTIONED_CROP_LOST_KIND,
     UNLOCATED_KIND,
+    chart_region_lane,
     crop_filename,
     decide,
     document_note,
@@ -272,6 +273,21 @@ def _published_verdict(sidecar: dict, page_num: int, new_records: tuple[dict, ..
     return PageVerdict(page_num=page_num, clauses=tuple(in_fresh_run_order(clauses)))
 
 
+def _chart_region_lane(sidecar: dict, pdf: Path, page_num: int) -> tuple[bool, bool]:
+    """The live lane's ``(owns, crops)``, from what a finished run's sidecar kept: the table
+    region count and the chart-region lane's own events. Same rule
+    (``unshipped_figures.chart_region_lane``), so the two callers cannot drift."""
+    kinds = {e.get("kind") for e in sidecar.get("audit_events") or () if isinstance(e, dict)}
+    if "chart_region_preserved" in kinds:
+        return True, True
+    return chart_region_lane(
+        pdf,
+        page_num,
+        table_signal=bool(sidecar.get("native_table_region_count")),
+        arbitrated=CHART_TABLE_ARBITRATION_KIND in kinds,
+    )
+
+
 def refinalize_page(
     sidecar: dict, pdf: Path, figures_dir: Path, max_per_page: int, *, render: bool = True
 ):
@@ -328,6 +344,7 @@ def refinalize_page(
             if asset.rendered and asset.rel_path
         ]
 
+    lane = _chart_region_lane(sidecar, pdf, page_num)
     decision = decide(
         body,
         lambda: locate_figure_regions(pdf, page_num, max_per_page),
@@ -335,12 +352,8 @@ def refinalize_page(
         page_box=lambda: whole_page_box(pdf, page_num),
         # The live lane reads ``_page_has_tables``; a finished run's sidecar keeps the table
         # region count and the chart-region lane's own events, which say the same thing.
-        chart_region_owns=bool(sidecar.get("native_table_region_count"))
-        or any(
-            e.get("kind") in (CHART_TABLE_ARBITRATION_KIND, "chart_region_preserved")
-            for e in sidecar.get("audit_events") or ()
-            if isinstance(e, dict)
-        ),
+        chart_region_owns=lane[0],
+        chart_region_crops=lane[1],
     )
     if decision is None or decision.kind == NOT_FOUND_KIND:
         return None

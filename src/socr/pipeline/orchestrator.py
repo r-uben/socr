@@ -14715,6 +14715,20 @@ class UnifiedPipeline:
                 if asset.rendered and asset.rel_path
             ]
 
+        # With ``--save-figures`` the ordinary figure phase ships the page's pictures.
+        lane_owns, lane_crops = _unshipped_figures.chart_region_lane(
+            state.handle.path,
+            page_num,
+            table_signal=self._page_has_tables(page_num, ps),
+            arbitrated=any(
+                getattr(e, "page_num", None) == page_num
+                and e.kind == _unshipped_figures.CHART_TABLE_ARBITRATION_KIND
+                for e in state.events
+            ),
+        )
+        if self.config.save_figures:
+            lane_owns = lane_crops = True
+
         decision = decide(
             body,
             lambda: locate_figure_regions(state.handle.path, page_num, per_page),
@@ -14724,13 +14738,8 @@ class UnifiedPipeline:
             # (``_preserve_chart_regions``), and the arbitration event marks its mixed pages.
             # With ``--save-figures`` the ordinary figure phase runs and owns the page's
             # figures (and their descriptions), so there is no gap for this lane to fill.
-            chart_region_owns=self._page_has_tables(page_num, ps)
-            or bool(self.config.save_figures)
-            or any(
-                getattr(e, "page_num", None) == page_num
-                and e.kind == _unshipped_figures.CHART_TABLE_ARBITRATION_KIND
-                for e in state.events
-            ),
+            chart_region_owns=lane_owns,
+            chart_region_crops=lane_crops,
         )
         if decision is None or decision.kind == recorded:
             return
