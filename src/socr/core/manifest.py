@@ -7174,8 +7174,14 @@ _FIGURE_PRESENCE_SHIPPED_KIND = "figure_presence_shipped"
 _FIGURE_PRESENCE_CROP_KINDS = frozenset(
     {_FIGURE_PRESENCE_SHIPPED_KIND, _FIGURE_PRESENCE_RENDER_FAILED_KIND}
 )
+#: #1385: the whole-page picture of an uncaptioned chart page, when it could not be saved.
+_FIGURE_UNCAPTIONED_LOST_KIND = "unshipped_figure_uncaptioned_crop_lost"
 _FIGURE_RENDER_FAILED_KINDS = frozenset(
-    {_FIGURE_RENDER_FAILED_KIND, _FIGURE_PRESENCE_RENDER_FAILED_KIND}
+    {
+        _FIGURE_RENDER_FAILED_KIND,
+        _FIGURE_PRESENCE_RENDER_FAILED_KIND,
+        _FIGURE_UNCAPTIONED_LOST_KIND,
+    }
 )
 
 
