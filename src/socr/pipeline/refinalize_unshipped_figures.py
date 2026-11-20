@@ -273,17 +273,21 @@ def _published_verdict(sidecar: dict, page_num: int, new_records: tuple[dict, ..
     return PageVerdict(page_num=page_num, clauses=tuple(in_fresh_run_order(clauses)))
 
 
-def _chart_region_lane(sidecar: dict, pdf: Path, page_num: int) -> tuple[bool, bool]:
-    """The live lane's ``(owns, crops)``, from what a finished run's sidecar kept: the table
-    region count and the chart-region lane's own events. Same rule
-    (``unshipped_figures.chart_region_lane``), so the two callers cannot drift."""
+def _chart_region_lane(sidecar: dict, pdf: Path, page_num: int) -> tuple[bool, bool, list]:
+    """The live lane's ``(owns, crops, uncovered)``, from what a finished run's sidecar kept: the
+    table region count and the chart-region lane's own events. Same rule
+    (``unshipped_figures.chart_region_lane``), so the two callers cannot drift.
+
+    ``chart_region_preserved`` is a table signal in its own right: the lane's candidates are
+    the pages with one, so a page it preserved a crop for had one. The rule is run on it like
+    on any other page (#1393), because a preserved crop does not say the crop covers the page.
+    """
     kinds = {e.get("kind") for e in sidecar.get("audit_events") or () if isinstance(e, dict)}
-    if "chart_region_preserved" in kinds:
-        return True, True
     return chart_region_lane(
         pdf,
         page_num,
-        table_signal=bool(sidecar.get("native_table_region_count")),
+        table_signal=bool(sidecar.get("native_table_region_count"))
+        or "chart_region_preserved" in kinds,
         arbitrated=CHART_TABLE_ARBITRATION_KIND in kinds,
     )
 
@@ -354,6 +358,7 @@ def refinalize_page(
         # region count and the chart-region lane's own events, which say the same thing.
         chart_region_owns=lane[0],
         chart_region_crops=lane[1],
+        chart_region_uncovered=lane[2],
     )
     if decision is None or decision.kind == NOT_FOUND_KIND:
         return None

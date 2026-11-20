@@ -504,7 +504,7 @@ def _chart_skeleton_decision(
     )
 
 
-def _uncaptioned_crop_decision(locate, render, page_box) -> FigureDecision | None:
+def _uncaptioned_crop_decision(locate, render, page_box, uncovered=()) -> FigureDecision | None:
     """#1385: the body names no figure and carries no axis ticks. ``None`` when the locator
     finds no region, or when the caller supplies no whole-page box.
 
@@ -514,9 +514,18 @@ def _uncaptioned_crop_decision(locate, render, page_box) -> FigureDecision | Non
     one crop of six charts under a mark that said a figure shipped. The picture is of the WHOLE
     page, cut from the source, which cannot miss a panel or a label. Nothing in it is read.
     """
-    located = locate()
+    # #1393: a chart the chart-region lane's crops do not cover is evidence of its own. It is
+    # what the lane found, so it is asked first, and it is why the locator's silence does not
+    # end the page here.
+    located = list(uncovered) or locate()
     if not located:
         return None
+    why = (
+        f"{len(located)} chart(s) with axis ticks and a plotted series lie outside every "
+        "crop of the chart-region lane"
+        if uncovered
+        else f"{len(located)} figure region(s) were located on it"
+    )
     box = page_box() if page_box is not None else []
     if not box:
         return None
@@ -529,8 +538,8 @@ def _uncaptioned_crop_decision(locate, render, page_box) -> FigureDecision | Non
             (),
             (CHART_SKELETON_LABEL,),
             UNCAPTIONED_CROP_LOST_KIND,
-            f"this page names no figure, {len(located)} figure region(s) were located on it, "
-            "and NO picture of the page could be saved: its graphics are preserved nowhere",
+            f"this page names no figure, {why}, and NO picture of the page could be saved: "
+            "its graphics are preserved nowhere",
         )
     return FigureDecision(
         (),
@@ -539,9 +548,8 @@ def _uncaptioned_crop_decision(locate, render, page_box) -> FigureDecision | Non
         refs,
         (CHART_SKELETON_LABEL,),
         UNCAPTIONED_CROP_KIND,
-        f"this page names no figure and its reading shows none; {len(located)} figure "
-        "region(s) were located on it, so a picture of the full page ships, cut from the "
-        "source; nothing in the picture was read or verified",
+        f"this page names no figure and its reading shows none; {why}, so a picture of the "
+        "full page ships, cut from the source; nothing in the picture was read or verified",
     )
 
 
@@ -550,11 +558,95 @@ def _uncaptioned_crop_decision(locate, render, page_box) -> FigureDecision | Non
 CHART_TABLE_ARBITRATION_KIND = "chart_table_arbitration"
 
 
+#: #1393: the fewest consecutive slanted segments of one drawn path that read as a plotted
+#: series. Same definition as :data:`MIN_TICK_RUN`, not a second number: a rule, a frame or a
+#: tick is one axis-aligned segment, and two slanted segments are a corner, so a SERIES first
+#: exists at the third.
+MIN_SERIES_RUN = MIN_TICK_RUN
+
+
+def _slanted(p1, p2, width: float) -> bool:
+    """Whether the segment ``p1 -> p2`` is visibly off both axes: it moves farther than its own
+    stroke is wide in x AND in y. The page's own line width is the tolerance, so a rule that a
+    generator wrote with a rounding error is not a slant."""
+    return abs(p1.x - p2.x) > width and abs(p1.y - p2.y) > width
+
+
+def plots_a_series(page, core) -> bool:
+    """Whether the drawings inside *core* include a path of :data:`MIN_SERIES_RUN` consecutive
+    slanted segments (a polyline or a curve), which is what a plotted line is and what no table
+    rule, frame or tick mark is. *core* is a drawing cluster (the union of its own drawings)."""
+    import fitz
+
+    region = fitz.Rect(*core)
+    try:
+        drawings = page.get_drawings()
+    except Exception:  # noqa: BLE001 -- no drawings readable is no evidence
+        return False
+    for drawing in drawings:
+        rect = drawing.get("rect")
+        if rect is None or not region.contains(rect):
+            continue
+        width = float(drawing.get("width") or 0.0)
+        run = 0
+        for item in drawing.get("items") or ():
+            kind = item[0]
+            if kind == "l":
+                slanted = _slanted(item[1], item[2], width)
+            elif kind == "c":
+                slanted = _slanted(item[1], item[4], width)
+            else:
+                slanted = False
+            run = run + 1 if slanted else 0
+            if run >= MIN_SERIES_RUN:
+                return True
+    return False
+
+
+def uncovered_charts(page, crop_boxes) -> list:
+    """The expanded boxes of the charts on *page* that no box of *crop_boxes* covers (#1393).
+
+    A chart here is a drawing cluster of chart size (:func:`sized_drawing_clusters`: every one,
+    including the thin-stroke clusters the chart inventory's own mark gate drops) that carries
+    BOTH halves of a chart: a scale (the tick evidence ``figure_presence`` already uses, from
+    the words inside the cluster's expanded box, table-shaped numbers excluded) and a plotted
+    series (:func:`plots_a_series`). A table frame has the scale half on a rotated table and
+    never the series half; a legend swatch has neither. Covered means the cluster lies inside
+    one crop box, so a chart the crop only clips is uncovered too: its axis labels are in the
+    clipped part (Fed p000's one box, axis labels cut).
+
+    Not decided on a rotated page: the drawing clusters and the table boxes of such a page are
+    in different coordinate spaces (``core.state``, ``detected_table_bboxes``), and so are the
+    crops built from them, so a comparison would be between two different pages.
+    ``[]`` on any failure, which keeps the page with the chart-region lane exactly as before.
+    """
+    import fitz
+
+    from socr.figures.figure_presence import assess_regions
+    from socr.tables.reconstruct import sized_drawing_clusters
+
+    try:
+        if page.rotation:
+            return []
+        words = list(page.get_text("words") or [])
+        out = []
+        for core, box in sized_drawing_clusters(page):
+            if any(b.contains(fitz.Rect(*core)) for b in crop_boxes):
+                continue
+            if not assess_regions(words, [box], set(), [], page_shipped=False)[0].has_evidence:
+                continue
+            if plots_a_series(page, core):
+                out.append(box)
+        return out
+    except Exception:  # noqa: BLE001 -- the lane keeps the page, as it did before #1393
+        return []
+
+
 def chart_region_lane(
     pdf_path, page_num: int, *, table_signal: bool, arbitrated: bool
-) -> tuple[bool, bool]:
-    """``(owns, crops)``: what the chart-region lane (GH-189) does on this page. THE rule, for
-    both callers.
+) -> tuple[bool, bool, list]:
+    """``(owns, crops, uncovered)``: what the chart-region lane (GH-189) does on this page. THE
+    rule, for both callers.
 
     #1389: the lane's candidate set is the pages with a table signal, and ``arbitrated`` says
     the page also carried chart marks, so the lane was handed its chart. But the lane crops only
@@ -571,20 +663,32 @@ def chart_region_lane(
     and handing it to the picture branch would picture table pages the locator calls figures),
     but with an empty inventory it ``crops`` nothing (p002).
 
+    #1393: a lane that crops SOME of the page's charts has not honoured its claim either.
+    ``uncovered`` is the charts :func:`uncovered_charts` finds outside every crop (Fed p000: six
+    panels, one box over the middle row, four charts in no picture and no mark). Such a page is
+    this lane's again (``owns`` and ``crops`` False): the picture of the whole page ships and
+    the page is marked, and ``uncovered`` is the positive evidence :func:`decide` needs when the
+    locator finds nothing.
+
     An inventory that cannot be built keeps the page with the lane, which records
     ``chart_region_inventory_failed`` for it.
     """
     if not (table_signal or arbitrated):
-        return False, False
+        return False, False, []
     from socr.core.pdf import open_pdf
     from socr.tables.reconstruct import chart_region_bboxes
 
     try:
         with open_pdf(pdf_path) as doc:
-            crops = bool(chart_region_bboxes(doc[page_num - 1]))
+            page = doc[page_num - 1]
+            boxes = chart_region_bboxes(page)
+            uncovered = uncovered_charts(page, boxes) if boxes else []
     except Exception:  # noqa: BLE001 -- the lane records the failed inventory itself
-        return True, True
-    return (crops if arbitrated else True), crops
+        return True, True, []
+    if uncovered:
+        return False, False, uncovered
+    crops = bool(boxes)
+    return (crops if arbitrated else True), crops, []
 
 
 def decide(
@@ -594,6 +698,7 @@ def decide(
     *,
     chart_region_owns: bool = False,
     chart_region_crops: bool = False,
+    chart_region_uncovered=(),
     page_box=None,
 ) -> FigureDecision | None:
     """The whole rule, in one place. ``None`` when this page is not this lane's.
@@ -636,7 +741,11 @@ def decide(
         # #1385: not on a page the chart-region lane owns. That lane puts its crop at the
         # chart's own position and skips any page this lane already cropped, so acting here
         # would displace it. Same evidence both callers have, no new threshold.
-        crop = None if chart_region_owns else _uncaptioned_crop_decision(locate, render, page_box)
+        crop = (
+            None
+            if chart_region_owns
+            else _uncaptioned_crop_decision(locate, render, page_box, chart_region_uncovered)
+        )
         if crop is not None:
             return crop
         # #1389: no picture could be given, and the reading wrote its axes as a labelled inline

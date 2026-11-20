@@ -142,7 +142,7 @@ def test_the_chart_region_lane_owns_a_page_only_when_its_inventory_has_a_region(
     pdf = _pdf_with_a_figure(tmp_path / "p.pdf", draw_figure=True)
 
     def lane(arbitrated: bool, table: bool = True) -> tuple[bool, bool]:
-        return chart_region_lane(pdf, 1, table_signal=table, arbitrated=arbitrated)
+        return chart_region_lane(pdf, 1, table_signal=table, arbitrated=arbitrated)[:2]
 
     _inventory(monkeypatch, [])
     empty = (lane(True), lane(False))
