@@ -186,6 +186,15 @@ CHART_SKELETON_LABEL = "uncaptioned chart"
 MIN_TICK_RUN = 3
 
 _TICK_NUMBER_RE = re.compile(r"^[-−–]?\d+(?:[.,]\d+)?%?$")
+#: #1389: a LABELLED inline tick list, the form a reading writes when it describes a chart in
+#: prose: ``- **Y-axis ticks:** 80, 60, 40, 20, 0, -20``. A leading list marker and Markdown
+#: emphasis are dropped first. The label may carry anything but ``:`` and ``|`` (a table row
+#: has pipes and is never read as a list), and every item after the colon must be a number, so
+#: a sentence or a mixed list is not an axis. Measured on the Fed hard set: p074 and p002, the
+#: two pages the issue names, carry it; see the decision log for the false-positive count.
+_INLINE_TICKS_RE = re.compile(r"^[^:|]+:\s*(?P<items>[^:|]+)$")
+_LIST_MARKER_RE = re.compile(r"^(?:[-*+][ \t]+)")
+_EMPHASIS_RE = re.compile(r"[*_]+")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _PRE_OPEN_RE = re.compile(r"^<pre\b", re.IGNORECASE)
 
@@ -211,7 +220,21 @@ def _longest_even_run(values: list[float]) -> int:
     return best
 
 
-def tick_run(body: str) -> int:
+def _inline_tick_values(line: str) -> list[float] | None:
+    """#1389: the numbers of a labelled inline tick list, or ``None`` when *line* is not one."""
+    match = _INLINE_TICKS_RE.match(_EMPHASIS_RE.sub("", _LIST_MARKER_RE.sub("", line)))
+    if match is None:
+        return None
+    # Split on a comma FOLLOWED BY WHITESPACE: ``1,000, 2,000`` is two thousands-grouped numbers,
+    # not four items.
+    items = [item.strip() for item in re.split(r",\s+", match.group("items"))]
+    if len(items) < 2 or not all(_TICK_NUMBER_RE.match(item) for item in items):
+        return None
+    values = [_tick_value(item) for item in items]
+    return None if any(v is None for v in values) else values  # type: ignore[return-value]
+
+
+def tick_run(body: str, *, inline: bool = False) -> int:
     """#1225: the longest run of evenly spaced numbers in *body* that reads as an axis.
 
     A chart a reading dropped leaves its axes behind: ``1996 1998 2000 2002 2004`` on one line,
@@ -261,6 +284,11 @@ def tick_run(body: str) -> int:
             close_column()
             # A one-line ``<pre>…</pre>`` opens nothing: it must not blind the rest of the page.
             in_pre = "</pre" not in stripped.lower()
+            continue
+        listed = _inline_tick_values(stripped) if inline else None
+        if listed is not None:
+            close_column()
+            best = max(best, _longest_even_run(listed))
             continue
         tokens = stripped.split()
         # A blank line does not end a column: a VLM often writes one tick per paragraph.
@@ -455,11 +483,13 @@ class FigureDecision:
 
 
 def _chart_skeleton_decision(
-    body: str, captions: tuple[str, ...], strict: tuple[str, ...]
+    body: str, captions: tuple[str, ...], strict: tuple[str, ...], *, inline: bool = False
 ) -> FigureDecision | None:
     """#1225: the MARK for a chart whose axis ticks the body carries and whose picture no
-    branch can give. ``None`` when the body carries no axis."""
-    ticks = tick_run(body)
+    branch can give. ``None`` when the body carries no axis. *inline* (#1389) also reads a
+    labelled inline tick list, which :func:`decide` asks only AFTER the picture branch, so a
+    page the locator can picture keeps its picture."""
+    ticks = tick_run(body, inline=inline)
     if ticks < MIN_TICK_RUN:
         return None
     return FigureDecision(
@@ -520,8 +550,51 @@ def _uncaptioned_crop_decision(locate, render, page_box) -> FigureDecision | Non
 CHART_TABLE_ARBITRATION_KIND = "chart_table_arbitration"
 
 
+def chart_region_lane(
+    pdf_path, page_num: int, *, table_signal: bool, arbitrated: bool
+) -> tuple[bool, bool]:
+    """``(owns, crops)``: what the chart-region lane (GH-189) does on this page. THE rule, for
+    both callers.
+
+    #1389: the lane's candidate set is the pages with a table signal, and ``arbitrated`` says
+    the page also carried chart marks, so the lane was handed its chart. But the lane crops only
+    what its OWN inventory (``chart_region_bboxes``) finds, and on Fed p074 (three line panels)
+    that inventory is empty: the lane skips the page without a word, and this lane, abstaining
+    because the lane "owns" it, left a SUCCESS page with no picture and no mark. A claim the
+    lane cannot honour is not ownership, so an ARBITRATED page whose inventory is empty is this
+    lane's again (``owns`` False).
+
+    ``crops`` is whether the lane will actually put a picture on the page, which is what
+    excuses this lane from marking a page whose body describes a chart (the picture ships at
+    assembly, after the page loop, so the body shows none yet: Fed p024). A table page with no
+    arbitration event keeps ``owns`` True whatever the inventory (nothing says it has a chart,
+    and handing it to the picture branch would picture table pages the locator calls figures),
+    but with an empty inventory it ``crops`` nothing (p002).
+
+    An inventory that cannot be built keeps the page with the lane, which records
+    ``chart_region_inventory_failed`` for it.
+    """
+    if not (table_signal or arbitrated):
+        return False, False
+    from socr.core.pdf import open_pdf
+    from socr.tables.reconstruct import chart_region_bboxes
+
+    try:
+        with open_pdf(pdf_path) as doc:
+            crops = bool(chart_region_bboxes(doc[page_num - 1]))
+    except Exception:  # noqa: BLE001 -- the lane records the failed inventory itself
+        return True, True
+    return (crops if arbitrated else True), crops
+
+
 def decide(
-    body: str, locate, render, *, chart_region_owns: bool = False, page_box=None
+    body: str,
+    locate,
+    render,
+    *,
+    chart_region_owns: bool = False,
+    chart_region_crops: bool = False,
+    page_box=None,
 ) -> FigureDecision | None:
     """The whole rule, in one place. ``None`` when this page is not this lane's.
 
@@ -563,7 +636,19 @@ def decide(
         # #1385: not on a page the chart-region lane owns. That lane puts its crop at the
         # chart's own position and skips any page this lane already cropped, so acting here
         # would displace it. Same evidence both callers have, no new threshold.
-        return None if chart_region_owns else _uncaptioned_crop_decision(locate, render, page_box)
+        crop = None if chart_region_owns else _uncaptioned_crop_decision(locate, render, page_box)
+        if crop is not None:
+            return crop
+        # #1389: no picture could be given, and the reading wrote its axes as a labelled inline
+        # list (``Y-axis ticks: 80, 60, 40``). That is model-read chart content, never
+        # transcribed, and it is evidence that the page has a chart: the page is marked.
+        # Reached on the page the locator cannot picture (p002: 0 regions) and on the page the
+        # chart-region lane claims and then cannot crop (p074), so no page leaves both lanes
+        # silent while its body describes a chart.
+        # Not when the chart-region lane WILL crop the page: its picture ships at assembly.
+        if chart_region_crops:
+            return None
+        return _chart_skeleton_decision(body, (), (), inline=True)
     strict = figure_captions(body, strict=True)
     bboxes = locate()
     regions = len(bboxes)
