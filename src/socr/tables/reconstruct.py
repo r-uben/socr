@@ -1767,6 +1767,25 @@ def chart_region_clusters(page) -> list[tuple[tuple[float, float, float, float],
     that needs where the chart is DRAWN, rather than where its labels might be, wants the
     cluster (#1276: the crop must not run across the neighbouring column). Never raises.
     """
+    return _expanded_clusters(page, require_marks=True)
+
+
+def sized_drawing_clusters(page) -> list[tuple[tuple[float, float, float, float], object]]:
+    """``(drawing cluster, expanded bbox)`` for EVERY drawing cluster large enough to be a chart.
+
+    :func:`chart_region_clusters` without its mark gate (#1393). That gate
+    (``_has_filled_rects_or_thick_strokes``) is what keeps ruled tables out of the chart
+    inventory, and it also drops a chart drawn only with thin strokes (a line chart): Fed p000
+    has six panels and the inventory holds the one bar chart. A caller that has to account for
+    the charts the inventory MISSES needs the clusters it threw away; deciding which of them
+    are charts is that caller's job. Never raises.
+    """
+    return _expanded_clusters(page, require_marks=False)
+
+
+def _expanded_clusters(
+    page, *, require_marks: bool
+) -> list[tuple[tuple[float, float, float, float], object]]:
     try:
         import fitz
     except ImportError:  # pragma: no cover
@@ -1796,7 +1815,7 @@ def chart_region_clusters(page) -> list[tuple[tuple[float, float, float, float],
         area = (cx1 - cx0) * (cy1 - cy0)
         if area < _CHART_MIN_CLUSTER_AREA_PT2:
             continue
-        if not _has_filled_rects_or_thick_strokes(page, (cx0, cy0, cx1, cy1)):
+        if require_marks and not _has_filled_rects_or_thick_strokes(page, (cx0, cy0, cx1, cy1)):
             continue
         # Expand the bbox to capture nearby text labels.
         #
