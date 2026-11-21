@@ -124,6 +124,7 @@ from socr.tables.native_first import (
 from socr.tables.ship_gate import SHIP_GATE_KIND
 from socr.tables.source_evidence import (
     CORROBORATED_KIND,
+    LAYER_UNPROVEN_KIND,
     LABEL_UNVERIFIED_KIND,
     NO_WITNESS_BACKEND_KIND,
 )
@@ -630,6 +631,11 @@ _RESUME_REPLAYED: dict[str, str] = {
     MATH_FONT_UNRECOVERED_KIND: "#140: same contract as UNRESOLVED_MATH_KIND, for math-font damage",
     LABEL_UNVERIFIED_KIND: (
         "#659: tables_trust.json reads it; its history must not disappear on resume"
+    ),
+    LAYER_UNPROVEN_KIND: (
+        "#1399: emitted by the page judge inside route_page, which a terminal resumed page "
+        "skips; in TABLE_DISTRUST_KINDS and CREDENTIAL_BLOCKING_EVENT_KINDS, so without replay "
+        "the page comes back absent from tables_trust.json with its credential restored"
     ),
     CORROBORATED_KIND: (
         "#1355: emitted by the page judge inside route_page, which a terminal resumed page "

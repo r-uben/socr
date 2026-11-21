@@ -163,6 +163,12 @@ EXPECTED_RESUME_KINDS = frozenset(
         # restored, so losing the event would lose only the audit-log twin. A deliberate
         # addition, like the ones above.
         "source_evidence_table_corroborated",
+        # #1399: the record of a scanned table the pixel check rejected and the stored layer
+        # agreed with. Emitted by the page judge inside ``route_page``, which a terminal resumed
+        # page skips, and in TABLE_DISTRUST_KINDS and CREDENTIAL_BLOCKING_EVENT_KINDS: without
+        # replay the page comes back absent from tables_trust.json with its credential restored
+        # (the #1205 ``table_crop_repair_unverifiable`` shape). A deliberate addition.
+        "source_evidence_table_layer_unproven",
     }
 )
 
@@ -195,4 +201,5 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 77 with #1361's paid_reading_after_table_withhold.
     # 78 with #1355's source_evidence_table_corroborated.
     # 80 with #1385's two uncaptioned-chart kinds.
-    assert len(EXPECTED_RESUME_KINDS) == 80
+    # 81 with #1399's source_evidence_table_layer_unproven.
+    assert len(EXPECTED_RESUME_KINDS) == 81

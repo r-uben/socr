@@ -694,12 +694,15 @@ def _table_layer_clause(output: PageOutput) -> VerdictClause | None:
     """
     if not getattr(output, "table_layer_unproven", ""):
         return None
+    values = tuple(getattr(output, "table_layer_unproven_values", ()) or ())
+    named = f" Numbers the image check could not confirm: {', '.join(values)}." if values else ""
     return VerdictClause(
         Check.SOURCE_EVIDENCE,
         CheckResult.UNKNOWN,
         SCOPE_PAGE,
-        "a table on this page agrees with the page's old text layer but the layer could not "
-        "confirm all of it: " + output.table_layer_unproven,
+        "the numbers of a table on this page agree with the page's old stored text layer, "
+        "which is not an independent reading; the row and column placement of those numbers "
+        "was not verified." + named,
     )
 
 

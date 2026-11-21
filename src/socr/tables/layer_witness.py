@@ -13,11 +13,16 @@ other check. Four comparisons, all on numeric tokens with signs and decimal poin
 
 A. forward: every table token of the reading is in the layer's tokens inside the located
    table crop(s), as a multiset.
-B. mark conflict: a reading token no exact layer token consumed whose digits the layer or a
-   tesseract rung holds with other marks. Tesseract may never rescue it.
+B. mark conflict, both sides, over ALL reading tokens: a reading token whose digits the layer
+   or a tesseract rung holds with other marks, in an occurrence no exact reading token consumes
+   (and a reading token no exact layer token consumes). Tesseract may never rescue it.
 C. format outlier, needs no witness: an integer cell in a row whose other numeric cells share one
    decimal count (a dropped decimal point looks like this).
-D. reverse: layer tokens in the crop absent from the whole-page reading (a dropped number).
+D. reverse: layer tokens in the crop (the page when no crop was located) absent from the
+   whole-page reading (a dropped number). Always run; non-empty means the table is not accepted.
+
+Scope: only a scanned table on a page whose layer is excluded as suspect AND that the pixel
+check has already REJECTED. The best outcome is WARNING with the table; never SUCCESS.
 
 Position-blind by design (a multiset): two swapped cells pass all four. The strict row binding
 downstream is what marks those.
@@ -36,21 +41,10 @@ from socr.tables.native_verifier import (
 from socr.tables.source_evidence import (
     TableTokens,
     _digit_key,
-    _digit_keys_of_text,
     _evidence_table_blocks,
     _tokens_and_dash_led,
 )
 from socr.tables.structure_check import table_truncated
-
-#: The OPEN OWNER RULING behind SUCCESS (#1399). ``False``: the old layer's agreement with the
-#: reading is necessary but not enough for SUCCESS; the tesseract check (today's) must also pass,
-#: so no page that fails today's check can newly ship SUCCESS, only WARNING with the table.
-#: ``True``: exact agreement with the layer confirms a page alone (the 2026-11-18 ruling read
-#: widely). The layer's multiset has no positions, so a table whose numbers are right and whose
-#: labels are shifted agrees with it: the audit's misbound page a14 reaches SUCCESS under ``True``,
-#: and strict row binding does not run on a suspect layer (``layer_can_judge_tables``). Origin: the
-#: audit in ``docs/log/2026-11-21_1399_scanned_table_witness.md``. Not a threshold; a policy switch.
-LAYER_CONFIRMS_ALONE: bool = False
 
 #: Reasons, fixed text so a consumer can count them.
 REASON_TRUNCATED = "the reading ends mid-table (cut off), so it cannot be checked as a table"
@@ -103,13 +97,16 @@ def table_layer_witness(page, boxes=None) -> TableLayerWitness | None:
     dash_keys: set[str] = set()
     for x0, y0, x1, y1, text, *_ in words:
         numeric, _content, dash_led = _tokens_and_dash_led(str(text))
-        if dash_led:
-            dash_keys |= _digit_keys_of_text(str(text))
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        inside = any(bx0 <= cx <= bx2 and by0 <= cy <= by2 for bx0, by0, bx2, by2 in boxes)
+        # The witness's scope is the crop; with no crop located it is the page.
+        if dash_led and (inside or not boxes):
+            digits = "".join(ch for ch in str(text) if ch.isdigit())
+            dash_keys.add(digits.lstrip("0") or "0")
         if not numeric:
             continue
         whole.update(numeric)
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        if any(bx0 <= cx <= bx2 and by0 <= cy <= by2 for bx0, by0, bx2, by2 in boxes):
+        if inside:
             in_crop.update(numeric)
     if not whole:
         return None
@@ -156,24 +153,37 @@ def _by_key(tokens) -> dict[str, set[str]]:
     return keyed
 
 
-def mark_conflicts(
-    leftover: Counter,
-    layer_tokens: Counter,
-    dash_keys: frozenset[str],
-    rung_tokens: frozenset[str],
+def _marks(token: str) -> frozenset[str]:
+    return frozenset(ch for ch in token if ch in "-.")
+
+
+def witness_conflicts(
+    reading: Counter,
+    witness: Counter,
+    *,
+    any_difference: bool,
+    consumed_by: Counter | None = None,
 ) -> list[str]:
-    """B: tokens of *leftover* (reading tokens no exact layer token consumed) whose digits a
-    witness holds with other marks. One entry per occurrence, sorted."""
-    layer_by_key = _by_key(layer_tokens)
-    rung_by_key = _by_key(rung_tokens)
-    out: list[str] = []
-    for tok, count in sorted(leftover.items()):
-        key = _digit_key(tok)
-        other_layer = layer_by_key.get(key, set()) - {tok}
-        other_rung = rung_by_key.get(key, set()) - {tok}
-        if other_layer or other_rung or key in dash_keys:
-            out.extend([tok] * count)
-    return out
+    """B, witness side, over ALL reading tokens: reading tokens whose digits an occurrence of
+    *witness* that no exact reading token consumes holds with other marks.
+
+    The witness is consumed by the reading first (exact string, as a multiset); each leftover
+    witness token ``w`` that shares a digit key with a reading token ``r`` (``w != r``) disputes
+    ``r``. ``any_difference=True`` (the layer: an exact source, so any other marks) or
+    ``False`` (tesseract: it LOSES signs and points constantly, so only a mark it holds that the
+    reading lacks is a conflict; a reading that holds more marks than tesseract is the ordinary
+    lost mark the layer exists to confirm). ``consumed_by`` is the multiset the exact matches are
+    taken from (the whole-page reading: a number the page prints outside the table, in a memo row
+    say, consumes its own witness occurrence); it defaults to *reading*.
+    """
+    leftover = _multiset_missing(witness, consumed_by if consumed_by is not None else reading)
+    reading_by_key = _by_key(reading)
+    disputed: set[str] = set()
+    for w in leftover:
+        for r in reading_by_key.get(_digit_key(w), set()) - {w}:
+            if any_difference or (_marks(w) - _marks(r)):
+                disputed.add(r)
+    return sorted(disputed)
 
 
 def _decimals(token: str) -> int:
@@ -216,6 +226,10 @@ def format_outliers(markdown: str) -> list[str]:
             for i, (_col, tok) in enumerate(counted):
                 if "." in tok:
                     continue
+                if not any(ch in "123456789" for ch in tok):
+                    # A zero: dropping the point of 0.0 leaves the same value, so no number is
+                    # wrong, and an unchanged-value "0" in a decimal row is ordinary.
+                    continue
                 others = {_decimals(t) for j, (_c, t) in enumerate(counted) if j != i}
                 if len(others) == 1 and next(iter(others)) >= 1:
                     outliers.append(tok)
@@ -247,30 +261,59 @@ class LayerVerdict:
     def disputed(self) -> tuple[str, ...]:
         return tuple(sorted(set(self.b) | set(self.c)))
 
+    @property
+    def accepted(self) -> bool:
+        """The layer may let the table ship marked: A, B, C and D all clean, no pre-gate."""
+        return not self.pregate and self.a_passes and not self.disputed and not self.d
+
+    @property
+    def accepted_naming_missing(self) -> bool:
+        """The alternative, MEASURED ONLY and never shipped: D may be non-empty (the mark would
+        name every possibly-missing number)."""
+        return not self.pregate and self.a_passes and not self.disputed
+
 
 def judge_against_layer(
     markdown: str,
     tokens: TableTokens,
     witness: TableLayerWitness,
     *,
-    tesseract_tokens: frozenset[str] = frozenset(),
+    tesseract: Counter | None = None,
+    rungs: tuple[Counter, ...] = (),
     chart_page: bool = False,
 ) -> LayerVerdict:
-    """Run pre-gates and A to D. *markdown* is the reading with HTML tables as markdown."""
+    """Run pre-gates and A to D. *markdown* is the reading with HTML tables as markdown.
+
+    ``tesseract`` is the base reading's numeric tokens and ``rungs`` the extra resolutions', each
+    its own multiset (readings are never pooled across resolutions).
+    """
     if table_truncated(markdown, None):
         return LayerVerdict(pregate=REASON_TRUNCATED)
     if chart_page:
         return LayerVerdict(pregate=REASON_CHART)
     layer = witness.in_crop if witness.crops_found else witness.whole
+    tesseract = tesseract if tesseract is not None else Counter()
     a_missing = _multiset_missing(tokens.numeric, layer)
-    b = mark_conflicts(a_missing, layer, witness.dash_keys, tesseract_tokens)
+    page_numeric = page_text_numeric(markdown)
+    # The layer side of B (a layer occurrence no exact reading token consumes, holding a reading
+    # token's digits with other marks) is the part of D that shares a digit key: D empty means
+    # the layer has no unconsumed occurrence at all, so it needs no separate test.
+    b: set[str] = set()
+    # A layer word led by an en or em dash states no sign: its digits veto a reading token that
+    # shares them (collected inside the crop only).
+    b.update(tok for tok in tokens.numeric if _digit_key(tok) in witness.dash_keys)
+    for source in (tesseract, *rungs):
+        b.update(
+            witness_conflicts(
+                tokens.numeric, source, any_difference=False, consumed_by=page_numeric
+            )
+        )
     c = format_outliers(markdown)
-    d: Counter = Counter()
-    if witness.crops_found:
-        d = _multiset_missing(witness.in_crop, page_text_numeric(markdown))
+    # D always runs: against the crop's layer tokens, or the whole page's when no crop was located.
+    d = _multiset_missing(layer, page_numeric)
     return LayerVerdict(
         a_missing=a_missing,
-        b=tuple(b),
+        b=tuple(sorted(b)),
         c=tuple(c),
         d=d,
         crops_found=witness.crops_found,
@@ -282,7 +325,7 @@ __all__ = [
     "TableLayerWitness",
     "format_outliers",
     "judge_against_layer",
-    "mark_conflicts",
+    "witness_conflicts",
     "page_is_chart",
     "page_text_numeric",
     "table_layer_witness",

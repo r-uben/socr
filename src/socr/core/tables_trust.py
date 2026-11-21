@@ -139,6 +139,9 @@ TABLE_DISTRUST_KINDS: frozenset[str] = frozenset(
         # this page too: the numbers are trustworthy, the row/column label
         # attached to them is not independently confirmed.
         "source_evidence_table_label_unverified",
+        # #1399: a table the pixel check rejected and the stored layer agreed with ships marked;
+        # the layer is not an independent reading and placement was not verified.
+        "source_evidence_table_layer_unproven",
         # #658: the same gate's other fail-closed ending -- no classical OCR
         # backend, so nothing read the page's pixels. Listed for exactly the
         # reason the line above is: the page ships a table nothing corroborated.

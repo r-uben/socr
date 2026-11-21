@@ -1614,14 +1614,12 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
             # #1399: the stored layer is this table's witness and did not confirm all of it.
             # The table ships; the field makes the page WARNING with a mark at finalization
             # (``manifest._apply_label_unverified_guard``, ``verdict._table_layer_clause``).
-            from socr.tables.source_evidence import LAYER_UNPROVEN_KIND
-
             output.table_layer_unproven = result.unproven
             output.table_layer_unproven_values = tuple(result.unproven_values)
             output.audit_notes.append(f"table not confirmed by the stored layer: {result.unproven}")
             self._emit_event(
                 page_num=page_num,
-                kind=LAYER_UNPROVEN_KIND,
+                kind="source_evidence_table_layer_unproven",
                 engine=output.engine or "",
                 detail=result.unproven,
                 data={"values": list(result.unproven_values)},
@@ -1688,7 +1686,9 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
         # alone. Tell the inner native verifier, which must not then convict the same
         # reading from the layer. ``deferred`` results never reach here (they returned
         # above), so this is a real reading, not an abstention.
-        if not layer_ok:
+        # #1399: a candidate the stored layer rescued (``unproven``) was NOT confirmed by the
+        # pixels; recording it would let the inner verifier skip its row check.
+        if not layer_ok and not result.unproven:
             noted = getattr(self._inner, "_pixel_confirmed_candidates", None)
             if isinstance(noted, dict):
                 noted[id(output)] = output

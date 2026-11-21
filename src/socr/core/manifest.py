@@ -2397,6 +2397,10 @@ CREDENTIAL_BLOCKING_EVENT_KINDS: frozenset[str] = frozenset(
         # source-evidence
         "source_evidence_table_reject",
         "source_evidence_table_label_unverified",
+        # #1399: a scanned table the pixel check rejected and the stored layer agreed with: it
+        # ships marked, with its row and column placement unverified, so no credential may say
+        # every table was accepted.
+        "source_evidence_table_layer_unproven",
         "source_evidence_no_witness_backend",
         # ladder terminals other than acceptance, and the escalation failures
         "table_ladder_rejected",

@@ -328,6 +328,9 @@ class SourceEvidenceBundle:
     #: #1355: every numeric token the extra-resolution re-reads (#1357) saw, whether or not a
     #: re-read cleared the table. Veto evidence only, never support and never pooled.
     rung_tokens: frozenset[str] = frozenset()
+    #: #1399: the numeric tokens of each extra-resolution re-read, one multiset per rung, kept apart
+    #: (readings are never pooled). Veto evidence for the layer witness only.
+    rung_numerics: tuple[Counter, ...] = ()
 
     @property
     def no_reading(self) -> bool:
@@ -1403,6 +1406,7 @@ def widen_scanned_evidence(
     base_missing = _unsupported_numeric_count(tokens.numeric, bundle.numeric)
     read: list[int] = []
     seen: set[str] = set()
+    per_rung: list[Counter] = []
     for dpi in _EXTRA_EVIDENCE_OCR_DPIS:
         rung = build_scanned_evidence(
             page,
@@ -1420,6 +1424,7 @@ def widen_scanned_evidence(
             continue
         read.append(dpi)
         seen.update(rung.numeric)
+        per_rung.append(Counter(rung.numeric))
         if _multiset_supported(tokens.numeric, rung.numeric):
             # One reading supports every token on its own. The rung's numeric
             # evidence replaces the base's; its labels and witness state do not.
@@ -1432,7 +1437,11 @@ def widen_scanned_evidence(
                 tuple(read),
                 base_missing,
             )
-    return replace(bundle, rung_tokens=frozenset(seen)), tuple(read), 0
+    return (
+        replace(bundle, rung_tokens=frozenset(seen), rung_numerics=tuple(per_rung)),
+        tuple(read),
+        0,
+    )
 
 
 def _resolve_witness_state(states: list[str]) -> str:
@@ -1882,106 +1891,54 @@ def _apply_layer_witness(
     *,
     chart_page: bool | None,
 ) -> SourceEvidenceResult:
-    """#1399: decide a table on a scanned page whose layer is excluded from the evidence, using
-    that layer as the table's witness. *result* is what the tesseract-only check said.
+    """#1399: let the stored layer of a suspect scanned page rescue a table the pixel check REJECTED.
 
-    Pre-gates (a cut-off reading, a chart page) and B or C (a mark conflict, a format outlier)
-    fail the table whatever tesseract said. Otherwise:
+    Scope, and nothing else: *result* is a numeric rejection (``verifiable`` and not ``passed``)
+    of a table with numbers, on a page whose layer is excluded as evidence. A table the pixel
+    check accepted, could not read, or that has no numbers is returned untouched: the layer
+    neither convicts nor demotes it, and never confirms anything on its own.
 
-    * A passes, D empty, a crop located: SUCCESS (nothing unproven) when tesseract's own check
-      also passed. Where it did not, the layer alone confirms only under
-      ``layer_witness.LAYER_CONFIRMS_ALONE`` (the open owner ruling, default off): else the table
-      ships marked.
-    * A passes but D is non-empty, or no crop was located: ships marked (``unproven``).
-    * A fails: tesseract's own verdict stands; when it passed the table, the layer does not
-      confirm it, so it ships marked instead of unmarked (never SUCCESS).
-
-    A page whose layer holds no numbers is not touched, and neither is one the image check never
-    read (``bundle.has_content_evidence`` False: no backend, a crashed reader, an unrenderable
-    page). That ending stays fail-closed as before (#658): the layer was never allowed to stand in
-    for a missing reader.
+    The rejection is overturned only to WARNING with the table (``unproven`` set, never SUCCESS)
+    and only when the layer agrees with every table number (A), no witness holds the same digits
+    with other marks (B), no integer cell breaks its row's decimal format (C), and the layer holds
+    no number in the table crop (the page when none was located) that the whole-page reading lacks
+    (D), with neither pre-gate (cut-off reading, chart page) firing. Anything else leaves the
+    rejection standing.
     """
-    if not bundle.has_content_evidence:
+    if not (result.verifiable and not result.passed and tokens.has_numeric):
         return result
     from socr.tables.layer_witness import judge_against_layer, page_is_chart, table_layer_witness
 
-    witness = table_layer_witness(page)
-    if witness is None or not tokens.has_numeric:
-        return result
     if chart_page is None:
         chart_page = page_is_chart(page)
-    check_text = output_text
+    witness = table_layer_witness(page)
+    if witness is None:
+        return result
     verdict = judge_against_layer(
-        check_text,
+        html_table_for_check(output_text)[0],
         tokens,
         witness,
-        tesseract_tokens=frozenset(bundle.numeric) | bundle.rung_tokens,
+        tesseract=bundle.numeric,
+        rungs=bundle.rung_numerics,
         chart_page=chart_page,
     )
-    if verdict.pregate:
-        return SourceEvidenceResult(
-            verifiable=False,
-            passed=False,
-            reason=verdict.pregate,
-            extra_resolutions=result.extra_resolutions,
-            extra_resolution_tokens=result.extra_resolution_tokens,
-        )
-    if verdict.disputed:
-        return SourceEvidenceResult(
-            verifiable=True,
-            passed=False,
-            reason=(
-                "table numbers disputed by the stored text layer or a format outlier: "
-                f"{list(verdict.disputed)[:5]}"
-            ),
-            disputed_values=verdict.disputed,
-            extra_resolutions=result.extra_resolutions,
-            extra_resolution_tokens=result.extra_resolution_tokens,
-        )
-    if not verdict.a_passes:
-        if not (result.verifiable and result.passed):
-            return result
-        missing = tuple(sorted(verdict.a_missing.elements()))
-        return replace(
-            result,
-            unproven=(
-                f"the stored text layer does not hold these table numbers: {list(missing)[:5]}"
-            ),
-            unproven_values=missing,
-        )
-    # A passes. The labels were never the layer's to confirm; keep tesseract's word on them.
-    content_unverified = result.content_unverified
-    if not (result.verifiable and result.passed):
-        if tokens.content and not _content_supported(tokens.content, bundle.content):
-            missing_labels = sorted(tokens.content - bundle.content)[:5]
-            content_unverified = f"content labels unverified by page evidence: {missing_labels}"
-    base = SourceEvidenceResult(
+    if not verdict.accepted:
+        return result
+    values = tuple(result.disputed_values)
+    content_unverified = ""
+    if tokens.content and not _content_supported(tokens.content, bundle.content):
+        missing_labels = sorted(tokens.content - bundle.content)
+        content_unverified = f"content labels unverified by page evidence: {missing_labels}"
+    return SourceEvidenceResult(
         verifiable=True,
         passed=True,
-        reason="the stored text layer confirms every table number",
+        reason="the stored text layer agrees with every table number",
         content_unverified=content_unverified,
         extra_resolutions=result.extra_resolutions,
         extra_resolution_tokens=result.extra_resolution_tokens,
+        unproven=(
+            "the image check could not confirm these numbers and the stored text layer agrees "
+            "with them; row and column placement was not verified"
+        ),
+        unproven_values=values,
     )
-    from socr.tables import layer_witness as _lw
-
-    if verdict.crops_found and not verdict.d:
-        if (result.verifiable and result.passed) or _lw.LAYER_CONFIRMS_ALONE:
-            return base
-        return replace(
-            base,
-            unproven=(
-                "the stored text layer agrees with every table number but the image check "
-                "could not confirm them: " + result.reason
-            ),
-        )
-    if not verdict.crops_found:
-        why = "no table crop was located, so the stored layer's numbers could not be scoped"
-        missing_layer: tuple[str, ...] = ()
-    else:
-        missing_layer = tuple(sorted(verdict.d.elements()))
-        why = (
-            "the stored text layer holds numbers in the table crop the reading lacks: "
-            f"{list(missing_layer)[:5]}"
-        )
-    return replace(base, unproven=why, unproven_values=missing_layer)
