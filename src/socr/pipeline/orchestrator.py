@@ -14716,7 +14716,7 @@ class UnifiedPipeline:
             ]
 
         # With ``--save-figures`` the ordinary figure phase ships the page's pictures.
-        lane_owns, lane_crops = _unshipped_figures.chart_region_lane(
+        lane_owns, lane_crops, lane_uncovered = _unshipped_figures.chart_region_lane(
             state.handle.path,
             page_num,
             table_signal=self._page_has_tables(page_num, ps),
@@ -14740,6 +14740,7 @@ class UnifiedPipeline:
             # figures (and their descriptions), so there is no gap for this lane to fill.
             chart_region_owns=lane_owns,
             chart_region_crops=lane_crops,
+            chart_region_uncovered=lane_uncovered,
         )
         if decision is None or decision.kind == recorded:
             return
