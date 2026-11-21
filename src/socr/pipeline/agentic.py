@@ -1457,6 +1457,7 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                 layer_is_evidence=layer_ok,
                 second_reading=_second_reading_of(output),
                 engine=output.engine or "",
+                layer_witness=True,
             )
         except _VERIFIER_FATAL:
             raise
@@ -1607,6 +1608,23 @@ class SourceEvidenceTableJudge(_UnverifiedTableRejection):
                     f"earlier {result.corroborated_by} reading of this page"
                 ),
                 data=dict(output.table_witness_corroboration),
+            )
+
+        if result.unproven:
+            # #1399: the stored layer is this table's witness and did not confirm all of it.
+            # The table ships; the field makes the page WARNING with a mark at finalization
+            # (``manifest._apply_label_unverified_guard``, ``verdict._table_layer_clause``).
+            from socr.tables.source_evidence import LAYER_UNPROVEN_KIND
+
+            output.table_layer_unproven = result.unproven
+            output.table_layer_unproven_values = tuple(result.unproven_values)
+            output.audit_notes.append(f"table not confirmed by the stored layer: {result.unproven}")
+            self._emit_event(
+                page_num=page_num,
+                kind=LAYER_UNPROVEN_KIND,
+                engine=output.engine or "",
+                detail=result.unproven,
+                data={"values": list(result.unproven_values)},
             )
 
         if result.extra_resolutions:

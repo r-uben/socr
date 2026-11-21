@@ -256,6 +256,9 @@ CORROBORATED_KIND: str = "source_evidence_table_corroborated"
 #: #1357: audit event for a table that PASSED only because the witness read
 #: further resolutions. ``data``: ``resolutions`` (dpi list), ``tokens_resolved``.
 EXTRA_RESOLUTION_KIND: str = "source_evidence_table_extra_resolution"
+#: #1399: audit event for a scanned table that passed with the stored text layer as its witness
+#: but was not confirmed in full (ships WARNING). ``data``: ``values``.
+LAYER_UNPROVEN_KIND: str = "source_evidence_table_layer_unproven"
 
 
 @dataclass(frozen=True)
@@ -383,6 +386,12 @@ class SourceEvidenceResult:
     #: #1357: numeric tokens (multiset count) that were unsupported at the base
     #: resolution and supported after the extra readings.
     extra_resolution_tokens: int = 0
+    #: #1399: non-empty on a PASSED verdict that ships marked (WARNING): the stored layer
+    #: witness did not confirm the table in full. The text is the reason for the mark.
+    unproven: str = ""
+    #: #1399: the numbers behind ``unproven`` (layer tokens the reading lacks, or reading tokens
+    #: the layer does not hold), one entry per occurrence, for the mark and the audit event.
+    unproven_values: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1729,8 +1738,17 @@ def verify_scanned_table(
     layer_is_evidence: bool = True,
     second_reading: SecondReading | None = None,
     engine: str = "",
+    layer_witness: bool = False,
+    chart_page: bool | None = None,
 ) -> SourceEvidenceResult:
     """Full scanned-page pipeline: defer native, else verify or fail closed.
+
+    #1399: ``layer_witness=True`` lets the stored layer of a page whose layer is NOT evidence
+    (``layer_is_evidence=False``, the suspect union) serve as the witness of this table check
+    alone: see ``socr.tables.layer_witness``. Off by default; a page with no layer numbers, or
+    where the layer is evidence, is unchanged. ``chart_page`` is the page's chart/figure
+    classification (a pre-gate); ``None`` detects it with the existing chart and caption
+    detectors (``layer_witness.page_is_chart``).
 
     ``native_trusted`` is the caller's born-digital classification for this page.
 
@@ -1843,4 +1861,127 @@ def verify_scanned_table(
     )
     if extra_dpis:
         result = replace(result, extra_resolutions=extra_dpis, extra_resolution_tokens=resolved)
+    if layer_witness and pixel_only and not layer_is_evidence:
+        result = _apply_layer_witness(
+            page,
+            output_text,
+            tokens,
+            bundle,
+            result,
+            chart_page=chart_page,
+        )
     return result
+
+
+def _apply_layer_witness(
+    page,
+    output_text: str,
+    tokens: TableTokens,
+    bundle: SourceEvidenceBundle,
+    result: SourceEvidenceResult,
+    *,
+    chart_page: bool | None,
+) -> SourceEvidenceResult:
+    """#1399: decide a table on a scanned page whose layer is excluded from the evidence, using
+    that layer as the table's witness. *result* is what the tesseract-only check said.
+
+    Pre-gates (a cut-off reading, a chart page) and B or C (a mark conflict, a format outlier)
+    fail the table whatever tesseract said. Otherwise:
+
+    * A passes, D empty, a crop located: SUCCESS (nothing unproven) when tesseract's own check
+      also passed. Where it did not, the layer alone confirms only under
+      ``layer_witness.LAYER_CONFIRMS_ALONE`` (the open owner ruling, default off): else the table
+      ships marked.
+    * A passes but D is non-empty, or no crop was located: ships marked (``unproven``).
+    * A fails: tesseract's own verdict stands; when it passed the table, the layer does not
+      confirm it, so it ships marked instead of unmarked (never SUCCESS).
+
+    A page whose layer holds no numbers is not touched, and neither is one the image check never
+    read (``bundle.has_content_evidence`` False: no backend, a crashed reader, an unrenderable
+    page). That ending stays fail-closed as before (#658): the layer was never allowed to stand in
+    for a missing reader.
+    """
+    if not bundle.has_content_evidence:
+        return result
+    from socr.tables.layer_witness import judge_against_layer, page_is_chart, table_layer_witness
+
+    witness = table_layer_witness(page)
+    if witness is None or not tokens.has_numeric:
+        return result
+    if chart_page is None:
+        chart_page = page_is_chart(page)
+    check_text = output_text
+    verdict = judge_against_layer(
+        check_text,
+        tokens,
+        witness,
+        tesseract_tokens=frozenset(bundle.numeric) | bundle.rung_tokens,
+        chart_page=chart_page,
+    )
+    if verdict.pregate:
+        return SourceEvidenceResult(
+            verifiable=False,
+            passed=False,
+            reason=verdict.pregate,
+            extra_resolutions=result.extra_resolutions,
+            extra_resolution_tokens=result.extra_resolution_tokens,
+        )
+    if verdict.disputed:
+        return SourceEvidenceResult(
+            verifiable=True,
+            passed=False,
+            reason=(
+                "table numbers disputed by the stored text layer or a format outlier: "
+                f"{list(verdict.disputed)[:5]}"
+            ),
+            disputed_values=verdict.disputed,
+            extra_resolutions=result.extra_resolutions,
+            extra_resolution_tokens=result.extra_resolution_tokens,
+        )
+    if not verdict.a_passes:
+        if not (result.verifiable and result.passed):
+            return result
+        missing = tuple(sorted(verdict.a_missing.elements()))
+        return replace(
+            result,
+            unproven=(
+                f"the stored text layer does not hold these table numbers: {list(missing)[:5]}"
+            ),
+            unproven_values=missing,
+        )
+    # A passes. The labels were never the layer's to confirm; keep tesseract's word on them.
+    content_unverified = result.content_unverified
+    if not (result.verifiable and result.passed):
+        if tokens.content and not _content_supported(tokens.content, bundle.content):
+            missing_labels = sorted(tokens.content - bundle.content)[:5]
+            content_unverified = f"content labels unverified by page evidence: {missing_labels}"
+    base = SourceEvidenceResult(
+        verifiable=True,
+        passed=True,
+        reason="the stored text layer confirms every table number",
+        content_unverified=content_unverified,
+        extra_resolutions=result.extra_resolutions,
+        extra_resolution_tokens=result.extra_resolution_tokens,
+    )
+    from socr.tables import layer_witness as _lw
+
+    if verdict.crops_found and not verdict.d:
+        if (result.verifiable and result.passed) or _lw.LAYER_CONFIRMS_ALONE:
+            return base
+        return replace(
+            base,
+            unproven=(
+                "the stored text layer agrees with every table number but the image check "
+                "could not confirm them: " + result.reason
+            ),
+        )
+    if not verdict.crops_found:
+        why = "no table crop was located, so the stored layer's numbers could not be scoped"
+        missing_layer: tuple[str, ...] = ()
+    else:
+        missing_layer = tuple(sorted(verdict.d.elements()))
+        why = (
+            "the stored text layer holds numbers in the table crop the reading lacks: "
+            f"{list(missing_layer)[:5]}"
+        )
+    return replace(base, unproven=why, unproven_values=missing_layer)

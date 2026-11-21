@@ -659,6 +659,14 @@ class PageOutput:
     #: shipped. "" means either no doubt, or this output never went through
     #: the scanned-table gate at all.
     table_label_unverified: str = ""
+    #: #1399: non-empty when this output's scanned table passed with the stored text layer as its
+    #: witness and the layer did not confirm it in full (numbers the layer holds in the table crop
+    #: that the reading lacks, reading numbers the layer lacks, or no table crop located). The
+    #: value is the reason; the page ships WARNING with a mark. Same candidate-associated shape as
+    #: ``table_label_unverified``, but serialised so a resume keeps it.
+    table_layer_unproven: str = ""
+    #: #1399: the numbers behind ``table_layer_unproven``, one entry per occurrence.
+    table_layer_unproven_values: tuple[str, ...] = ()
     #: #1048: non-empty when the scanned-table gate COULD NOT CHECK this
     #: output's table (``SourceEvidenceResult.verifiable`` False: no local
     #: evidence, no OCR witness, no verifiable tokens) and the output was
@@ -817,6 +825,11 @@ class PageOutput:
         # reprocess across every existing corpus.
         if self.table_label_unverified:
             d["table_label_unverified"] = self.table_label_unverified
+        # #1399: same omit-when-empty convention and reason.
+        if self.table_layer_unproven:
+            d["table_layer_unproven"] = self.table_layer_unproven
+        if self.table_layer_unproven_values:
+            d["table_layer_unproven_values"] = list(self.table_layer_unproven_values)
         # #1048: same omit-when-empty convention and reason as the field above.
         if self.table_unverifiable:
             d["table_unverifiable"] = self.table_unverifiable
@@ -897,6 +910,10 @@ class PageOutput:
             ),
             table_corroboration=d.get("table_corroboration"),
             table_label_unverified=d.get("table_label_unverified", ""),
+            table_layer_unproven=str(d.get("table_layer_unproven", "") or ""),
+            table_layer_unproven_values=tuple(
+                str(v) for v in d.get("table_layer_unproven_values", ()) if str(v)
+            ),
             table_unverifiable=d.get("table_unverifiable", ""),
             table_disputed=d.get("table_disputed", ""),
             table_disputed_values=tuple(

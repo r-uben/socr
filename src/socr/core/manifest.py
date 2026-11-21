@@ -6627,7 +6627,7 @@ def _apply_label_unverified_guard(output: PageOutput) -> PageOutput:
     failure) or already WARNING for some other reason keeps it. Only a plain
     SUCCESS candidate whose only doubt is this label gets demoted.
     """
-    if not output.table_label_unverified:
+    if not (output.table_label_unverified or output.table_layer_unproven):
         return output
     if output.status is not PageStatus.SUCCESS:
         return output

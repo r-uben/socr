@@ -686,6 +686,23 @@ def _table_label_clause(output: PageOutput) -> VerdictClause | None:
     )
 
 
+def _table_layer_clause(output: PageOutput) -> VerdictClause | None:
+    """#1399: a scanned table the stored text layer did not confirm in full.
+
+    The table ships; ``_apply_label_unverified_guard`` demotes the page to WARNING and this
+    clause is the mark. UNKNOWN, not FAIL: no check found a wrong number, one could not finish.
+    """
+    if not getattr(output, "table_layer_unproven", ""):
+        return None
+    return VerdictClause(
+        Check.SOURCE_EVIDENCE,
+        CheckResult.UNKNOWN,
+        SCOPE_PAGE,
+        "a table on this page agrees with the page's old text layer but the layer could not "
+        "confirm all of it: " + output.table_layer_unproven,
+    )
+
+
 def _scanned_figure_clause(p: Any) -> VerdictClause | None:
     if not _flag(p, "scanned_figure_render_failed"):
         return None
@@ -3066,6 +3083,7 @@ def derive_clauses(
         _native_glyph_clause(p, output, provenance),
         _chart_region_clause(p),
         _table_label_clause(output),
+        _table_layer_clause(output),
         _scanned_figure_clause(p),
         *_chart_floor_clauses(p),
     ):
