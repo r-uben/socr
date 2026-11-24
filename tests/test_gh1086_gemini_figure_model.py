@@ -46,12 +46,13 @@ def test_process_gemini_model_flag_wires_figure_engine_model(tmp_path, monkeypat
     def _stub_process(self, pdf_path, output_dir):
         engine = self._get_vision_engine()
         assert engine is not None
+        # #1405: the paid engine sits behind ``BudgetedPaidFigureEngine``.
         if isinstance(engine, LocalFirstFigureEngine):
             assert engine._gemini is not None
-            assert engine._gemini.config.model == _CUSTOM_MODEL
+            assert engine._gemini._inner.config.model == _CUSTOM_MODEL
         else:
-            assert isinstance(engine, GeminiAPIEngine)
-            assert engine.config.model == _CUSTOM_MODEL
+            assert isinstance(engine._inner, GeminiAPIEngine)
+            assert engine._inner.config.model == _CUSTOM_MODEL
         return EngineResult(
             document_path=pdf_path,
             engine="test",

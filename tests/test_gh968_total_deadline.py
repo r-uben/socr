@@ -687,7 +687,9 @@ def test_figure_is_available_is_inconclusive_when_the_probe_fails_fast(monkeypat
     release = threading.Event()
     stray = threading.Thread(target=lambda: release.wait(30), daemon=True)
     stray.start()
-    ollama_utils._OUTSTANDING["ollama figure http://h/api/tags"] = stray
+    # #1405: the engine resolves its host as every other Ollama caller does, and
+    # the resolver fills in the daemon's port when the value omits it.
+    ollama_utils._OUTSTANDING["ollama figure http://h:11434/api/tags"] = stray
     try:
         assert engine.is_available() is True, "fail-fast was read as 'daemon unavailable'"
         assert len(gets) == 1, "a second probe was stacked on the draining one"

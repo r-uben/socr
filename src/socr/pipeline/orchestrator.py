@@ -1987,6 +1987,12 @@ class UnifiedPipeline:
     # same reason: tests build pipelines via ``object.__new__`` to skip the
     # constructor, and a fingerprint call must not explode on a missing attribute.
     _caption_engine_identity_cache: str | bool = False
+    #: Page of the figure currently being captioned (#1405); ``0`` outside the
+    #: caption loop. The paid caption gate and recorder read it. Class level for
+    #: the reason above.
+    _caption_call_page: int = 0
+    #: Document the caption loop is working on (#1405); ``None`` outside it.
+    _caption_state: "DocumentState | None" = None
     _final_records: dict[int, FinalizedPageRecord] | None = None
 
     def __init__(self, config: PipelineConfig) -> None:
@@ -17033,8 +17039,20 @@ class UnifiedPipeline:
         from socr.core.providers import zero_cap_pinned_forbids_cloud
         from socr.engines.gemini_api import OllamaFigureEngine
 
+        # #1405: mirrors the vLLM tier ``_get_vision_engine`` tries first.
+        vllm_target = self._figure_vllm_target()
+        vllm_serving = False
+        if vllm_target is not None:
+            from socr.engines.vllm import VLLMConfig, VLLMEngine
+
+            vllm = VLLMEngine(VLLMConfig(base_url=vllm_target[0], model=vllm_target[1]))
+            vllm_serving = vllm.serves_model()
+            vllm.close()
+
         ollama = OllamaFigureEngine()
-        if ollama.is_available():
+        if vllm_serving and vllm_target is not None:
+            identity = f"vllm:{vllm_target[1]}"
+        elif ollama.is_available():
             identity = f"ollama:{ollama.model}"
         else:
             cloud_forbidden = getattr(
@@ -24762,6 +24780,9 @@ class UnifiedPipeline:
         # VLM caption engine: built ONCE per document, closed ONCE after the
         # per-figure loop.  When ``describe_figures`` is False the engine is
         # never constructed and no VLM call is made (GH-50 parity).
+        # #1405: the document a paid caption call is journaled in; cleared with the
+        # page below when the loop ends.
+        self._caption_state = state
         vision_engine = self._get_vision_engine() if self.config.describe_figures else None
         if not self.config.describe_figures and not self.config.quiet:
             console.print(
@@ -24779,6 +24800,9 @@ class UnifiedPipeline:
             if vision_engine is not None and fig.image is not None:
                 # Get page context for better descriptions
                 context = self._get_page_context(state, fig.page_num)
+                # #1405: the page a paid fallback call, if one is made for this
+                # figure, is charged to and its refusal is reported against.
+                self._caption_call_page = fig.page_num
                 info = vision_engine.describe_figure(
                     fig.image,
                     context=context,
@@ -24834,6 +24858,8 @@ class UnifiedPipeline:
             if was_described and fig.bbox is not None:
                 self._record_figure_recoverable_labels(state, fig_info)
 
+        self._caption_call_page = 0
+        self._caption_state = None
         if vision_engine is not None:
             vision_engine.close()
 
@@ -25835,18 +25861,126 @@ class UnifiedPipeline:
                 f"{rejected_total} failed 1A gate (native text kept)[/dim]"
             )
 
-    def _get_vision_engine(self):
-        """Try to create a Gemini API engine for figure description.
+    #: ``EngineResult.engine`` of a paid figure-caption call in the run's cost
+    #: journal (#1405). Its own name, so the spend is attributable in
+    #: ``engines_used`` and the metadata instead of being folded into the page
+    #: reader's.
+    PAID_CAPTION_RUN_ENGINE = "gemini-figure-caption"
 
-        When Ollama is available, returns a LocalFirstFigureEngine that tries
-        qwen3-vl:30b-a3b-instruct first on every call and falls back to Gemini
-        per-call on empty or error result.  When Ollama is unavailable, returns
-        GeminiAPIEngine directly.  Returns None only when both are unreachable.
+    def _paid_caption_refusal(self, state: DocumentState | None) -> str | None:
+        """Why the next paid caption call must not be made, or ``None`` (#1405).
+
+        The same caps the paid page reader obeys, asked before EVERY call
+        because all three move during a run: the quota circuit, ``--max-paid-pages``
+        (one caption call counts as one paid page image) and ``--cost-budget``,
+        which fails closed on an unknown subtotal exactly as the page rungs do.
+        ``--cost-budget`` is checked against spend so far: a caption's price is
+        only known from its response, so the call that crosses the budget is
+        made and the next one is refused.
+
+        The reasons are number-free prose: they ship inside the figure's mark,
+        and a mark holding a digit would be blanked on a certified-floor page.
+        """
+        if getattr(self, "_gemini_quota_circuit_open", False):
+            return "the paid reader is disabled for this run"
+        remaining = self._gemini_paid_budget_remaining()
+        if remaining is not None and remaining <= 0:
+            return "the paid page cap is used up"
+        if state is not None and self.config.cost_budget > 0:
+            total_cost = state.total_cost
+            if total_cost is None or total_cost >= self.config.cost_budget:
+                return "the document cost budget is used up"
+        return None
+
+    def _admit_paid_caption(self, state: DocumentState | None) -> str | None:
+        """Gate ONE paid caption call; on refusal leave an audit event (#1405)."""
+        refusal = self._paid_caption_refusal(state)
+        if refusal is None:
+            self._record_gemini_paid_pages(1)
+            return None
+        if state is not None:
+            from socr.core.audit_log import AuditEvent
+
+            state.events.append(
+                AuditEvent(
+                    page_num=self._caption_call_page,
+                    kind="figure_caption_paid_refused",
+                    engine=self.PAID_CAPTION_RUN_ENGINE,
+                    detail=f"paid figure caption not requested: {refusal}",
+                    data={
+                        "paid_pages_used": self._paid_gemini_pages_used,
+                        "max_paid_pages": self._max_paid_pages_limit(),
+                        "cost_budget": self.config.cost_budget,
+                        "total_cost": state.total_cost,
+                    },
+                )
+            )
+        return refusal
+
+    def _record_paid_caption(self, state: DocumentState | None, cost: float | None) -> None:
+        """Journal ONE paid caption call and charge it to its page (#1405).
+
+        ``cost`` is the engine's metered figure; ``None`` (a request went out and
+        its usage is unknown) is journaled as unknown, which makes the document
+        total unknown and closes later paid rungs under ``--cost-budget`` -- the
+        rule every other unmetered call follows.
+        """
+        if state is None:
+            return
+        page = self._caption_call_page
+        state.record_engine_run(
+            EngineResult(
+                document_path=state.handle.path,
+                engine=self.PAID_CAPTION_RUN_ENGINE,
+                status=DocumentStatus.SUCCESS,
+                pages=[],
+                model_version=self.config.gemini_model,
+                cost=cost,
+                pages_processed=0,
+                audit_passed=True,
+            ),
+            page_nums=[page] if page else [],
+        )
+
+    def _figure_vllm_target(self) -> tuple[str, str] | None:
+        """``(base_url, model)`` of the run's vLLM vision server, or ``None`` (#1405).
+
+        Only when the reader backend is EXPLICITLY vLLM: that is the deployment
+        (a cluster, where Ollama is absent) whose captions otherwise had nowhere
+        local to go. ``auto`` keeps the Ollama-first order unchanged.
+        """
+        if getattr(self.config, "qwen_backend", "") != "vllm":
+            return None
+        url = (getattr(self.config, "qwen_vllm_url", "") or "").strip()
+        model = (getattr(self.config, "qwen_vllm_model", "") or "").strip()
+        if not url or not model:
+            return None
+        return url, model
+
+    def _get_vision_engine(self):
+        """Build the figure-caption engine for one document.
+
+        Local first: the run's vLLM vision server when the reader backend is
+        vLLM and it serves the configured model, else Ollama when it has the
+        caption model. Either is wrapped in a ``LocalFirstFigureEngine`` that
+        falls back to the paid Gemini API per call on an empty or failed local
+        result. With no local engine the paid engine is returned alone.
+        Returns None only when nothing is reachable.
+
+        #1405: the paid engine is always handed out behind
+        ``BudgetedPaidFigureEngine``. Its calls are journaled in
+        ``self._caption_state``, the document the caption loop is working on
+        (read at call time, not captured here). With no document set, the caps
+        that need none (quota circuit, ``--max-paid-pages``) still apply and
+        nothing is journaled. The signature stays argument-free because callers
+        and tests replace this method with zero-argument stand-ins.
         """
         import os
 
         from socr.core.providers import zero_cap_pinned_forbids_cloud
+        from socr.engines._figure_prompt import CAPTION_MARKER
         from socr.engines.gemini_api import (
+            BudgetedPaidFigureEngine,
             GeminiAPIConfig,
             GeminiAPIEngine,
             LocalFirstFigureEngine,
@@ -25854,7 +25988,7 @@ class UnifiedPipeline:
         )
 
         # Build a Gemini engine if credentials are available (used as fallback)
-        def _try_gemini() -> GeminiAPIEngine | None:
+        def _try_gemini() -> BudgetedPaidFigureEngine | None:
             # GH-154 round 4: this factory built (and returned/fell back to)
             # Gemini unconditionally whenever an API key was present -- neither
             # --strict-local nor an EXPLICIT --max-cost-per-page 0 stopped
@@ -25870,7 +26004,35 @@ class UnifiedPipeline:
             engine = GeminiAPIEngine(
                 GeminiAPIConfig(api_key=api_key, model=self.config.gemini_model)
             )
-            return engine if engine.initialize() else None
+            if not engine.initialize():
+                return None
+            return BudgetedPaidFigureEngine(
+                engine,
+                admit=lambda: self._admit_paid_caption(self._caption_state),
+                record=lambda cost: self._record_paid_caption(self._caption_state, cost),
+            )
+
+        vllm_target = self._figure_vllm_target()
+        if vllm_target is not None:
+            from socr.engines.vllm import VLLMConfig, VLLMEngine
+
+            vllm = VLLMEngine(VLLMConfig(base_url=vllm_target[0], model=vllm_target[1]))
+            if vllm.serves_model():
+                gemini_fallback = _try_gemini()
+                if not self.config.quiet:
+                    fb = " + Gemini fallback" if gemini_fallback else ""
+                    console.print(
+                        f"  [dim]Using vLLM ({vllm_target[1]}) for figure descriptions{fb}[/dim]"
+                    )
+                # Every genuine caption is wrapped in the marker and no failure
+                # string is, so the marker is the success test for an engine
+                # whose failure strings are not Ollama's.
+                return LocalFirstFigureEngine(
+                    vllm,
+                    gemini_fallback,
+                    is_failure=lambda info: not (info.description or "").startswith(CAPTION_MARKER),
+                )
+            vllm.close()
 
         ollama = OllamaFigureEngine()
         if ollama.is_available():
