@@ -247,6 +247,9 @@ class PageState:
     #: #1381: ``CoveragePage.hidden_layer_ink_accounted`` -- every glyph-sized ink component of a
     #: scan lies under a character box of its invisible layer. Absent means not shown.
     text_hidden_layer_ink_accounted: bool = False
+    #: #1402 (rule B): ``CoveragePage.hidden_layer_ink_below_letter`` -- a scan's dark ink outside
+    #: its invisible layer holds nothing that could be a character. Absent means not shown.
+    text_hidden_layer_ink_below_letter: bool = False
     #: #1381: a slice of the page's own layer was appended to the shipped text after the reading
     #: (the equation sidecar block). Such a text is not an independent reading of the page.
     layer_text_spliced: bool = False

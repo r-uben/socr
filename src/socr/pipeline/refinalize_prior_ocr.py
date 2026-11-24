@@ -33,7 +33,7 @@ import json
 import re
 import sys
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from socr.core.page_files import page_sidecar_paths
@@ -649,10 +649,106 @@ def refinalize_document(
     return changes
 
 
+def _without_own_prior_ocr_mark(text: str, page_num: int) -> str:
+    """*text* without this page's own ``prior_ocr_layer`` mark line: the one line a run of the
+    agreement rule would not have written. Every other leading mark stays, so a page marked for
+    another reason is compared with that mark in its text and does not agree."""
+    from socr.core.manifest import without_page_top_banners
+    from socr.core.marks import Check, parse_canonical_mark
+
+    def is_own_mark(banner: str) -> bool:
+        parsed = parse_canonical_mark(banner, page_num)
+        return parsed is not None and parsed[0] is Check.PRIOR_OCR_LAYER
+
+    return without_page_top_banners(text, is_own_mark)
+
+
+def agreement_report_document(doc_dir: Path, pdf_dir: Path, counts: Counter) -> list[int]:
+    """#1402: the pages of one finished document that ship marked ``prior_ocr_layer_unverified``
+    and that :func:`socr.core.verdict.prior_ocr_layer_agreement` would confirm today. READ-ONLY:
+    nothing is written, and no OCR or model runs.
+
+    The predicate is the run's own. Its inputs are rebuilt the way ``socr-refinalize-own-text``
+    rebuilds them (the page analysis of the run's input PDF, accepted by checksum and page
+    count; the retained layer and the winning reading from the sidecar). The one input an older
+    sidecar does not carry, the scan's residual-ink fact, is measured again on the PDF by
+    :func:`socr.core.text_coverage.analyze_page`."""
+    from socr.core.pdf import open_pdf
+    from socr.core.result import FailureMode, PageOutput
+    from socr.core.text_coverage import analyze_page
+    from socr.core.verdict import prior_ocr_layer_agreement
+    from socr.pipeline.refinalize_own_text import _analyse_pdf, _page_state
+
+    meta = _read_json(doc_dir / "metadata.json")
+    unverified = [
+        sidecar
+        for sidecar in map(_read_json, page_sidecar_paths(doc_dir / "pages"))
+        if sidecar.get("failure_mode") == FailureMode.PRIOR_OCR_LAYER_UNVERIFIED.value
+    ]
+    # A page whose record is not final is a crash-recovery copy of an unfinished document: what
+    # ships for it is not decided yet, so it is counted and not judged.
+    marked = [sidecar for sidecar in unverified if sidecar.get("terminal") is True]
+    if len(marked) != len(unverified):
+        counts["not checked: page record is not final"] += len(unverified) - len(marked)
+    if not marked:
+        return []
+    assessment, why = _analyse_pdf(pdf_dir, meta)
+    if assessment is None:
+        counts[f"not checked: {why}"] += len(marked)
+        return []
+    confirmed: list[int] = []
+    # opened the way a run opens it for the same check (``_prepare_text_coverage``)
+    with open_pdf(str(pdf_dir / str(meta["key"]))) as pdf:
+        for sidecar in marked:
+            page_num = int(sidecar["page_num"])
+            p = _page_state(sidecar, assessment.pages[page_num - 1])
+            coverage = analyze_page(pdf[page_num - 1], group=False)
+            p.text_hidden_layer_ink_accounted = bool(coverage.hidden_layer_ink_accounted)
+            p.text_hidden_layer_ink_below_letter = bool(coverage.hidden_layer_ink_below_letter)
+            winning = PageOutput.from_dict(sidecar.get("winning_output") or {})
+            output = replace(
+                winning, text=_without_own_prior_ocr_mark(winning.text or "", page_num)
+            )
+            if prior_ocr_layer_agreement(output, p):
+                confirmed.append(page_num)
+                counts["would be confirmed by agreement"] += 1
+            else:
+                counts["stays marked"] += 1
+    return confirmed
+
+
+def agreement_report(out_dir: Path, pdf_dir: Path) -> int:
+    counts: Counter = Counter()
+    failed: list[tuple[Path, str]] = []
+    for meta_path in sorted(out_dir.rglob("metadata.json")):
+        doc_dir = meta_path.parent
+        if not (doc_dir / "pages").is_dir():
+            continue
+        try:
+            pages = agreement_report_document(doc_dir, pdf_dir, counts)
+        except Exception as exc:  # noqa: BLE001 -- reported per document, never swallowed
+            failed.append((doc_dir, f"{type(exc).__name__}: {exc}"))
+            continue
+        if pages:
+            print(f"{doc_dir.name}: {', '.join(map(str, pages))}")
+    for outcome, n in sorted(counts.items()):
+        print(f"{n:6d}  {outcome}")
+    print(f"{sum(counts.values()):6d}  pages marked prior_ocr_layer_unverified; nothing written")
+    for doc_dir, why in failed:
+        print(f"FAILED  {doc_dir}: {why}", file=sys.stderr)
+    return 1 if failed else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="socr-refinalize-prior-ocr", description=__doc__)
     parser.add_argument("out_dir", type=Path)
     parser.add_argument("--dry-run", action="store_true", help="count, write nothing")
+    parser.add_argument(
+        "--agreement-report",
+        action="store_true",
+        help="#1402: count the pages shipped marked prior_ocr_layer_unverified that the "
+        "agreement rule of this code would confirm; needs --pdf-dir; writes nothing",
+    )
     parser.add_argument(
         "--pdf-dir",
         type=Path,
@@ -661,6 +757,10 @@ def main(argv: list[str] | None = None) -> int:
         "findings are recomputed by socr's page analysis (no OCR, no model)",
     )
     args = parser.parse_args(argv)
+    if args.agreement_report:
+        if args.pdf_dir is None:
+            parser.error("--agreement-report needs --pdf-dir")
+        return agreement_report(args.out_dir, args.pdf_dir)
     counts: Counter = Counter()
     skipped: Counter = Counter()
     failed: list[tuple[Path, str]] = []

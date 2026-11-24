@@ -191,6 +191,7 @@ def _page_state(sidecar: dict, pa):
     layer = sidecar.get("prior_ocr_layer_text")
     p.prior_ocr_layer_text = layer if isinstance(layer, str) else ""
     p.text_hidden_layer_ink_accounted = sidecar.get("text_hidden_layer_ink_accounted") is True
+    p.text_hidden_layer_ink_below_letter = sidecar.get("text_hidden_layer_ink_below_letter") is True
     winning = sidecar.get("winning_output")
     if isinstance(winning, dict):
         p.best_output = PageOutput.from_dict(winning)

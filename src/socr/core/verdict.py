@@ -1322,6 +1322,87 @@ def _reading_matches_layer_exactly(reading: str, layer: str) -> bool:
     return reading.split() == layer.split()
 
 
+# --- #1402 (rule B): the same comparison, minus what is markup and what is layout ---------
+
+#: Markdown's own grammar (CommonMark): an ATX heading is 1 to 6 ``#`` after at most 3 spaces of
+#: indent; a thematic break or a table delimiter row is a run of at least 3 dashes.
+_MD_HEADING_MAX_LEVEL = 6
+_MD_BLOCK_MAX_INDENT = 3
+_MD_RULE_MIN_DASHES = 3
+_MD_HEADING_RE = re.compile(
+    rf"^[ ]{{0,{_MD_BLOCK_MAX_INDENT}}}#{{1,{_MD_HEADING_MAX_LEVEL}}}[ \t]+", re.M
+)
+_MD_DASH_RUN = rf":?-{{{_MD_RULE_MIN_DASHES},}}:?"
+_MD_RULE_ROW_RE = re.compile(
+    rf"^[ \t]*\|?[ \t]*{_MD_DASH_RUN}[ \t]*(?:\|[ \t]*{_MD_DASH_RUN}[ \t]*)*\|?[ \t]*$", re.M
+)
+#: ``*emphasis*`` on one line: an opening ``*`` followed by a non-space, a closing one preceded by
+#: a non-space, neither touching a word character or another ``*``. A lone footnote asterisk
+#: (``*Preliminary.``) has no partner and is kept.
+_MD_ITALIC_RE = re.compile(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])")
+#: A word broken across lines with a hyphen: a letter, the hyphen, the line break, a letter. A
+#: digit on either side is never one, so ``1990-`` / ``91`` is not joined.
+_WORD_BREAK_HYPHEN_RE = re.compile(r"(?<=[^\W\d_])-[ \t]*\n[ \t]*(?=[^\W\d_])")
+#: Stands for a line-break hyphen inside a token while two texts are compared. A text that
+#: already holds this control character is refused.
+_BREAK_JOIN = "\x01"
+
+
+def _reading_without_markdown(reading: str) -> str:
+    """A model reading without the marks Markdown adds and the page does not print: heading
+    marks, bold and italic marks, table pipes, table delimiter rows and thematic breaks. Applied
+    to the READING only: the layer is an OCR run's plain text, and a ``#``, ``*`` or ``|`` there
+    is a character of the page."""
+    text = _MD_HEADING_RE.sub("", reading)
+    text = _MD_RULE_ROW_RE.sub("", text)
+    text = text.replace("**", "")
+    text = _MD_ITALIC_RE.sub(r"\1", text)
+    return text.replace("|", " ")
+
+
+def _tokens_marking_word_breaks(text: str) -> list[str]:
+    """Whitespace tokens of *text*, a word broken across lines kept as ONE token with
+    :data:`_BREAK_JOIN` where its hyphen and line break were. Only a break that continues in
+    lower case is one (``condi-`` / ``tions``); ``Bush-`` / ``Clinton`` stays two tokens."""
+
+    def join(m: re.Match) -> str:
+        return _BREAK_JOIN if m.string[m.end()].islower() else m.group(0)
+
+    return _WORD_BREAK_HYPHEN_RE.sub(join, text).split()
+
+
+def _same_token_across_word_breaks(a: str, b: str) -> bool:
+    """Equal tokens, or tokens that differ only in how a line-break hyphen is written: the word
+    joined (``conditions``) or kept with its hyphen (``condi-tions``). Whether the printed word
+    has the hyphen is not knowable from a line break, so either form matches either form."""
+    if a == b:
+        return True
+    if _BREAK_JOIN not in a and _BREAK_JOIN not in b:
+        return False
+
+    def forms(token: str) -> set[str]:
+        return {token.replace(_BREAK_JOIN, ""), token.replace(_BREAK_JOIN, "-")}
+
+    return bool(forms(a) & forms(b))
+
+
+def _reading_matches_layer_normalised(reading: str, layer: str) -> bool:
+    """#1402 (rule B): :func:`_reading_matches_layer_exactly` with two things set aside, both
+    measured as the reason 149 of 515 agreeing pilot pages failed the exact form:
+
+    * Markdown marks in the READING (:func:`_reading_without_markdown`);
+    * the form of a word's line-break hyphen, in either text
+      (:func:`_same_token_across_word_breaks`).
+
+    Everything else is still compared character for character, token by token, in order:
+    punctuation, signs, dash variants, percent and currency marks, brackets, every digit."""
+    if _BREAK_JOIN in reading or _BREAK_JOIN in layer:
+        return False
+    a = _tokens_marking_word_breaks(_reading_without_markdown(reading))
+    b = _tokens_marking_word_breaks(layer)
+    return len(a) == len(b) and all(map(_same_token_across_word_breaks, a, b))
+
+
 def prior_ocr_layer_agreement(output: PageOutput, p: Any) -> bool:
     """#1381: whether this scanned page's earlier OCR layer is confirmed by an independent reading.
 
@@ -1352,6 +1433,17 @@ def prior_ocr_layer_agreement(output: PageOutput, p: Any) -> bool:
     * the retained layer is non-empty and the SHIPPED text (every line of it: nothing is excluded
       from the comparison, so nothing ships that was not compared) is exactly the layer
       (:func:`_reading_matches_layer_exactly`).
+
+    #1402 (rule B, PROPOSED, awaiting the owner's ruling) loosens two of these, each measured on
+    515 marked pilot pages (0 confirmed before, 74 after, no wrong or dropped number found):
+
+    * completeness also holds when the scan's dark ink outside the layer could not be a
+      character (``text_hidden_layer_ink_below_letter``,
+      :func:`socr.core.text_coverage.scan_residual_ink_holds_no_character`): specks and the
+      closing dash of a lone page number are excused, letter-height ink, a dash and anything
+      beside a number are not;
+    * the text comparison sets aside the reading's Markdown marks and the form of a word's
+      line-break hyphen (:func:`_reading_matches_layer_normalised`).
     """
     from socr.core.manifest import (
         _base_engine_name,
@@ -1378,12 +1470,18 @@ def prior_ocr_layer_agreement(output: PageOutput, p: Any) -> bool:
         or _flag(p, "layer_text_spliced")
     ):
         return False
-    if not _flag(p, "text_hidden_layer_ink_accounted"):
+    if not (
+        _flag(p, "text_hidden_layer_ink_accounted")
+        or _flag(p, "text_hidden_layer_ink_below_letter")
+    ):
         return False
     layer = retained_prior_ocr_layer(p)
     if not isinstance(layer, str) or not layer.strip():
         return False
-    return _reading_matches_layer_exactly(output.text or "", layer)
+    reading = output.text or ""
+    return _reading_matches_layer_exactly(reading, layer) or _reading_matches_layer_normalised(
+        reading, layer
+    )
 
 
 PRIOR_OCR_NO_LAYER_REASON = (

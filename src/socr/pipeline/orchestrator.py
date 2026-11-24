@@ -15275,6 +15275,7 @@ class UnifiedPipeline:
             ps.text_coverage_verdict = cov.verdict
             ps.text_ink_fully_accounted = bool(cov.ink_fully_accounted)
             ps.text_hidden_layer_ink_accounted = bool(cov.hidden_layer_ink_accounted)
+            ps.text_hidden_layer_ink_below_letter = bool(cov.hidden_layer_ink_below_letter)
             ps.text_ink_unread = cov.verdict == "flagged"
             ps.text_coverage_unknown = cov.verdict == "unknown"
 
@@ -18724,6 +18725,8 @@ class UnifiedPipeline:
             payload["text_ink_fully_accounted"] = True
         if ps is not None and getattr(ps, "text_hidden_layer_ink_accounted", False):
             payload["text_hidden_layer_ink_accounted"] = True
+        if ps is not None and getattr(ps, "text_hidden_layer_ink_below_letter", False):
+            payload["text_hidden_layer_ink_below_letter"] = True
         # #1294: the words check records a PASS as well as a FAIL. Sparse: absent where the
         # check did not apply (no own layer, a failed marker, a table socr withheld).
         if winning_out is not None and ps is not None:
