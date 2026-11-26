@@ -1153,6 +1153,28 @@ def crop_box(region: CoverageRegion) -> tuple[float, float, float, float]:
     return region.figure_pdf or region.pdf
 
 
+def regions_inside_boxes(regions: list[CoverageRegion], boxes) -> list[int]:
+    """1-based indices of the *regions* whose crop lies wholly inside ONE of *boxes* (#1407).
+
+    *boxes* are PDF-point ``(x0, y0, x1, y1)`` boxes, the same space as ``CoverageRegion.pdf``.
+    The box tested is ``crop_box(region)`` -- what would be cropped and shipped -- so a region
+    is "inside" only when its whole picture is.
+
+    Exact containment in a single box, and no tolerance on purpose. A region box is the ink's
+    own pixel box mapped back to points, so a label touching a box edge can miss by a fraction
+    of a point; that miss KEEPS the region, which is the behaviour before #1407. A tolerance
+    would trade that safe direction for suppressing ink that is partly outside the box, and
+    there is no measured number to set it from. A region straddling two boxes is likewise
+    kept: neither box shows all of it.
+    """
+    out: list[int] = []
+    for index, region in enumerate(regions, start=1):
+        box = crop_box(region)
+        if any(_inside(box, tuple(outer)) for outer in boxes):
+            out.append(index)
+    return out
+
+
 def render_region_png(
     page, pdf_rect: tuple[float, float, float, float], dest, *, mask_native: bool = False
 ) -> bool:
