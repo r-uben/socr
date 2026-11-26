@@ -7107,6 +7107,8 @@ _VERDICT_DERIVED_MODES: frozenset[FailureMode] = frozenset(
         FailureMode.NUMBERS_DROPPED_FROM_READING,
         FailureMode.WORDS_MISSING_FROM_PAGE,
         FailureMode.CONTROL_BYTES_REPLACED,
+        FailureMode.NUMBERS_DISAGREE_WITH_SECOND_READER,
+        FailureMode.SECOND_READER_UNUSABLE,
     }
 )
 
@@ -7224,6 +7226,12 @@ def _verdict_demotion_mode(clauses, kind: str = "") -> FailureMode:
     by_result = {
         (Check.TEXT_LAYER_NUMBERS, CheckResult.FAIL): FailureMode.NUMBERS_DISAGREE_WITH_TEXT_LAYER,
         (Check.TEXT_LAYER_NUMBERS, CheckResult.UNKNOWN): FailureMode.NUMBERS_UNCHECKED,
+        # #1409: FAIL names rows that differ from a second reading; UNKNOWN had no usable one.
+        (
+            Check.SECOND_READER_NUMBERS,
+            CheckResult.FAIL,
+        ): FailureMode.NUMBERS_DISAGREE_WITH_SECOND_READER,
+        (Check.SECOND_READER_NUMBERS, CheckResult.UNKNOWN): FailureMode.SECOND_READER_UNUSABLE,
     }
 
     def _mode_of(clause) -> FailureMode | None:
