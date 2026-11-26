@@ -15684,6 +15684,57 @@ class UnifiedPipeline:
             merged_from=reg.merged_from,
         )
 
+    def _regions_in_shipped_chart_picture(
+        self, state: DocumentState, page_num: int, body: str, doc_dir: Path, page, regions
+    ) -> tuple[set[int], str]:
+        """#1407: the uncovered regions a shipped whole-page chart picture already shows.
+
+        Returns ``(1-based region indices, the picture's ref)``, or ``(set(), "")`` when
+        nothing may be suppressed. Never raises: any doubt keeps every region.
+
+        The chart lane's whole-page picture (``chart_page_N.png``) has NO box of its own: it
+        is the page. Containment in the picture is therefore true of every region and decides
+        nothing, so two things are asked instead, and both must hold.
+
+        1. The picture really ships and really carries the ``figure_text=UNKNOWN`` mark: the
+           lane's ``visual_values_not_transcribed`` event (the event that mark is keyed on,
+           ``verdict._chart_values_outcome``) names this ref with ``png_saved``, the ref is in
+           the body being decorated, and the PNG is on disk. A failed render has no ref and
+           lands here as "keep everything".
+        2. The region lies wholly inside a detected chart region of the page
+           (``chart_region_bboxes``: a drawing cluster with chart marks, grown by the page's
+           own row gap so its axis labels fall inside). That is what makes it one of the
+           chart's own labels. Drawn text elsewhere on the page -- a page title, a note under
+           a panel, a source line -- is in the picture too, but it is not what the mark tells
+           the reader was left untranscribed, so it keeps its crop and its reading.
+
+        The crop route (#1053, ``![figure N]`` crops) and the chart-region crops of the other
+        lanes are deliberately not handled: on the 156-document Fed run they account for 1 of
+        7,863 fragments (docs/log/2026-11-25_1407_chart_label_crops.md).
+        """
+        try:
+            from socr.core.text_coverage import regions_inside_boxes
+            from socr.tables.reconstruct import chart_region_bboxes
+
+            match = re.search(rf"!\[Chart page {page_num}\]\(([^)\n]+)\)", body)
+            if match is None:
+                return set(), ""
+            ref = match.group(0)
+            marked = any(
+                ev.page_num == page_num
+                and ev.kind == VISUAL_VALUES_NOT_TRANSCRIBED_KIND
+                and bool((ev.data or {}).get("png_saved"))
+                and (ev.data or {}).get("png_path") == ref
+                for ev in state.events
+            )
+            if not marked or not (doc_dir / match.group(1)).is_file():
+                return set(), ""
+            boxes = [tuple(box) for box in chart_region_bboxes(page)]
+            return set(regions_inside_boxes(list(regions), boxes)), ref
+        except Exception as exc:
+            logger.debug("text coverage: chart-picture check failed p%d: %s", page_num, exc)
+            return set(), ""
+
     def _apply_text_coverage(
         self,
         state: DocumentState,
@@ -15740,6 +15791,8 @@ class UnifiedPipeline:
         doc_dir = doc_dir_for(output_dir, relative_key(state.handle.path, scan_root))
         fig_dir = doc_dir / "figures"
         recoveries: list[_RegionRecovery] = []
+        in_chart_picture: set[int] = set()
+        chart_picture_ref = ""
         prior = _prior_recoveries(bo.text or "", page_num, kept)
         self._recovery_budget = self._uncovered_text_budget(state, page_num, kept)
         try:
@@ -15756,7 +15809,16 @@ class UnifiedPipeline:
                     def ask(_path, _prompt):
                         return None
 
+                in_chart_picture, chart_picture_ref = self._regions_in_shipped_chart_picture(
+                    state, page_num, bo.text or "", doc_dir, page, kept
+                )
                 for i, reg in enumerate(kept, start=1):
+                    if i in in_chart_picture:
+                        # #1407: one of the chart's own labels, on a page whose chart
+                        # already ships as a picture under ``figure_text=UNKNOWN``. No
+                        # crop, no read, no line. The surviving regions keep their
+                        # original numbers, so a file name never changes meaning.
+                        continue
                     dest = fig_dir / uncovered_text_png_name(page_num, i)
                     # The picture that SHIPS: unmasked, so a reader sees the
                     # whole figure exactly as the page draws it.
@@ -15829,9 +15891,30 @@ class UnifiedPipeline:
                     "placed_in_prose": placed_any,
                     "suppressed_repeat": getattr(cov, "suppressed_repeat", 0) if cov else 0,
                     "suppressed_furniture": getattr(cov, "suppressed_furniture", 0) if cov else 0,
+                    "in_chart_picture": len(in_chart_picture),
                 },
             )
         )
+        if in_chart_picture:
+            # #1407: a region left out is recorded, never just dropped.
+            state.events.append(
+                AuditEvent(
+                    page_num=page_num,
+                    kind="uncovered_text_in_chart_picture",
+                    engine=bo.engine or "native",
+                    detail=(
+                        f"{len(in_chart_picture)} of {len(kept)} uncovered region(s) lie inside "
+                        "a chart region of this page, whose chart already ships as a picture "
+                        "marked figure_text=UNKNOWN; they were not cropped or read again"
+                    ),
+                    data={
+                        "suppressed": len(in_chart_picture),
+                        "regions": sorted(in_chart_picture),
+                        "kept": len(kept) - len(in_chart_picture),
+                        "picture": chart_picture_ref,
+                    },
+                )
+            )
 
     def _agentic_blank_page(self, state: DocumentState, page_num: int, ps: PageState) -> None:
         """Ship a blank page as SUCCESS with the house marker; no model, no error."""
