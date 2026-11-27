@@ -192,7 +192,11 @@ def _read_json(path: Path):
         return None
 
 
-def count_from_sidecars(doc_dir: Path) -> TableCounts | None:
+def count_from_sidecars(
+    doc_dir: Path,
+    *,
+    sidecar_overrides: dict[int, dict] | None = None,
+) -> TableCounts | None:
     """The same counts, read from a finished document directory.
 
     For output written before the ``tables`` metadata block existed. ``None`` when the
@@ -200,6 +204,10 @@ def count_from_sidecars(doc_dir: Path) -> TableCounts | None:
     unknown, never "zero" and never a total over the pages that happened to parse. If only
     ``tables_trust.json`` is unreadable, ``verified_text`` and ``unverified_text`` are
     ``None`` and the other two counts stay known.
+
+    ``sidecar_overrides`` maps 1-based page numbers to updated in-memory sidecar dicts
+    so refinalizers can recount tables BEFORE writing sidecars last (keeping sidecars as
+    the crash-safe commit point).
     """
     pages_dir = Path(doc_dir) / "pages"
     sidecars = page_sidecar_paths(pages_dir) if pages_dir.is_dir() else []
@@ -243,6 +251,11 @@ def count_from_sidecars(doc_dir: Path) -> TableCounts | None:
             return None
         if num not in wanted:
             continue
+        if sidecar_overrides and num in sidecar_overrides:
+            rec = sidecar_overrides[num]
+            win = rec.get("winning_output") if isinstance(rec, dict) else None
+            if not isinstance(win, dict):
+                return None
         seen.add(num)
         raw_events = rec.get("audit_events")
         if raw_events is None:

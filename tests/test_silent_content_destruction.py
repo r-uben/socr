@@ -573,9 +573,18 @@ class TestCliExitCodes:
 
 class TestFigurePhaseSuccessPath:
     def test_markdown_resaved_with_figure_blocks(self, tmp_path) -> None:
+        import fitz
+
+        pdf = tmp_path / "fake.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Body text of the page.")
+        doc.save(pdf)
+        doc.close()
+
         config = _make_config(save_figures=True)
         pipeline = UnifiedPipeline(config)
-        state = DocumentState(handle=_make_handle(1))
+        state = DocumentState(handle=DocumentHandle.from_path(pdf))
         good = _page_output(1, "Body text of the page.", audit_passed=True)
         state.pages[1].attempts.append(good)
         state.pages[1].best_output = good
@@ -584,16 +593,16 @@ class TestFigurePhaseSuccessPath:
             return text_ + "\n\n**Figure 1** (page 1): a chart.\n"
 
         with patch.object(pipeline, "_describe_and_embed_figures", side_effect=_embed):
-            pipeline._phase_assemble(state, tmp_path)
+            pipeline._phase_assemble(state, tmp_path / "out")
 
-        md_files = list(tmp_path.rglob("*.md"))
+        md_files = list((tmp_path / "out").rglob("*.md"))
         assert md_files
         on_disk = md_files[0].read_text()
         assert "**Figure 1** (page 1): a chart." in on_disk
         # Final metadata record carries the REAL fingerprint (not provisional).
         import json
 
-        meta_files = list(tmp_path.rglob("metadata.json"))
+        meta_files = list((tmp_path / "out").rglob("metadata.json"))
         assert meta_files
         recorded = json.loads(meta_files[0].read_text())
         fp = json.dumps(recorded)

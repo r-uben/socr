@@ -654,7 +654,8 @@ def test_resumed_or_non_clean_document_preserves_existing_audit_log(tmp_path: Pa
     assert pipe._write_audit_log(state_resumed, doc_dir_resumed) is True
     assert prior_log.exists(), "resumed doc must never silently delete prior audit_log.json"
 
-    # Case 2: non-clean status -> preserve existing audit_log.json.
+    # Case 2: fresh non-clean status -> preserve prior log as audit_log.prev.json
+    # (never delete prior evidence, and never misattribute old events to the new failed run).
     doc_dir_failed = tmp_path / "doc_failed"
     doc_dir_failed.mkdir()
     failed_log = doc_dir_failed / "audit_log.json"
@@ -662,7 +663,10 @@ def test_resumed_or_non_clean_document_preserves_existing_audit_log(tmp_path: Pa
     state_failed = DocumentState(handle=DocumentHandle.from_path(pdf))
     state_failed.status = DocumentStatus.AUDIT_FAILED
     assert pipe._write_audit_log(state_failed, doc_dir_failed) is True
-    assert failed_log.exists(), "non-SUCCESS doc must not delete prior audit_log.json"
+    assert not failed_log.exists(), "fresh failed run must not misattribute prior audit_log.json"
+    prev_log = doc_dir_failed / "audit_log.prev.json"
+    assert prev_log.exists(), "prior audit_log must be preserved under audit_log.prev.json"
+    assert json.loads(prev_log.read_text(encoding="utf-8"))["events"] == [{"kind": "old"}]
 
     # Control: fresh clean SUCCESS with zero events unlinks stale audit_log.json.
     doc_dir_clean = tmp_path / "doc_clean"
@@ -731,10 +735,11 @@ def test_socr_library_exits_nonzero_on_skipped_partial_document(
 
 
 def test_refinalize_unshipped_figures_demotes_completed_to_partial_and_recounts_after_sidecar_write(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``refinalize_unshipped_figures`` must demote ``completed`` -> ``partial`` in both doc
-    and root metadata, and recompute table counts AFTER writing updated sidecars."""
+    """``refinalize_unshipped_figures`` must keep page sidecars LAST (the crash-safe commit
+    point), demote ``completed`` -> ``partial`` in doc and root metadata, and recount tables
+    using the pending in-memory sidecars so ``verified_text`` drops to 0 before commit."""
     from test_gh1187_unshipped_figure_pages import _CAPTION, _PROSE, _pdf_with_a_figure, _run_dir
 
     from socr.pipeline import refinalize_unshipped_figures as tool
@@ -762,37 +767,48 @@ def test_refinalize_unshipped_figures_demotes_completed_to_partial_and_recounts_
     }
     root_path.write_text(json.dumps(root, indent=2), encoding="utf-8")
 
+    # Crash-safety check: simulate crash during metadata.json write. Sidecars must NOT be
+    # written yet (never a settled sidecar beside completed metadata), and a rerun finishes.
+    real_write_json = tool._write_json
+
+    def fail_on_meta(path: Path, payload: dict) -> None:
+        if path == meta_path:
+            raise OSError("disk full writing metadata.json")
+        real_write_json(path, payload)
+
+    with monkeypatch.context() as m:
+        m.setattr(tool, "_write_json", fail_on_meta)
+        with pytest.raises(OSError, match="disk full writing metadata.json"):
+            tool.refinalize_document(doc_dir, pdf_dir=tmp_path)
+
+    sidecar_after_crash = json.loads((doc_dir / "pages" / "00001.json").read_text(encoding="utf-8"))
+    assert not tool._already_answered(sidecar_after_crash), (
+        "sidecar must stay uncommitted when metadata.json write fails"
+    )
+
+    # Rerun after crash completes cleanly: demotes doc + root to partial, drops verified_text
+    # to 0 from pending in-memory sidecars, and commits sidecars last.
     changes = tool.refinalize_document(doc_dir, pdf_dir=tmp_path)
     assert len(changes) == 1
 
     meta_after = json.loads(meta_path.read_text(encoding="utf-8"))
     root_after = json.loads(root_path.read_text(encoding="utf-8"))
+    sidecar_after = json.loads((doc_dir / "pages" / "00001.json").read_text(encoding="utf-8"))
     assert meta_after["status"] == "partial"
     assert root_after["files"][meta["key"]]["status"] == "partial"
-    # Sidecar became WARNING before _recount_tables ran, so verified_text must drop to 0.
     assert meta_after["tables"]["verified_text"] == 0
+    assert tool._already_answered(sidecar_after)
 
-    # Crash recovery: simulate interruption right after sidecars were written (before
-    # metadata/root/audit_log finished) and verify rerun reconciles them idempotently.
-    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    root_path.write_text(json.dumps(root, indent=2), encoding="utf-8")
-    audit_path = doc_dir / "audit_log.json"
-    audit_path.write_text(
-        json.dumps({"pdf_filename": "paper.pdf", "event_count": 0, "counts": {}, "events": []}),
-        encoding="utf-8",
-    )
-    assert tool.refinalize_document(doc_dir, pdf_dir=tmp_path) == []
-    meta_recovered = json.loads(meta_path.read_text(encoding="utf-8"))
-    root_recovered = json.loads(root_path.read_text(encoding="utf-8"))
-    audit_recovered = json.loads(audit_path.read_text(encoding="utf-8"))
-    assert meta_recovered["status"] == "partial"
-    assert meta_recovered["tables"]["verified_text"] == 0
-    assert root_recovered["files"][meta["key"]]["status"] == "partial"
-    assert audit_recovered["event_count"] == 1
+    # No-op rerun writes 0 files (does not touch metadata.json or sidecars).
+    writes_on_noop: list[Path] = []
+    with monkeypatch.context() as m:
+        m.setattr(tool, "_write_json", lambda p, d: writes_on_noop.append(p))
+        assert tool.refinalize_document(doc_dir, pdf_dir=tmp_path) == []
+    assert writes_on_noop == []
 
 
 def test_refinalize_boilerplate_preserves_unrelated_md_and_does_not_recreate_doc_md_on_reocr(
-    tmp_path: Path,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """When a doc has both ``re_ocr`` and ``strip_preamble`` pages plus an unrelated ``notes.md``,
     ``refinalize_boilerplate`` must unlink ONLY canonical ``<stem>.md``, keep ``notes.md``, and
@@ -879,13 +895,16 @@ def test_refinalize_boilerplate_preserves_unrelated_md_and_does_not_recreate_doc
     assert notes_md.read_text(encoding="utf-8") == "my hand-written notes"
 
     # Malformed metadata.json must not crash refinalize_document (dry-run or apply),
-    # and must still leave unrelated notes.md untouched.
+    # must leave unrelated notes.md untouched, and must log a visible warning on apply.
     (doc_dir / "metadata.json").write_text("{broken json", encoding="utf-8")
     dry_changes = refinalize_document(doc_dir, apply=False)
     assert [(c.page_num, c.action) for c in dry_changes] == [(2, "re_ocr")]
-    apply_changes = refinalize_document(doc_dir, apply=True)
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="socr.pipeline.refinalize_boilerplate"):
+        apply_changes = refinalize_document(doc_dir, apply=True)
     assert [(c.page_num, c.action) for c in apply_changes] == [(2, "re_ocr")]
     assert notes_md.read_text(encoding="utf-8") == "my hand-written notes"
+    assert any("cannot demote" in rec.message for rec in caplog.records)
 
 
 def test_refinalize_second_reader_recovers_after_crash_between_fragment_and_sidecar_write(

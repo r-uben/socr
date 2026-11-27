@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -32,6 +33,8 @@ from pathlib import Path
 
 from socr.core.page_files import page_sidecar_paths
 from socr.core.verdict import PageVerdict, write_reconciled_trace
+
+logger = logging.getLogger(__name__)
 
 LOG_NAME = "refinalized_boilerplate.json"
 
@@ -102,9 +105,18 @@ def _invalidate_doc_resume_gate(doc_dir: Path, canonical_md: Path | None = None)
         return
     try:
         meta = _read_json(meta_path)
-    except (ValueError, OSError):
+    except (ValueError, OSError) as exc:
+        logger.warning(
+            "cannot demote %s during boilerplate refinalize (%s); manual review required",
+            meta_path,
+            exc,
+        )
         return
     if not isinstance(meta, dict):
+        logger.warning(
+            "cannot demote %s during boilerplate refinalize (metadata is not a JSON object)",
+            meta_path,
+        )
         return
 
     def _demote(record: dict) -> None:
@@ -117,7 +129,12 @@ def _invalidate_doc_resume_gate(doc_dir: Path, canonical_md: Path | None = None)
     if root_path.is_file():
         try:
             root = _read_json(root_path)
-        except (ValueError, OSError):
+        except (ValueError, OSError) as exc:
+            logger.warning(
+                "cannot demote root index %s during boilerplate refinalize (%s)",
+                root_path,
+                exc,
+            )
             return
         if isinstance(root, dict):
             entry = (root.get("files") or {}).get(meta.get("key"))

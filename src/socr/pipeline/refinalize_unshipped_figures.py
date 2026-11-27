@@ -431,7 +431,13 @@ def _event_for(page_num: int, decision) -> dict:
     }
 
 
-def _recount_tables(doc_dir: Path, meta_path: Path, meta: dict) -> None:
+def _recount_tables(
+    doc_dir: Path,
+    meta_path: Path,
+    meta: dict,
+    *,
+    sidecar_overrides: dict[int, dict] | None = None,
+) -> None:
     """``metadata.json``'s ``tables`` block, recomputed from the sidecars as they now are.
 
     A pure re-export of ``socr-refinalize-own-text``'s helper so the two tools cannot drift
@@ -439,7 +445,7 @@ def _recount_tables(doc_dir: Path, meta_path: Path, meta: dict) -> None:
     """
     from socr.pipeline.refinalize_own_text import _recount_tables as _shared
 
-    _shared(doc_dir, meta_path, meta)
+    _shared(doc_dir, meta_path, meta, sidecar_overrides=sidecar_overrides)
 
 
 def _answered_sidecars(pages_dir: Path, pending: dict[int, dict]) -> list[dict]:
@@ -572,54 +578,43 @@ def refinalize_document(
                 captions=len(decision.captions),
             )
         )
-    if dry_run:
+    if not changes or dry_run:
         return changes
-    if not changes:
-        # Crash recovery: if a previous pass wrote settled page sidecars and died before
-        # finishing metadata / table recount / root index / audit_log, reconcile those
-        # document aggregates idempotently (0 bytes written when already up to date).
-        answered = _answered_sidecars(pages_dir, {})
-        if not answered:
-            return changes
-    else:
-        # Write order: fragments, the document ``.md``, the manifest and its cache, page
-        # sidecars, then idempotent document aggregates (metadata, table recount, root
-        # index, audit_log). Reconciling document aggregates even when ``changes`` is
-        # empty guarantees a rerun after an interruption after sidecars finishes cleanly.
-        for path, text in fragments:
-            _write_text(path, text)
-        _write_text(md_paths[0], doc_md)
-        # The document-level records are rebuilt from EVERY answered sidecar -- those on disk and
-        # those about to be written -- so they say the same thing whether this run did all the
-        # pages or only the ones an interrupted run had left.
-        answered = _answered_sidecars(pages_dir, {int(d["page_num"]): d for _p, d in sidecars})
-        manifest_path = doc_dir / "manifest.json"
-        if manifest_path.is_file():
-            from socr.core.cache import BlobStore
-            from socr.core.manifest import page_asset_refs
-            from socr.core.result import PageOutput
+    # Write order: fragments, the document ``.md``, the manifest and its cache, the metadata
+    # and the root index, the audit log -- and the page SIDECARS LAST. The sidecar is this
+    # lane's commit point (``_already_answered``), so a run interrupted at any earlier step
+    # leaves the page unanswered (never a settled sidecar beside stale ``completed`` metadata)
+    # and the next run redoes it cleanly. ``pending`` is passed into both ``_answered_sidecars``
+    # and ``_recount_tables`` so document aggregates reflect the updated sidecars before commit.
+    for path, text in fragments:
+        _write_text(path, text)
+    _write_text(md_paths[0], doc_md)
+    pending = {int(d["page_num"]): d for _p, d in sidecars}
+    answered = _answered_sidecars(pages_dir, pending)
+    manifest_path = doc_dir / "manifest.json"
+    if manifest_path.is_file():
+        from socr.core.cache import BlobStore
+        from socr.core.manifest import page_asset_refs
+        from socr.core.result import PageOutput
 
-            manifest = _read_json(manifest_path)
-            store = BlobStore(doc_dir / "cache")
-            for _path, data in sidecars:
-                entry = (manifest.get("entries") or {}).get(str(data["page_num"]))
-                if entry is None:
-                    continue
-                page = PageOutput.from_dict(data["winning_output"])
-                entry["blob_ref"] = store.put_page(page)
-                # #1187 round 2 (Argon P1-3a): a page this tool gave a PNG had no asset record,
-                # while pages another lane gave one did. ``manifest.stale_assets`` therefore never
-                # checked the new crops, and the next resume would add them -- drift the tool
-                # introduced. Recorded with the SAME function ``build_manifest`` uses.
-                refs = page_asset_refs(page.text or "", doc_dir)
-                if refs:
-                    entry["assets"] = [
-                        {"logical_path": r.logical_path, "content_hash": r.content_hash}
-                        for r in refs
-                    ]
-            _write_json(manifest_path, manifest)
-        for path, data in sidecars:
-            _write_json(path, data)
+        manifest = _read_json(manifest_path)
+        store = BlobStore(doc_dir / "cache")
+        for _path, data in sidecars:
+            entry = (manifest.get("entries") or {}).get(str(data["page_num"]))
+            if entry is None:
+                continue
+            page = PageOutput.from_dict(data["winning_output"])
+            entry["blob_ref"] = store.put_page(page)
+            # #1187 round 2 (Argon P1-3a): a page this tool gave a PNG had no asset record,
+            # while pages another lane gave one did. ``manifest.stale_assets`` therefore never
+            # checked the new crops, and the next resume would add them -- drift the tool
+            # introduced. Recorded with the SAME function ``build_manifest`` uses.
+            refs = page_asset_refs(page.text or "", doc_dir)
+            if refs:
+                entry["assets"] = [
+                    {"logical_path": r.logical_path, "content_hash": r.content_hash} for r in refs
+                ]
+        _write_json(manifest_path, manifest)
     _shipped, marked_pages, _skeleton = _lane_pages(answered)
     note = answered_document_note(answered)
 
@@ -649,9 +644,9 @@ def refinalize_document(
     if _record(meta):
         _write_json(meta_path, meta)
     # #1187 round 4 (Argon P1-B): a page demoted from success no longer counts as a verified
-    # table, so the document's table block is stale until something recomputes it. Same
-    # helper ``socr-refinalize-own-text`` uses, from the sidecars as they now are on disk.
-    _recount_tables(doc_dir, meta_path, meta)
+    # table, so the document's table block is stale until something recomputes it. Passes the
+    # pending in-memory sidecars so verified_text updates while sidecars remain the last write.
+    _recount_tables(doc_dir, meta_path, meta, sidecar_overrides=pending)
     root_path = doc_dir.parent / "metadata.json"
     if root_path.is_file():
         root = _read_json(root_path)
@@ -680,6 +675,8 @@ def refinalize_document(
             audit["event_count"] = len(kept)
             audit["counts"] = new_counts
             _write_json(audit_path, audit)
+    for path, data in sidecars:
+        _write_json(path, data)
     return changes
 
 

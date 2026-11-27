@@ -24530,15 +24530,17 @@ class UnifiedPipeline:
                 audit.save(audit_path)
                 if not self.config.quiet:
                     console.print(f"  [dim]Audit log: {audit_path} ({audit.summary_line()})[/dim]")
-            elif (
-                audit_path.exists()
-                and not getattr(state, "resumed_pages", None)
-                and getattr(state, "status", None) is DocumentStatus.SUCCESS
-            ):
-                # Only remove a stale audit_log.json on a genuinely fresh, clean
-                # SUCCESS run (no resumed pages whose un-replayed prior-run events
-                # could be silently lost).
-                audit_path.unlink()
+            elif audit_path.exists() and not getattr(state, "resumed_pages", None):
+                if getattr(state, "status", None) is DocumentStatus.SUCCESS:
+                    # Only remove a stale audit_log.json on a genuinely fresh, clean
+                    # SUCCESS run (no resumed pages whose un-replayed prior-run events
+                    # could be silently lost).
+                    audit_path.unlink()
+                else:
+                    # Fresh non-SUCCESS run with zero new events: preserve the prior
+                    # run's audit log under audit_log.prev.json so evidence is kept
+                    # without misattributing old events to the new failed run.
+                    audit_path.replace(doc_dir / "audit_log.prev.json")
             return self._write_tables_trust(state, audit, doc_dir, records=records) is not False
         except Exception as exc:  # never lose output over an audit-log write
             logger.warning("audit log write failed (non-fatal): %s", exc)
