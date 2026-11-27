@@ -63,6 +63,16 @@ def row_binding_unverifiable_table_mark(table_number: int) -> str:
     )
 
 
+def row_binding_held_table_mark(table_number: int) -> str:
+    """#1257: the mark of a table whose rows the check bound by exact evidence while the page's own
+    text is not independently confirmed.  Says what is true: the table's rows are bound, the page
+    text is not confirmed.  Still matches ``UNVERIFIED_TABLE_MARK_RE``."""
+    return (
+        f"> [table unverified: table {table_number} rows bound to the page's text layer; page text "
+        "not independently confirmed; verify it against the page image before citing]"
+    )
+
+
 #: #1048 (owner ruling 2026-10-12): the stronger mark for a scanned table whose numbers or
 #: labels a second reading disputes.
 DISPUTED_TABLE_MARK_RE = re.compile(r"^> \[table disputed: ", re.MULTILINE)

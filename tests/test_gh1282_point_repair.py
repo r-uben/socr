@@ -312,9 +312,9 @@ def test_condition_6_the_gate_refuses_when_a_bound_row_would_be_lost(monkeypatch
     real = rbc.check_row_binding
     calls = {"n": 0}
 
-    def fake(words, region, markdown):
+    def fake(words, region, markdown, **kw):
         calls["n"] += 1
-        res = real(words, region, markdown)
+        res = real(words, region, markdown, **kw)
         if calls["n"] == 1:
             return res  # the base check
         from dataclasses import replace
