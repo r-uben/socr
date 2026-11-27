@@ -67,6 +67,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_PROVIDER_TIMEOUTS: dict[EngineType, float] = {
     # local qwen3-vl:30b-a3b-instruct: 91-125s observed; 300s catches runaway
     EngineType.QWEN: 300.0,
+    # Gemma cloud runs layout-aware crops over Ollama Cloud; bound per-page
+    # wall clock to match the Gemini cloud ceiling instead of falling through
+    # to config.timeout (1800s per crop).
+    EngineType.GEMMA: 240.0,
     # Gemini API latency not directly measured in bench data;
     # 240s is a conservative upper-bound (cloud endpoint typically fast;
     # guard exists primarily for thinking-runaway, not Gemini)

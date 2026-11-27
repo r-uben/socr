@@ -312,10 +312,21 @@ def adjudicate(
         outcomes = tuple(ItemOutcome(item=item, disproof="prior_lift") for item in items)
         return AdjudicationRecord(status="lifted", markdown_sha256=digest, items=outcomes)
 
+    # Lifting requires EVERY contradiction to be disproved. If any item already
+    # lacks a geometry address and is not encoding garbage, the table is doomed
+    # to remain "held", so skip all cloud transcription calls up front. Once a
+    # single item fails to disprove during the loop, skip remaining cloud calls.
+    doomed = any(
+        item.cell_bbox is None and not token_is_encoding_garbage(item.native_token)
+        for item in items
+    )
     outcomes: list[ItemOutcome] = []
     for item in items:
-        disproof = _disprove_one(item, transcribe)
+        effective_transcribe = None if doomed else transcribe
+        disproof = _disprove_one(item, effective_transcribe)
         outcomes.append(ItemOutcome(item=item, disproof=disproof))
+        if disproof is None:
+            doomed = True
 
     status: Literal["lifted", "held"] = (
         "lifted" if outcomes and all(o.disproof is not None for o in outcomes) else "held"

@@ -112,7 +112,7 @@ class PageLadderBudget:
                 rung_id,
                 model,
                 lambda: adjudicator(crop_path, cell_refs),
-                lambda msg: BlindCellResult(rung=rung_id, ok=False, error=msg),
+                lambda msg: BlindCellResult(rung=rung_id, ok=False, error=msg, budget_skipped=True),
             )
 
         return _budgeted

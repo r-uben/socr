@@ -418,6 +418,9 @@ class BlindCellResult:
     #: guard may retry such a call once; a refusal, a 4xx or a malformed answer
     #: never sets it.
     transient_transport: bool = False
+    #: True when ``PageLadderBudget.wrap_adjudicator`` skipped the call before
+    #: any network request was made (so ``evaluate_cell_guard`` must not bill it).
+    budget_skipped: bool = False
 
 
 def adjudicator_rung_id(model: str) -> str:

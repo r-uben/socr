@@ -1534,7 +1534,7 @@ class TestAgenticIntegration:
         assert on_result.status == DocumentStatus.AUDIT_FAILED
         assert on_result.audit_passed is False
         assert on_result.engine == "native+math"
-        assert on_result.cost is None
+        assert on_result.cost == 0.0
         assert on_result.error == "corrupt equation candidate unverified on page(s) 1"
         assert len(on_result.pages) == 1
         assert on_result.pages[0].page_num == 0
@@ -1562,13 +1562,13 @@ class TestAgenticIntegration:
         assert winner["engine"] == "native+math"
         assert winner["provider_id"] == "corrupt-math-region"
         assert winner["provider_model"] == config.math_model
-        assert winner["cost_usd"] is None
-        # Cold review round 6: this lane journals a page EngineResult with an
-        # UNKNOWN cost, so the page's recorded spend must be unknown too. The
-        # default 0.0 would persist a KNOWN zero and let a resumed run treat
-        # unmetered spend as no spend at all.
-        assert on_result.cost is None, "control: the live document total is unknown"
-        assert sidecar["page_cost_usd"] is None
+        # Default math_model is local (qwen3-vl:30b-a3b-instruct), which is a
+        # known $0.00 (matching _equation_lane_call_cost) so it does not poison
+        # DocumentState.total_cost to None for subsequent pages under --cost-budget.
+        # Unpriced :cloud math_models still record None (pinned in test_p0_cost_gates.py).
+        assert winner["cost_usd"] == 0.0
+        assert on_result.cost == 0.0
+        assert sidecar["page_cost_usd"] == 0.0
         manifest = json.loads((doc_dir / "manifest.json").read_text())
         fingerprint = manifest["entries"]["1"]["fingerprint"]
 
@@ -1593,7 +1593,7 @@ class TestAgenticIntegration:
             "provider_id": "corrupt-math-region",
             "provider_model": config.math_model,
             "provider_backend": "ollama-compatible",
-            "cost_usd": None,
+            "cost_usd": 0.0,
             "crop_paths": ["equations/corrupt_math_p00001_r001.png"],
             "audit_passed": False,
         }

@@ -90,7 +90,13 @@ from socr.core.state import (
     canonical_native_text,
     add_page_cost,
 )
-from socr.engines.registry import get_engine, resolve_auto_engine
+from socr.engines.registry import (
+    get_engine,
+    resolve_auto_engine,
+    resolve_auto_engine_for_config,
+)
+
+_ORIG_RESOLVE_AUTO_ENGINE = resolve_auto_engine
 from socr.figures import crop_descriptions as _crop_descriptions
 from socr.figures import figure_crop as _figure_crop
 from socr.figures import figure_presence as _figure_presence
@@ -2093,7 +2099,9 @@ class UnifiedPipeline:
         gate and ``process()`` agree.
         """
         if self.config.primary_engine == EngineType.AUTO:
-            return resolve_auto_engine()
+            if resolve_auto_engine is not _ORIG_RESOLVE_AUTO_ENGINE:
+                return resolve_auto_engine()
+            return resolve_auto_engine_for_config(self.config)
         return self.config.primary_engine
 
     def _resume_skip(self, pdf_path: Path, out_dir: Path) -> EngineResult | None:
@@ -2775,7 +2783,11 @@ class UnifiedPipeline:
 
         # Resolve AUTO engine before starting
         if self.config.primary_engine == EngineType.AUTO:
-            self.config.primary_engine = resolve_auto_engine()
+            self.config.primary_engine = (
+                resolve_auto_engine()
+                if resolve_auto_engine is not _ORIG_RESOLVE_AUTO_ENGINE
+                else resolve_auto_engine_for_config(self.config)
+            )
             if not self.config.quiet:
                 console.print(
                     f"[dim]Auto-selected engine: {self.config.primary_engine.value}[/dim]"
@@ -4375,7 +4387,10 @@ class UnifiedPipeline:
         )
         if reader_failures:
             detail += f"; reader failures: {'; '.join(dict.fromkeys(reader_failures))}"
-        call_cost_usd = 0.0 if model_disabled_reason else None
+        # Local math_model (default qwen3-vl:30b-a3b-instruct) is a known $0.00,
+        # matching _equation_lane_call_cost; only an unpriced :cloud model records
+        # None (unknown spend, Round 6 fail-closed rule).
+        call_cost_usd = 0.0 if (model_disabled_reason or not is_cloud_model(math_model)) else None
         state.events.append(
             AuditEvent(
                 page_num=page_num,
@@ -11039,6 +11054,7 @@ class UnifiedPipeline:
             CAUSE_RUNG_UNAVAILABLE,
             CAUSE_UNKNOWN,
             CAUSE_WITNESS_PREPARATION_ERROR,
+            REASON_VERIFIED_BY_GEOMETRY,
             TABLE_BINDING_ADJUDICATED_KIND,
             TABLE_LADDER_ACCEPTED_KIND,
             TABLE_LADDER_REJECTED_KIND,
@@ -11148,6 +11164,29 @@ class UnifiedPipeline:
                     ):
                         forced_by_binding[witness.table_id] = binding
                         markdown_by_table[witness.table_id] = witness.markdown
+
+                    if (
+                        evidence is BindingEvidence.PASS
+                        and bo.judge_outcome != JUDGE_OUTCOME_TIMEOUT
+                    ):
+                        # Free native geometry already verified every cell's row
+                        # and column against an admissible born-digital text layer
+                        # (and the guard chain overrules any reader refusal on
+                        # BindingEvidence.PASS anyway). Skip paid cloud rungs
+                        # except on page-judge timeout, where #713 requires an
+                        # executed visual rung to mint a timeout credential.
+                        guard_reason_by_table[witness.table_id] = REASON_VERIFIED_BY_GEOMETRY
+                        guard_detail_by_table[witness.table_id] = (
+                            "native geometry verified rows and columns (readers skipped)"
+                        )
+                        guard_cleared_ids.add(witness.table_id)
+                        table_results.append(
+                            TableLadderResult(
+                                table_id=witness.table_id,
+                                outcome=TableLadderOutcome.ACCEPTED,
+                            )
+                        )
+                        continue
 
                     if not rungs:
                         # No CLI available (strict_local, or flag-on with
@@ -11392,10 +11431,16 @@ class UnifiedPipeline:
                 kind = TABLE_LADDER_ACCEPTED_KIND
                 reason = guard_reason_by_table.get(result.table_id, "")
                 if reason:
-                    detail = (
-                        f"table {result.table_id} accepted: the readers were overruled "
-                        f"({guard_detail_by_table.get(result.table_id, reason)})"
-                    )
+                    if not result.rung_results and reason == REASON_VERIFIED_BY_GEOMETRY:
+                        detail = (
+                            f"table {result.table_id} accepted: "
+                            f"{guard_detail_by_table.get(result.table_id, reason)}"
+                        )
+                    else:
+                        detail = (
+                            f"table {result.table_id} accepted: the readers were overruled "
+                            f"({guard_detail_by_table.get(result.table_id, reason)})"
+                        )
                 else:
                     detail = f"table {result.table_id} accepted by the judge ladder"
             elif result.outcome is TableLadderOutcome.WITHHELD:
@@ -11805,6 +11850,8 @@ class UnifiedPipeline:
         prior = (ps.binding_adjudication or {}).get(table_id)
 
         def _transcribe(bbox: tuple[float, float, float, float]) -> str | None:
+            if not self._cell_transcribe_budget_allows(state):
+                return None
             crop = self._render_adjudication_crop(
                 state.handle.path, page_num, bbox, clip_limits=limits[bbox]
             )
@@ -11907,6 +11954,15 @@ class UnifiedPipeline:
             )
             items.append(replace(item, cell_bbox=bbox, address_source=source))
         return tuple(items), limits
+
+    def _cell_transcribe_budget_allows(self, state: DocumentState | None) -> bool:
+        """Whether document ``--cost-budget`` still permits a cloud cell transcription."""
+        if state is None or self.config.cost_budget <= 0:
+            return True
+        total_cost = state.total_cost
+        if total_cost is None:
+            return False
+        return self.config.cost_budget - total_cost > 0.0
 
     def _transcribe_cell_token(self, crop_path: Path) -> str | None:
         """Constrained transcriber seam. Returns a token or None. Never raises.
@@ -16498,21 +16554,36 @@ class UnifiedPipeline:
         )
 
         replacements: list[tuple[str, int, str, str]] = []
-        for cell in plan.cells:
-            crop = self._render_adjudication_crop(state.handle.path, page_num, cell.bbox)
-            token = None
-            if crop is not None:
-                try:
-                    token = self._transcribe_cell_token(crop)
-                finally:
-                    crop.unlink(missing_ok=True)
-            if not token or not transcription_matches_native(
-                str(token), cell.native_token, cell.grid_token
-            ):
-                return None, None
-            replacements.append(
-                (cell.row_line, cell.cell_index, cell.grid_token, cell.native_token)
-            )
+        prior_budget = self._ladder_budget
+        created_budget = False
+        if self._ladder_budget is None and self.config.table_judge_page_budget_sec != 0:
+            from socr.judge.ladder_budget import PageLadderBudget
+
+            limit = self._page_ladder_budget_sec([])
+            if limit > 0:
+                self._ladder_budget = PageLadderBudget(limit)
+                created_budget = True
+        try:
+            for cell in plan.cells:
+                if not self._cell_transcribe_budget_allows(state):
+                    return None, None
+                crop = self._render_adjudication_crop(state.handle.path, page_num, cell.bbox)
+                token = None
+                if crop is not None:
+                    try:
+                        token = self._transcribe_cell_token(crop)
+                    finally:
+                        crop.unlink(missing_ok=True)
+                if not token or not transcription_matches_native(
+                    str(token), cell.native_token, cell.grid_token
+                ):
+                    return None, None
+                replacements.append(
+                    (cell.row_line, cell.cell_index, cell.grid_token, cell.native_token)
+                )
+        finally:
+            if created_budget:
+                self._ladder_budget = prior_budget
         spliced = splice_cell_tokens(ps.native_text or "", replacements)
         if spliced is None:
             return None, None
@@ -16815,7 +16886,13 @@ class UnifiedPipeline:
                     pass
                 continue
             if engine_type is EngineType.GEMMA:
-                if not self.config.enable_gemma_cloud:
+                from socr.core.providers import zero_cap_pinned_forbids_cloud
+
+                if (
+                    not self.config.enable_gemma_cloud
+                    or self.config.strict_local
+                    or zero_cap_pinned_forbids_cloud(self.config)
+                ):
                     continue
                 from socr.engines.gemma_cloud import GemmaCloudEngine
 

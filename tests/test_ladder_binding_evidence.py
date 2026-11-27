@@ -344,11 +344,16 @@ class TestRowLabelShiftComposesWithLadder:
         assert "mechanical binding check found a contradiction" in events[0].detail
         assert events[0].data["rung_trail"] == []
 
-    def test_correct_labels_with_no_rungs_available_stays_unverified(self, tmp_path: Path) -> None:
-        """Sanity: the SAME PDF (same native geometry), but candidate
-        markdown that actually agrees with it -- no contradiction, so the
-        pre-E1 fail-open behaviour (empty rungs -> UNVERIFIED, no ladder
-        call) is unchanged."""
+    def test_correct_labels_with_no_rungs_available_clears_via_geometry_pass(
+        self, tmp_path: Path
+    ) -> None:
+        """The SAME PDF (admissible native geometry) with matching candidate
+        markdown produces BindingEvidence.PASS, so free native geometry accepts
+        the table (verified_by_geometry) without needing paid cloud rungs; when
+        geometry cannot decide (ABSTAIN), empty rungs still fail closed to
+        TABLE_UNVERIFIED."""
+        from socr.tables.binding import BindingEvidence
+
         pipeline = _make_pipeline()
         pdf_path = _row_shift_pdf(tmp_path)
         state = _make_state(pdf_path)
@@ -357,8 +362,24 @@ class TestRowLabelShiftComposesWithLadder:
 
         pipeline._run_table_judge_gate(state, 1, ps, bo, [])
 
-        assert ps.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
+        assert ps.table_ladder_disposition is None
+        accepted = _events_of_kind(state, "table_ladder_accepted")
+        assert len(accepted) == 1
+        assert accepted[0].data.get("reason") == "verified_by_geometry"
+        assert accepted[0].data["rung_trail"] == []
         assert not _events_of_kind(state, "table_ladder_rejected")
+
+        # Contrast: when binding abstains (e.g. scan / inadmissible layer),
+        # empty rungs still fail closed to TABLE_UNVERIFIED.
+        state_abstain = _make_state(pdf_path)
+        ps_abstain = state_abstain.pages[1]
+        with patch.object(
+            pipeline,
+            "_binding_evidence_for_witness",
+            return_value=(None, BindingEvidence.ABSTAIN),
+        ):
+            pipeline._run_table_judge_gate(state_abstain, 1, ps_abstain, _bo(_CORRECT_MD), [])
+        assert ps_abstain.table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
 
 
 # ---------------------------------------------------------------------------

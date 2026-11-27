@@ -467,13 +467,25 @@ class TestPlainUnverifiedTerminal:
             }
         )
         pdf_on = _fixture_copy(tmp_path, "on")
-        _pipe_on, result_on, state_on = _run(
-            pdf_on,
-            tmp_path / "on_out",
-            ladder_on=True,
-            text_by_page=text_by_page,
-            rungs=[rung],
-        )
+        from socr.tables.binding import BindingEvidence
+
+        # Plain infra UNVERIFIED shape: no mechanical evidence settles CLEAN_PAGE
+        # (e.g. scan / ABSTAIN), so the failing rung must demote CLEAN_PAGE.
+        orig_binding = UnifiedPipeline._binding_evidence_for_witness
+
+        def _abstain_on_clean(self_pipe, state, page_num, witness):
+            if page_num == CLEAN_PAGE:
+                return None, BindingEvidence.ABSTAIN
+            return orig_binding(self_pipe, state, page_num, witness)
+
+        with patch.object(UnifiedPipeline, "_binding_evidence_for_witness", _abstain_on_clean):
+            _pipe_on, result_on, state_on = _run(
+                pdf_on,
+                tmp_path / "on_out",
+                ladder_on=True,
+                text_by_page=text_by_page,
+                rungs=[rung],
+            )
 
         assert state_on.pages[CLEAN_PAGE].table_ladder_disposition == FailureMode.TABLE_UNVERIFIED
         assert state_on.pages[SHIFT_PAGE].table_ladder_disposition is None

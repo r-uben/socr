@@ -194,12 +194,18 @@ def _budget_refusal(
                 f"blind-cell adjudication skipped: page spend {page_spend} plus "
                 f"{call_cost} exceeds --max-cost-per-page ({cap})"
             )
-    remaining = _remaining_document_budget(state, config)
-    if remaining is not None and call_cost > remaining:
-        return (
-            f"blind-cell adjudication skipped: {call_cost} exceeds the remaining "
-            f"document budget ({remaining})"
-        )
+    if config.cost_budget > 0:
+        if state.total_cost is None:
+            return (
+                "blind-cell adjudication skipped: document spend is unmetered; "
+                "--cost-budget cannot be shown to cover this cloud call"
+            )
+        remaining = max(config.cost_budget - state.total_cost, 0.0)
+        if remaining <= 0.0 or call_cost > remaining:
+            return (
+                f"blind-cell adjudication skipped: {call_cost} exceeds the remaining "
+                f"document budget ({remaining})"
+            )
     return ""
 
 
@@ -372,6 +378,16 @@ def evaluate_cell_guard(
         logger.info(
             "blind-cell adjudicator hit a transient transport error (%s); retrying once",
             result.error,
+        )
+    if getattr(result, "budget_skipped", False):
+        return CellGuardDecision(
+            geometry_evidence=geometry_evidence,
+            adjudicator_ran=False,
+            disposition=GuardDisposition.NOT_CLEARED,
+            unavailable=False,
+            refusal=False,
+            detail=result.error,
+            blind_result=result,
         )
     # The call was ATTEMPTED, so it is metered whatever it answered -- an
     # outage still spends wall clock and, on a subscription, a request.

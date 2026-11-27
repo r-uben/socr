@@ -22,7 +22,11 @@ from socr.core.ollama_utils import probe_model_generation
 
 # Bounded per-document probe — full DEFAULT_PROBE_TIMEOUT_SEC (120s) is for qwen/judge.
 GEMMA_CLOUD_PROBE_TIMEOUT_SEC = 5.0
-from socr.core.providers import PROFILE_GEMMA_CLOUD, is_cloud_model
+from socr.core.providers import (
+    PROFILE_GEMMA_CLOUD,
+    is_cloud_model,
+    zero_cap_pinned_forbids_cloud,
+)
 from socr.core.result import FailureMode, PageOutput, PageStatus
 from socr.engines.base import BaseEngine
 from socr.routing.cascade_policy import extract_cli_actionable_error, parse_token_usage
@@ -74,9 +78,13 @@ class GemmaCloudEngine(BaseEngine):
             return False
 
     def is_available_for_config(self, config: PipelineConfig) -> tuple[bool, str]:
-        """Probe ``config.gemma_cloud_model`` when the rung is explicitly enabled."""
+        """Probe ``config.gemma_cloud_model`` when policy allows cloud egress."""
         if not config.enable_gemma_cloud:
             return False, "gemma cloud rung disabled (--no-gemma-cloud)"
+        if config.strict_local:
+            return False, "gemma cloud rung forbidden by --strict-local"
+        if zero_cap_pinned_forbids_cloud(config):
+            return False, "gemma cloud rung forbidden by --max-cost-per-page 0"
         if not self.is_available():
             return False, "qwen-ocr CLI not available"
         model = self.resolved_model_version(config)
@@ -130,12 +138,15 @@ class GemmaCloudEngine(BaseEngine):
             effective_timeout = (
                 subprocess_timeout if subprocess_timeout is not None else config.timeout
             )
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=effective_timeout,
-            )
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=effective_timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return "", None, None, f"gemma crop timed out after {effective_timeout}s"
             inp_tok, out_tok = parse_token_usage(result.stderr or "", result.stdout or "")
             if result.returncode != 0:
                 detail = extract_cli_actionable_error(
@@ -229,12 +240,15 @@ class GemmaCloudEngine(BaseEngine):
                     half_texts.append(text.strip())
 
                 if page_failed or len(half_texts) != expected:
+                    timed_out = "timed out" in fail_err.lower()
                     outputs.append(
                         PageOutput(
                             page_num=page_num,
                             status=PageStatus.ERROR,
                             engine=self.name,
-                            failure_mode=FailureMode.CLI_ERROR,
+                            failure_mode=(
+                                FailureMode.TIMEOUT if timed_out else FailureMode.CLI_ERROR
+                            ),
                             error=fail_err or "gemma crop OCR incomplete",
                             audit_passed=False,
                             llm_input_tokens=inp_sum,

@@ -70,6 +70,55 @@ def resolve_auto_engine() -> EngineType:
     return EngineType.GEMINI
 
 
+_DEFAULT_RESOLVE_AUTO_ENGINE = resolve_auto_engine
+
+
+def resolve_auto_engine_for_config(config) -> EngineType:
+    """Policy-aware auto engine selection respecting strict-local and gemma opt-out.
+
+    Preserves test monkeypatches targeting ``socr.engines.registry.resolve_auto_engine``:
+    when callers patched that zero-arg symbol, delegate directly so hermetic tests keep
+    their stub without probing the host.
+    """
+    if resolve_auto_engine is not _DEFAULT_RESOLVE_AUTO_ENGINE:
+        return resolve_auto_engine()
+
+    from socr.core.providers import (
+        DEFAULT_PROVIDERS,
+        TIER_LOCAL,
+        zero_cap_pinned_forbids_cloud,
+    )
+
+    forbid_cloud = bool(
+        getattr(config, "strict_local", False) or zero_cap_pinned_forbids_cloud(config)
+    )
+    allow_gemma = bool(getattr(config, "enable_gemma_cloud", True))
+
+    for engine_type in AUTO_ENGINE_ORDER:
+        if engine_type is EngineType.GEMMA and not allow_gemma:
+            continue
+        if forbid_cloud:
+            prof = DEFAULT_PROVIDERS.get(engine_type)
+            if prof is not None and prof.tier != TIER_LOCAL:
+                continue
+        try:
+            cli_engine = _ENGINES.get(engine_type)
+            if cli_engine is None:
+                continue
+            instance = cli_engine()
+            if instance.is_available():
+                logger.info(f"Auto-selected engine: {engine_type.value}")
+                return engine_type
+        except Exception:
+            continue
+
+    if forbid_cloud:
+        logger.warning("No local engines available under strict-local; falling back to qwen")
+        return EngineType.QWEN
+    logger.warning("No engines available; falling back to gemini (will likely fail)")
+    return EngineType.GEMINI
+
+
 # Local-only engines for tiered routing (no API keys needed).
 # Qwen-VL leads: best open OCR quality (socOCRbench ~0.47-0.58), though slower per page
 # than GLM. Quality-first ordering — the tiered router only sends *easy* pages here anyway.
