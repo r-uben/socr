@@ -254,7 +254,16 @@ _ALLOWED_HTML_TAGS = (
     "|section|article|header|footer|figure|figcaption"
     "|page_header|page_footer|page_number"
 )
-_HTML_TAG_RE = re.compile(rf"</?(?:{_ALLOWED_HTML_TAGS})(?:\s[^<>\n]*)?/?>", re.I)
+# Quote-aware HTML attribute matcher: handles ``title="x > 1"`` without leaking
+# attribute digits, while rejecting non-attribute inequalities like ``x<a 3 and y>2``
+# or ``n<b 12>`` whose tokens after the tag name start with digits.
+_HTML_ATTR_RE = (
+    r"""\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s"'=<>`\n]+))?"""
+)
+_HTML_TAG_RE = re.compile(
+    rf"(?:</(?:{_ALLOWED_HTML_TAGS})\s*>|<(?:{_ALLOWED_HTML_TAGS})(?:{_HTML_ATTR_RE})*\s*/?>)",
+    re.I,
+)
 _BR_RE = re.compile(r"<br\s*/?>", re.I)
 _FRACTION_SLASHES = "/\u2044\u2215"
 _SLASH = f"[{re.escape(_FRACTION_SLASHES)}]"

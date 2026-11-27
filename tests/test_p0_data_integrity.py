@@ -92,7 +92,8 @@ def _hermetic_pipeline(**overrides) -> UnifiedPipeline:
 
 
 def test_paid_lane_undo_does_not_leak_across_documents(tmp_path: Path) -> None:
-    """Doc A's leftover undo entry must never overwrite Doc B on a late withhold."""
+    """Doc A's undo entry must never overwrite Doc B, and running Doc B on the same pipeline
+    must not clear Doc A's active entry (keyed by ``(id(state), page_num)``)."""
     pipe = _hermetic_pipeline()
     pdf_a = _prose_pdf(tmp_path / "doc_a.pdf", "Document A confidential text.")
     pdf_b = _prose_pdf(tmp_path / "doc_b.pdf", "Document B distinct text.")
@@ -104,7 +105,7 @@ def test_paid_lane_undo_does_not_leak_across_documents(tmp_path: Path) -> None:
     paid_a = PageOutput(
         page_num=1, text="DOC_A_PAID_TEXT", status=PageStatus.SUCCESS, engine="gemini"
     )
-    pipe._paid_lane_undo[1] = {
+    entry_a = {
         "state": state_a,
         "free": free_a,
         "paid": paid_a,
@@ -115,8 +116,10 @@ def test_paid_lane_undo_does_not_leak_across_documents(tmp_path: Path) -> None:
         "snapshot": PageState(page_num=1),
         "kept_fields": frozenset(),
     }
+    pipe._paid_lane_undo[(id(state_a), 1)] = entry_a
 
-    # Direct cross-state call must refuse Doc A's undo record for Doc B's state.
+    # Direct cross-state call must refuse Doc A's undo record for Doc B's state,
+    # and must leave Doc A's own entry intact for concurrent execution.
     state_b = DocumentState(handle=DocumentHandle.from_path(pdf_b))
     ps_b = state_b.pages[1]
     out_b = PageOutput(page_num=1, text="DOC_B_OWN_TEXT", status=PageStatus.WARNING, engine="qwen")
@@ -128,15 +131,23 @@ def test_paid_lane_undo_does_not_leak_across_documents(tmp_path: Path) -> None:
     assert ps_b.best_output is out_b
     assert ps_b.best_output.text == "DOC_B_OWN_TEXT"
     assert [e.detail for e in state_b.events] == ["doc B event"]
+    assert pipe._paid_lane_undo.get((id(state_a), 1)) is entry_a
 
-    # Running process() on Doc B also clears any leftover undo entries at entry.
-    pipe._paid_lane_undo[1] = {"state": state_a, "free": free_a, "paid": paid_a}
+    # Running process() on Doc B must neither leak Doc A's entry nor wipe Doc A's active entry.
     out_dir = tmp_path / "out"
     res = pipe.process(pdf_b, output_dir=out_dir)
     assert res.status is DocumentStatus.SUCCESS
-    assert pipe._paid_lane_undo == {}
+    assert pipe._paid_lane_undo.get((id(state_a), 1)) is entry_a
     assert "DOC_A_FREE_TEXT" not in res.pages[0].text
     assert "Document B distinct text." in res.pages[0].text
+
+    # Doc A can still undo its own page 1 cleanly after Doc B finished.
+    ps_a = state_a.pages[1]
+    ps_a.best_output = paid_a
+    restored_a = pipe._undo_paid_after_table_withhold(state_a, 1, ps_a, "late table withhold")
+    assert restored_a is free_a
+    assert ps_a.best_output is free_a
+    assert (id(state_a), 1) not in pipe._paid_lane_undo
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +205,7 @@ def test_resume_replays_distrust_events_and_deduplicates_analyze_table_structure
                 "data": {"defects": ["grid_shape"]},
             },
             model_struct_event,
+            dict(model_struct_event),
             {
                 "kind": "numbers_disagree_with_second_reader",
                 "engine": "second_reader",
@@ -222,10 +234,11 @@ def test_resume_replays_distrust_events_and_deduplicates_analyze_table_structure
     assert "table_value_drift_unadjudicated" in kinds
     assert "numbers_disagree_with_second_reader" in kinds
     assert "chart_table_arbitration" in kinds
-    # Native analyze-time table_structure_failed is NOT doubled; model-side IS preserved.
+    # Native analyze-time table_structure_failed is NOT doubled; BOTH genuine identical
+    # model-side table_structure_failed events ARE preserved.
     tsf = [e for e in state.events if e.page_num == 1 and e.kind == "table_structure_failed"]
-    assert len(tsf) == 2
-    assert sorted(e.engine for e in tsf) == ["native", "qwen"]
+    assert len(tsf) == 3
+    assert sorted(e.engine for e in tsf) == ["native", "qwen", "qwen"]
 
     # Writing audit_log + tables_trust must keep page 1 untrusted in tables_trust.json.
     pipe._write_audit_log(state, doc_dir)
@@ -375,6 +388,74 @@ def test_blind_cell_guard_refuses_clearance_when_any_finding_is_non_cell(tmp_pat
     assert out_empty.outcome is TableLadderOutcome.UNVERIFIED
     assert adj_calls == []
 
+    # Arm A3: FAIL verdict with empty findings alongside another rung's cell ref -> fail closed.
+    from socr.judge.table_ladder import TableLadderPending
+
+    fail_no_findings_res = TableLadderResult(
+        table_id="p1-t0",
+        outcome=TableLadderOutcome.REJECTED,
+        final_verdict=TableJudgeVerdict(verdict="FAIL", confidence="high", findings=[]),
+        rung_results=[
+            RungResult(
+                rung="r0",
+                ok=True,
+                verdict=TableJudgeVerdict(
+                    verdict="FAIL",
+                    confidence="high",
+                    findings=[Finding(code=FindingCode.FABRICATED_VALUE, where="R1C2", detail="d")],
+                ),
+            ),
+            RungResult(
+                rung="r1",
+                ok=True,
+                verdict=TableJudgeVerdict(verdict="FAIL", confidence="high", findings=[]),
+            ),
+        ],
+    )
+    out_no_findings = pipe._resolve_table_guard_chain(
+        state,
+        1,
+        witness,
+        fail_no_findings_res,
+        BindingEvidence.ABSTAIN,
+        agreeing_adjudicator,
+        {},
+        {},
+        set(),
+        set(),
+        {},
+        {},
+    )
+    assert out_no_findings.outcome is TableLadderOutcome.UNVERIFIED
+    assert adj_calls == []
+
+    # Arm A4 & A5: TWO_LOW_PASS with empty doubt or unparseable doubt -> fail closed.
+    for bad_doubts in (["R1C2", ""], ["R1C2", "footer note"]):
+        doubt_verdict = TableJudgeVerdict(verdict="PASS", confidence="low", doubts=bad_doubts)
+        doubt_res = TableLadderResult(
+            table_id="p1-t0",
+            outcome=TableLadderOutcome.UNVERIFIED,
+            pending=TableLadderPending.TWO_LOW_PASS,
+            final_verdict=doubt_verdict,
+            rung_results=[RungResult(rung="r1", ok=True, verdict=doubt_verdict)],
+        )
+        out_doubt = pipe._resolve_table_guard_chain(
+            state,
+            1,
+            witness,
+            doubt_res,
+            BindingEvidence.ABSTAIN,
+            agreeing_adjudicator,
+            {},
+            {},
+            set(),
+            set(),
+            {},
+            {},
+        )
+        assert out_doubt.outcome is TableLadderOutcome.UNVERIFIED
+        assert adj_calls == []
+
     # Arm B: same table with ONLY the parseable cell finding -> blind transcription clears it.
     cell_only_verdict = TableJudgeVerdict(
         verdict="FAIL",
@@ -499,6 +580,101 @@ def test_fragment_rewrite_failure_keeps_sidecars_and_metadata_provisional(tmp_pa
     assert root_entry["fingerprint"].endswith(":pre-figures")
 
 
+def test_tables_trust_and_manifest_write_failures_keep_metadata_provisional(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Swallowed errors inside ``_write_tables_trust`` or ``_write_manifest`` must keep final
+    doc and root metadata provisional instead of publishing ``completed`` over stale/missing
+    artifacts."""
+    import socr.core.manifest as manifest_mod
+    from socr.core.tables_trust import TablesTrust
+
+    # Arm 1: _write_tables_trust fails via TablesTrust.save raising OSError.
+    pdf1 = _prose_pdf(tmp_path / "trustfail.pdf")
+    out1 = tmp_path / "out1"
+    pipe1 = _hermetic_pipeline()
+
+    def boom_trust(*a, **k):
+        raise OSError("disk full writing tables_trust.json")
+
+    with monkeypatch.context() as m:
+        m.setattr(TablesTrust, "save", boom_trust)
+        # Inject one distrust event so _write_tables_trust actually calls save().
+        orig_audit = pipe1._write_audit_log
+
+        def inject_and_write(state, doc_dir, records=None):
+            state.events.append(AuditEvent(page_num=1, kind="dualpass_flagged", detail="x"))
+            return orig_audit(state, doc_dir, records=records)
+
+        pipe1._write_audit_log = inject_and_write
+        pipe1.process(pdf1, output_dir=out1)
+
+    meta1 = json.loads((out1 / "trustfail" / "metadata.json").read_text(encoding="utf-8"))
+    root1 = json.loads((out1 / "metadata.json").read_text(encoding="utf-8"))
+    assert meta1["status"] == "partial"
+    assert meta1["fingerprint"].endswith(":pre-figures")
+    assert next(iter(root1["files"].values()))["fingerprint"].endswith(":pre-figures")
+
+    # Arm 2: _write_manifest fails inside build_manifest/save.
+    pdf2 = _prose_pdf(tmp_path / "manifestfail.pdf")
+    out2 = tmp_path / "out2"
+    pipe2 = _hermetic_pipeline()
+
+    def boom_manifest(*a, **k):
+        raise OSError("disk full writing manifest.json")
+
+    with monkeypatch.context() as m:
+        m.setattr(manifest_mod, "build_manifest", boom_manifest)
+        pipe2.process(pdf2, output_dir=out2)
+
+    meta2 = json.loads((out2 / "manifestfail" / "metadata.json").read_text(encoding="utf-8"))
+    root2 = json.loads((out2 / "metadata.json").read_text(encoding="utf-8"))
+    assert meta2["status"] == "partial"
+    assert meta2["fingerprint"].endswith(":pre-figures")
+    assert next(iter(root2["files"].values()))["fingerprint"].endswith(":pre-figures")
+
+
+def test_resumed_or_non_clean_document_preserves_existing_audit_log(tmp_path: Path) -> None:
+    """When ``audit.events`` is empty on a resumed or non-SUCCESS run, ``_write_audit_log`` must
+    NOT unlink an existing ``audit_log.json`` (preventing silent evidence destruction)."""
+    pdf = _prose_pdf(tmp_path / "resumed.pdf")
+    pipe = _hermetic_pipeline()
+
+    # Case 1: resumed page present -> preserve existing audit_log.json.
+    doc_dir_resumed = tmp_path / "doc_resumed"
+    doc_dir_resumed.mkdir()
+    prior_log = doc_dir_resumed / "audit_log.json"
+    prior_log.write_text(
+        json.dumps({"pdf_filename": "resumed.pdf", "event_count": 1, "events": [{"kind": "old"}]}),
+        encoding="utf-8",
+    )
+    state_resumed = DocumentState(handle=DocumentHandle.from_path(pdf))
+    state_resumed.status = DocumentStatus.SUCCESS
+    state_resumed.resumed_pages.add(1)
+    assert pipe._write_audit_log(state_resumed, doc_dir_resumed) is True
+    assert prior_log.exists(), "resumed doc must never silently delete prior audit_log.json"
+
+    # Case 2: non-clean status -> preserve existing audit_log.json.
+    doc_dir_failed = tmp_path / "doc_failed"
+    doc_dir_failed.mkdir()
+    failed_log = doc_dir_failed / "audit_log.json"
+    failed_log.write_text(prior_log.read_text(encoding="utf-8"), encoding="utf-8")
+    state_failed = DocumentState(handle=DocumentHandle.from_path(pdf))
+    state_failed.status = DocumentStatus.AUDIT_FAILED
+    assert pipe._write_audit_log(state_failed, doc_dir_failed) is True
+    assert failed_log.exists(), "non-SUCCESS doc must not delete prior audit_log.json"
+
+    # Control: fresh clean SUCCESS with zero events unlinks stale audit_log.json.
+    doc_dir_clean = tmp_path / "doc_clean"
+    doc_dir_clean.mkdir()
+    clean_log = doc_dir_clean / "audit_log.json"
+    clean_log.write_text(prior_log.read_text(encoding="utf-8"), encoding="utf-8")
+    state_clean = DocumentState(handle=DocumentHandle.from_path(pdf))
+    state_clean.status = DocumentStatus.SUCCESS
+    assert pipe._write_audit_log(state_clean, doc_dir_clean) is True
+    assert not clean_log.exists()
+
+
 # ---------------------------------------------------------------------------
 # 6. socr library exit code on skipped PARTIAL documents
 # ---------------------------------------------------------------------------
@@ -596,6 +772,24 @@ def test_refinalize_unshipped_figures_demotes_completed_to_partial_and_recounts_
     # Sidecar became WARNING before _recount_tables ran, so verified_text must drop to 0.
     assert meta_after["tables"]["verified_text"] == 0
 
+    # Crash recovery: simulate interruption right after sidecars were written (before
+    # metadata/root/audit_log finished) and verify rerun reconciles them idempotently.
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    root_path.write_text(json.dumps(root, indent=2), encoding="utf-8")
+    audit_path = doc_dir / "audit_log.json"
+    audit_path.write_text(
+        json.dumps({"pdf_filename": "paper.pdf", "event_count": 0, "counts": {}, "events": []}),
+        encoding="utf-8",
+    )
+    assert tool.refinalize_document(doc_dir, pdf_dir=tmp_path) == []
+    meta_recovered = json.loads(meta_path.read_text(encoding="utf-8"))
+    root_recovered = json.loads(root_path.read_text(encoding="utf-8"))
+    audit_recovered = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert meta_recovered["status"] == "partial"
+    assert meta_recovered["tables"]["verified_text"] == 0
+    assert root_recovered["files"][meta["key"]]["status"] == "partial"
+    assert audit_recovered["event_count"] == 1
+
 
 def test_refinalize_boilerplate_preserves_unrelated_md_and_does_not_recreate_doc_md_on_reocr(
     tmp_path: Path,
@@ -674,6 +868,25 @@ def test_refinalize_boilerplate_preserves_unrelated_md_and_does_not_recreate_doc
     meta = json.loads((doc_dir / "metadata.json").read_text(encoding="utf-8"))
     assert meta["status"] == "partial"
 
+    # Second pass after <stem>.md is gone AND metadata.json lacks output_path (leaving
+    # notes.md as the sole *.md in doc_dir): notes.md must NEVER be treated as canonical
+    # doc markdown or unlinked/overwritten.
+    (doc_dir / "metadata.json").write_text(
+        json.dumps({"key": "paper.pdf", "status": "partial"}), encoding="utf-8"
+    )
+    changes_again = refinalize_document(doc_dir, apply=True)
+    assert [(c.page_num, c.action) for c in changes_again] == [(2, "re_ocr")]
+    assert notes_md.read_text(encoding="utf-8") == "my hand-written notes"
+
+    # Malformed metadata.json must not crash refinalize_document (dry-run or apply),
+    # and must still leave unrelated notes.md untouched.
+    (doc_dir / "metadata.json").write_text("{broken json", encoding="utf-8")
+    dry_changes = refinalize_document(doc_dir, apply=False)
+    assert [(c.page_num, c.action) for c in dry_changes] == [(2, "re_ocr")]
+    apply_changes = refinalize_document(doc_dir, apply=True)
+    assert [(c.page_num, c.action) for c in apply_changes] == [(2, "re_ocr")]
+    assert notes_md.read_text(encoding="utf-8") == "my hand-written notes"
+
 
 def test_refinalize_second_reader_recovers_after_crash_between_fragment_and_sidecar_write(
     tmp_path: Path,
@@ -721,11 +934,23 @@ def test_refinalize_second_reader_recovers_after_crash_between_fragment_and_side
 
 
 def test_second_reader_preserves_inequalities_and_non_html_angle_tokens() -> None:
-    """Allowlisted HTML stripping must preserve inequalities and literal angle-bracket tokens."""
+    """Allowlisted HTML stripping must preserve inequalities, single-letter comparisons,
+    escaped literal tags, and non-HTML tokens while cleanly stripping quote-aware attributes."""
+    from socr.tables.second_reader import _fold_notation
+
     assert row_numbers("p < 0.05 and z > 1.96") == ("0.05", "1.96")
     assert row_numbers("x &lt; 10 and y &gt; 2") == ("10", "2")
     assert row_numbers("Table <1> series <PR> grew 3.5 percent") == ("1", "3.5")
     assert row_numbers("<td>1.5</td><td><b>2.5</b></td>") == ("1.5", "2.5")
+    # Single-letter allowlisted tag names followed by non-attribute digits must not eat content.
+    assert row_numbers("x<a 3 and y>2") == ("3", "2")
+    assert row_numbers("n<b 12>") == ("12",)
+    # Quoted '>' inside an HTML attribute must not prematurely terminate tag stripping.
+    assert row_numbers('<td title="x > 1">3</td>') == ("3",)
+    # Strip runs BEFORE html.unescape, so escaped tags survive as literal text.
+    assert "<br>" in _fold_notation("literal &lt;br&gt; 4")
+    assert "<sup>" in _fold_notation("literal &lt;sup&gt;5&lt;/sup&gt;")
+    assert row_numbers("literal &lt;br&gt; 4 &lt;sup&gt;5&lt;/sup&gt;") == ("4", "5")
 
     # End-to-end comparator: a wrong number inside an inequality must disagree, not vanish.
     shipped = "Threshold p < 0.05 and z > 1.96"

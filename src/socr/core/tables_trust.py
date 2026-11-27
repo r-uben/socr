@@ -598,8 +598,9 @@ def build_tables_trust(
     # actually requiring it. Fail closed instead: no-op, not erase.
     # Chronological resolution: a resolving event supersedes ONLY distrust events
     # that PRECEDED it in ``events`` (matching ``_boundary_fully_resolved_tables``
-    # above). Tracking the last index per page/table ensures an earlier acceptance
-    # can never silently erase a later rejection, withhold, or drift event on the
+    # above). Relies on event replay preserving per-page sidecar event order.
+    # Tracking the last index per page/table ensures an earlier acceptance can
+    # never silently erase a later rejection, withhold, or drift event on the
     # same table or page.
     resolved_page_last_idx: dict[int, int] = {}
     resolved_table_last_idx: dict[tuple[int, str], int] = {}

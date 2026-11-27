@@ -2067,9 +2067,9 @@ class UnifiedPipeline:
 
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
-        #: #1361: per page, what undoes a committed paid-after-withhold reading if a later table
-        #: gate withholds it.
-        self._paid_lane_undo: dict[int, dict] = {}
+        #: #1361: keyed by ``(id(state), page_num)`` so concurrent or sequential
+        #: documents on one pipeline instance can never collide or leak undo state.
+        self._paid_lane_undo: dict[tuple[int, int], dict] = {}
         #: #1080: preflight checks the operator ran without (``--allow-missing``),
         #: set by the CLI gate; recorded as ``ran_without`` in metadata.json.
         self.ran_without: list[str] = []
@@ -2888,7 +2888,6 @@ class UnifiedPipeline:
         doc = self._document_handle_for(pdf_path)
         state = DocumentState(handle=doc)
         state.prior_halt_pending = prior_halt_latch
-        self._paid_lane_undo.clear()
 
         if not self.config.quiet:
             console.print(f"[blue]Processing:[/blue] {doc.filename}")
@@ -8877,7 +8876,7 @@ class UnifiedPipeline:
         )
         # What a LATER gate (row binding, #1203) needs to put the page back if it withholds the
         # paid table after all: the rescue then did not happen and must not read as one.
-        self._paid_lane_undo[page_num] = {
+        self._paid_lane_undo[(id(state), page_num)] = {
             "state": state,
             "free": bo,
             "paid": out,
@@ -8912,7 +8911,7 @@ class UnifiedPipeline:
         """
         from socr.core.audit_log import AuditEvent
 
-        rec = self._paid_lane_undo.pop(page_num, None)
+        rec = self._paid_lane_undo.pop((id(state), page_num), None)
         if rec is None or rec.get("state") is not state:
             return None
         drop = {id(e) for e in rec["trial"]}
@@ -10643,13 +10642,11 @@ class UnifiedPipeline:
 
         Q1 reads the two low-confidence PASSes' ``doubts`` (the PASS-legal,
         value-free field the verdict schema gained for exactly this); Q2 reads
-        the FAIL verdicts' ``findings[].where``. Both are filtered through the
-        canonical grammar, so a structural finding that names a region rather
-        than a cell (``NOT_A_TABLE``, a prose-only ``STRUCTURE_MERGED``)
-        contributes nothing -- and a table whose ONLY complaints are
-        structural therefore cannot be cleared by a cell transcription. That
-        is fail-closed on purpose: clearing a table on the subset of cells
-        that happened to be checkable would answer a question nobody asked.
+        the FAIL verdicts' ``findings[].where``. Fails closed for the WHOLE
+        result: if any FAIL verdict has no findings, or any finding/doubt is
+        empty or does not parse under the canonical cell-ref grammar (e.g.
+        ``NOT_A_TABLE``, ``"last two rows"``), returns ``[]`` so blind cell
+        transcription cannot clear the table on a subset of checkable cells.
         """
         from socr.judge.table_verdict import parse_cell_ref
 
@@ -14172,7 +14169,7 @@ class UnifiedPipeline:
                     if not ps.timings_s:
                         ps.timings_s = clock.finalize()
             finally:
-                self._paid_lane_undo.pop(page_num, None)
+                self._paid_lane_undo.pop((id(state), page_num), None)
                 if ps is not None and not (getattr(ps, "timings_s", None) or {}):
                     ps.timings_s = clock.finalize()
                 self._page_clock = None
@@ -18339,10 +18336,11 @@ class UnifiedPipeline:
         output_dir: Path,
         saved_body: str | None = None,
         records: list[FinalizedPageRecord] | None = None,
-    ) -> None:
+    ) -> bool:
         """Write a reproducibility manifest + blob cache for `socr replay`.
 
-        Non-fatal: a manifest failure must never lose the OCR output.
+        Non-fatal: returns ``False`` on failure so assemble keeps metadata
+        provisional instead of publishing ``completed`` without a manifest.
         """
         try:
             from ocr_output_contract import doc_dir_for, relative_key
@@ -18367,8 +18365,10 @@ class UnifiedPipeline:
             manifest.save(doc_dir / "manifest.json")
             if not self.config.quiet:
                 console.print(f"  [dim]Manifest: {doc_dir / 'manifest.json'} (replayable)[/dim]")
+            return True
         except Exception as exc:
             logger.warning("manifest write failed (non-fatal): %s", exc)
+            return False
 
     def _sparse_page_ok(self, page_num: int) -> bool:
         """Whether low word count is expected on this page.
@@ -20252,6 +20252,7 @@ class UnifiedPipeline:
         ps = state.pages.get(page_num)
         if ps is None:
             return
+        state.resumed_pages.add(page_num)
         ps.attempts.append(page_out)
         ps.best_output = page_out
 
@@ -20782,7 +20783,12 @@ class UnifiedPipeline:
                     TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
                     TABLE_BINDING_ADJUDICATED_KIND,
                 }
-            _seen_table_structure_failed = {
+            from collections import Counter as _EventCounter
+
+            # Count ONLY pre-existing (analyze-time) ``table_structure_failed`` events so we
+            # suppress duplicating them on resume without collapsing two genuine identical
+            # model-side failures recorded in the sidecar.
+            _preexisting_tsf = _EventCounter(
                 (
                     e.engine or "",
                     e.detail or "",
@@ -20790,7 +20796,7 @@ class UnifiedPipeline:
                 )
                 for e in state.events
                 if e.page_num == page_num and e.kind == "table_structure_failed"
-            }
+            )
             for ev in meta.get("audit_events", []) or []:
                 if not isinstance(ev, dict) or ev.get("kind") not in restore_kinds:
                     continue
@@ -20815,9 +20821,9 @@ class UnifiedPipeline:
                         ev_detail,
                         json.dumps(ev_data, sort_keys=True, default=str),
                     )
-                    if _tsf_key in _seen_table_structure_failed:
+                    if _preexisting_tsf[_tsf_key] > 0:
+                        _preexisting_tsf[_tsf_key] -= 1
                         continue
-                    _seen_table_structure_failed.add(_tsf_key)
                 # #1205 round 2 (the replay audit): ``table_ladder_accepted`` is the one
                 # RESOLVING kind this loop replays -- it CLEARS that table's distrust in
                 # ``tables_trust`` -- and ``data["reason"]`` says what cleared it. The
@@ -24127,28 +24133,35 @@ class UnifiedPipeline:
         # Reproducibility manifest (opt-in; default-on in agentic mode). Pass the
         # FINAL saved body so the manifest blobs (and thus replay) reproduce the
         # on-disk .md bit-for-bit, not the pre-transform state.
+        manifest_ok = True
         if has_text and (self.config.write_manifest or self.config.agentic):
-            self._write_manifest(
-                state,
-                output_dir,
-                saved_body=final_text,
-                records=final_records,
+            manifest_ok = (
+                self._write_manifest(
+                    state,
+                    output_dir,
+                    saved_body=final_text,
+                    records=final_records,
+                )
+                is not False
             )
 
         # Durable per-run audit log of notable events (RECITATION escalations,
         # judge rejections, dual-pass patches). Always written; never fatal.
-        self._write_audit_log(state, doc_dir, records=final_records)
+        audit_ok = self._write_audit_log(state, doc_dir, records=final_records) is not False
 
         # Publish the authoritative doc + root metadata LAST, after the final body,
         # authoritative fragments, terminal sidecars, manifest, audit log, and
         # tables_trust.json have all been written. Stays provisional when the figure
-        # phase crashed (GH-503) or when fragment rewrite failed so a rerun repairs it.
+        # phase crashed (GH-503) or when any required artifact write failed so a rerun
+        # repairs it instead of skipping a stale/incomplete directory as completed.
         self._write_metadata(
             state,
             final_result,
             output_dir,
             has_text,
-            provisional=figure_phase_failed or not fragments_ok,
+            provisional=(
+                figure_phase_failed or not fragments_ok or not manifest_ok or not audit_ok
+            ),
         )
 
         # GH-993: what a reader can actually use, next to the defect lines above.
@@ -24491,8 +24504,11 @@ class UnifiedPipeline:
 
     def _write_audit_log(
         self, state: DocumentState, doc_dir: Path, records: list | None = None
-    ) -> None:
+    ) -> bool:
         """Write audit_log.json next to the output; surface a one-line summary.
+
+        Returns ``True`` when both ``audit_log.json`` and ``tables_trust.json``
+        succeeded, ``False`` on error so assemble keeps metadata provisional.
 
         ``records``: #659 round 3, threaded through to ``_write_tables_trust``
         so ``LABEL_UNVERIFIED_KIND`` resolves off the final winning candidate.
@@ -24514,15 +24530,23 @@ class UnifiedPipeline:
                 audit.save(audit_path)
                 if not self.config.quiet:
                     console.print(f"  [dim]Audit log: {audit_path} ({audit.summary_line()})[/dim]")
-            elif audit_path.exists():
+            elif (
+                audit_path.exists()
+                and not getattr(state, "resumed_pages", None)
+                and getattr(state, "status", None) is DocumentStatus.SUCCESS
+            ):
+                # Only remove a stale audit_log.json on a genuinely fresh, clean
+                # SUCCESS run (no resumed pages whose un-replayed prior-run events
+                # could be silently lost).
                 audit_path.unlink()
-            self._write_tables_trust(state, audit, doc_dir, records=records)
+            return self._write_tables_trust(state, audit, doc_dir, records=records) is not False
         except Exception as exc:  # never lose output over an audit-log write
             logger.warning("audit log write failed (non-fatal): %s", exc)
+            return False
 
     def _write_tables_trust(
         self, state: DocumentState, audit, doc_dir: Path, records: list | None = None
-    ) -> None:
+    ) -> bool:
         """GH-95: write tables_trust.json beside audit_log.json.
 
         Separate file rather than an inline callout in the assembled markdown:
@@ -24530,8 +24554,9 @@ class UnifiedPipeline:
         with whole-doc assembly is guarded by golden tests, and #95 accepts a
         sidecar. Prose-only pages therefore stay unmarked in the corpus.
 
-        Non-fatal by the same rule as the audit log: a trust-sidecar write must
-        never lose OCR output.
+        Non-fatal by the same rule as the audit log: returns ``False`` on failure
+        so assemble keeps metadata provisional instead of stamping ``completed``
+        next to a stale trust file.
 
         ``records``: #659 round 3, same reason as ``_tables_trust_note``'s
         parameter of the same name -- lets ``LABEL_UNVERIFIED_KIND`` resolve
@@ -24567,12 +24592,14 @@ class UnifiedPipeline:
                 # "nothing to write" behaviour).
                 if trust_path.exists():
                     trust_path.unlink()
-                return
+                return True
             trust.save(trust_path)
             if not self.config.quiet:
                 console.print(f"  [yellow]Table trust:[/yellow] {trust.summary_line()}")
+            return True
         except Exception as exc:
             logger.warning("tables_trust.json write failed (non-fatal): %s", exc)
+            return False
 
     @staticmethod
     def _structure_class_floor_note(

@@ -572,49 +572,58 @@ def refinalize_document(
                 captions=len(decision.captions),
             )
         )
-    if not changes or dry_run:
+    if dry_run:
         return changes
-    # Write order: fragments, the document ``.md``, the manifest and its cache, the metadata
-    # and the root index, the audit log -- and the page SIDECARS LAST. The sidecar is this
-    # lane's commit point (``_already_answered``), so a run interrupted at any earlier step
-    # leaves the page unanswered and the next run redoes it in full. Every earlier step is
-    # therefore written to be repeatable: ``_merge_fragment`` and ``_swap_once`` accept the
-    # text an interrupted run already wrote, and the note REPLACES its own earlier copy.
-    for path, text in fragments:
-        _write_text(path, text)
-    _write_text(md_paths[0], doc_md)
-    # The document-level records are rebuilt from EVERY answered sidecar -- those on disk and
-    # those about to be written -- so they say the same thing whether this run did all the
-    # pages or only the ones an interrupted run had left.
-    answered = _answered_sidecars(pages_dir, {int(d["page_num"]): d for _p, d in sidecars})
-    manifest_path = doc_dir / "manifest.json"
-    if manifest_path.is_file():
-        from socr.core.cache import BlobStore
-        from socr.core.manifest import page_asset_refs
-        from socr.core.result import PageOutput
+    if not changes:
+        # Crash recovery: if a previous pass wrote settled page sidecars and died before
+        # finishing metadata / table recount / root index / audit_log, reconcile those
+        # document aggregates idempotently (0 bytes written when already up to date).
+        answered = _answered_sidecars(pages_dir, {})
+        if not answered:
+            return changes
+    else:
+        # Write order: fragments, the document ``.md``, the manifest and its cache, page
+        # sidecars, then idempotent document aggregates (metadata, table recount, root
+        # index, audit_log). Reconciling document aggregates even when ``changes`` is
+        # empty guarantees a rerun after an interruption after sidecars finishes cleanly.
+        for path, text in fragments:
+            _write_text(path, text)
+        _write_text(md_paths[0], doc_md)
+        # The document-level records are rebuilt from EVERY answered sidecar -- those on disk and
+        # those about to be written -- so they say the same thing whether this run did all the
+        # pages or only the ones an interrupted run had left.
+        answered = _answered_sidecars(pages_dir, {int(d["page_num"]): d for _p, d in sidecars})
+        manifest_path = doc_dir / "manifest.json"
+        if manifest_path.is_file():
+            from socr.core.cache import BlobStore
+            from socr.core.manifest import page_asset_refs
+            from socr.core.result import PageOutput
 
-        manifest = _read_json(manifest_path)
-        store = BlobStore(doc_dir / "cache")
-        for _path, data in sidecars:
-            entry = (manifest.get("entries") or {}).get(str(data["page_num"]))
-            if entry is None:
-                continue
-            page = PageOutput.from_dict(data["winning_output"])
-            entry["blob_ref"] = store.put_page(page)
-            # #1187 round 2 (Argon P1-3a): a page this tool gave a PNG had no asset record,
-            # while pages another lane gave one did. ``manifest.stale_assets`` therefore never
-            # checked the new crops, and the next resume would add them -- drift the tool
-            # introduced. Recorded with the SAME function ``build_manifest`` uses.
-            refs = page_asset_refs(page.text or "", doc_dir)
-            if refs:
-                entry["assets"] = [
-                    {"logical_path": r.logical_path, "content_hash": r.content_hash} for r in refs
-                ]
-        _write_json(manifest_path, manifest)
+            manifest = _read_json(manifest_path)
+            store = BlobStore(doc_dir / "cache")
+            for _path, data in sidecars:
+                entry = (manifest.get("entries") or {}).get(str(data["page_num"]))
+                if entry is None:
+                    continue
+                page = PageOutput.from_dict(data["winning_output"])
+                entry["blob_ref"] = store.put_page(page)
+                # #1187 round 2 (Argon P1-3a): a page this tool gave a PNG had no asset record,
+                # while pages another lane gave one did. ``manifest.stale_assets`` therefore never
+                # checked the new crops, and the next resume would add them -- drift the tool
+                # introduced. Recorded with the SAME function ``build_manifest`` uses.
+                refs = page_asset_refs(page.text or "", doc_dir)
+                if refs:
+                    entry["assets"] = [
+                        {"logical_path": r.logical_path, "content_hash": r.content_hash}
+                        for r in refs
+                    ]
+            _write_json(manifest_path, manifest)
+        for path, data in sidecars:
+            _write_json(path, data)
     _shipped, marked_pages, _skeleton = _lane_pages(answered)
     note = answered_document_note(answered)
 
-    def _record(record: dict) -> None:
+    def _record(record: dict) -> bool:
         """The note, and -- when this lane MARKED a page -- the demotion a live run makes.
 
         #1187 round 4 (Argon P1-B): the tool wrote a non-empty ``error`` and left ``status``
@@ -625,6 +634,8 @@ def refinalize_document(
         """
         from ocr_output_contract import Status
 
+        before_error = record.get("error")
+        before_status = record.get("status")
         error = _NOTE_RE.sub("", str(record.get("error") or "")).strip().strip(";").strip()
         merged = f"{error}; {note}" if error and note else (note or error) or None
         if merged is None:
@@ -633,11 +644,10 @@ def refinalize_document(
             record["error"] = merged
         if marked_pages and record.get("status") == Status.COMPLETED.value:
             record["status"] = Status.PARTIAL.value
+        return record.get("error") != before_error or record.get("status") != before_status
 
-    for path, data in sidecars:
-        _write_json(path, data)
-    _record(meta)
-    _write_json(meta_path, meta)
+    if _record(meta):
+        _write_json(meta_path, meta)
     # #1187 round 4 (Argon P1-B): a page demoted from success no longer counts as a verified
     # table, so the document's table block is stale until something recomputes it. Same
     # helper ``socr-refinalize-own-text`` uses, from the sidecars as they now are on disk.
@@ -646,8 +656,7 @@ def refinalize_document(
     if root_path.is_file():
         root = _read_json(root_path)
         entry = (root.get("files") or {}).get(meta.get("key"))
-        if entry is not None:
-            _record(entry)
+        if entry is not None and _record(entry):
             _write_json(root_path, root)
     audit_path = doc_dir / "audit_log.json"
     if audit_path.is_file():
@@ -661,10 +670,16 @@ def refinalize_document(
                 for e in data.get("audit_events") or ()
                 if e.get("kind") in EVENT_KINDS
             )
-        audit["events"] = kept
-        audit["event_count"] = len(kept)
-        audit["counts"] = dict(Counter(e.get("kind") for e in kept))
-        _write_json(audit_path, audit)
+        new_counts = dict(Counter(e.get("kind") for e in kept))
+        if (
+            audit.get("events") != kept
+            or audit.get("event_count") != len(kept)
+            or audit.get("counts") != new_counts
+        ):
+            audit["events"] = kept
+            audit["event_count"] = len(kept)
+            audit["counts"] = new_counts
+            _write_json(audit_path, audit)
     return changes
 
 
