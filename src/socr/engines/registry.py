@@ -70,22 +70,13 @@ def resolve_auto_engine() -> EngineType:
     return EngineType.GEMINI
 
 
-_DEFAULT_RESOLVE_AUTO_ENGINE = resolve_auto_engine
-
-
 def resolve_auto_engine_for_config(config) -> EngineType:
-    """Policy-aware auto engine selection respecting strict-local and gemma opt-out.
-
-    Preserves test monkeypatches targeting ``socr.engines.registry.resolve_auto_engine``:
-    when callers patched that zero-arg symbol, delegate directly so hermetic tests keep
-    their stub without probing the host.
-    """
-    if resolve_auto_engine is not _DEFAULT_RESOLVE_AUTO_ENGINE:
-        return resolve_auto_engine()
-
+    """Policy-aware auto engine selection respecting strict-local, zero-cap pin,
+    cloud-pinned qwen refusal, and gemma opt-out."""
     from socr.core.providers import (
         DEFAULT_PROVIDERS,
         TIER_LOCAL,
+        cloud_pinned_qwen_refusal,
         zero_cap_pinned_forbids_cloud,
     )
 
@@ -93,13 +84,16 @@ def resolve_auto_engine_for_config(config) -> EngineType:
         getattr(config, "strict_local", False) or zero_cap_pinned_forbids_cloud(config)
     )
     allow_gemma = bool(getattr(config, "enable_gemma_cloud", True))
+    qwen_cloud_refusal = cloud_pinned_qwen_refusal(config) if forbid_cloud else ""
 
     for engine_type in AUTO_ENGINE_ORDER:
         if engine_type is EngineType.GEMMA and not allow_gemma:
             continue
         if forbid_cloud:
             prof = DEFAULT_PROVIDERS.get(engine_type)
-            if prof is not None and prof.tier != TIER_LOCAL:
+            if prof is None or prof.tier != TIER_LOCAL:
+                continue
+            if engine_type is EngineType.QWEN and qwen_cloud_refusal:
                 continue
         try:
             cli_engine = _ENGINES.get(engine_type)
@@ -113,8 +107,13 @@ def resolve_auto_engine_for_config(config) -> EngineType:
             continue
 
     if forbid_cloud:
-        logger.warning("No local engines available under strict-local; falling back to qwen")
-        return EngineType.QWEN
+        fallback = EngineType.MARKER if qwen_cloud_refusal else EngineType.QWEN
+        logger.warning(
+            "No local engines available under strict-local or pinned zero cost cap; "
+            "falling back to %s",
+            fallback.value,
+        )
+        return fallback
     logger.warning("No engines available; falling back to gemini (will likely fail)")
     return EngineType.GEMINI
 

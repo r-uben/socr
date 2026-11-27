@@ -61,7 +61,7 @@ def test_process_gemini_model_flag_wires_figure_engine_model(tmp_path, monkeypat
     with (
         patch("socr.cli._preflight_gate"),
         patch(
-            "socr.engines.registry.resolve_auto_engine",
+            "socr.engines.registry.resolve_auto_engine_for_config",
             return_value=EngineType.QWEN,
         ),
         patch.object(GeminiAPIEngine, "__init__", _recording_init),

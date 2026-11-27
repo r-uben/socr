@@ -88,7 +88,9 @@ def _run_with(tmp_path: Path, config_text: str, extra: list[str], monkeypatch):
     # #885: this file is about CLI/config precedence, not engine selection, but
     # `process` resolves AUTO in cli.py before the (stubbed) pipeline is built.
     # Pin it so the run does not shell out to `ollama`.
-    monkeypatch.setattr("socr.engines.registry.resolve_auto_engine", lambda: EngineType.QWEN)
+    monkeypatch.setattr(
+        "socr.engines.registry.resolve_auto_engine_for_config", lambda _cfg=None: EngineType.QWEN
+    )
     CliRunner().invoke(cli, ["process", str(pdf), "--config", str(cfg), *extra])
     assert "config" in seen, "the pipeline was never constructed, so nothing was measured"
     return seen["config"]

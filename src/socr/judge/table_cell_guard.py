@@ -149,21 +149,6 @@ class CellGuardDecision:
 CellAdjudicator = Callable[[Path, Sequence[str]], BlindCellResult]
 
 
-def _remaining_document_budget(state: DocumentState, config: PipelineConfig) -> float | None:
-    """Budget still available to this document, or None when uncapped.
-
-    The same fail-closed rule the equation lane applies: an unmetered earlier
-    call makes the remaining budget unknowable, and an unknown subtotal is
-    treated as no budget, never as zero spend.
-    """
-    if config.cost_budget <= 0:
-        return None
-    total_cost = state.total_cost
-    if total_cost is None:
-        return 0.0
-    return max(config.cost_budget - total_cost, 0.0)
-
-
 def _budget_refusal(
     state: DocumentState, page_num: int, config: PipelineConfig, call_cost: float
 ) -> str:
@@ -201,7 +186,9 @@ def _budget_refusal(
                 "--cost-budget cannot be shown to cover this cloud call"
             )
         remaining = max(config.cost_budget - state.total_cost, 0.0)
-        if remaining <= 0.0 or call_cost > remaining:
+        if remaining <= 0.0:
+            return "blind-cell adjudication skipped: the document budget is exhausted"
+        if call_cost > remaining:
             return (
                 f"blind-cell adjudication skipped: {call_cost} exceeds the remaining "
                 f"document budget ({remaining})"
@@ -379,7 +366,7 @@ def evaluate_cell_guard(
             "blind-cell adjudicator hit a transient transport error (%s); retrying once",
             result.error,
         )
-    if getattr(result, "budget_skipped", False):
+    if result.budget_skipped:
         return CellGuardDecision(
             geometry_evidence=geometry_evidence,
             adjudicator_ran=False,

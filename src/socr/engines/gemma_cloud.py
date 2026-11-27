@@ -50,6 +50,14 @@ def gemma_cloud_model_available(model: str) -> tuple[bool, str]:
     return ok, "" if ok else f"{model}: {reason}"
 
 
+class _GemmaCropTimeoutError(str):
+    """Typed timeout error returned from ``_run_cli_on_images`` on ``TimeoutExpired``."""
+
+
+def _gemma_crop_timeout_error(effective_timeout: float) -> _GemmaCropTimeoutError:
+    return _GemmaCropTimeoutError(f"gemma crop timed out after {effective_timeout}s")
+
+
 class GemmaCloudEngine(BaseEngine):
     """Adapter: ``qwen-ocr process`` on layout-aware 300-dpi crops."""
 
@@ -146,7 +154,7 @@ class GemmaCloudEngine(BaseEngine):
                     timeout=effective_timeout,
                 )
             except subprocess.TimeoutExpired:
-                return "", None, None, f"gemma crop timed out after {effective_timeout}s"
+                return "", None, None, _gemma_crop_timeout_error(effective_timeout)
             inp_tok, out_tok = parse_token_usage(result.stderr or "", result.stdout or "")
             if result.returncode != 0:
                 detail = extract_cli_actionable_error(
@@ -240,7 +248,7 @@ class GemmaCloudEngine(BaseEngine):
                     half_texts.append(text.strip())
 
                 if page_failed or len(half_texts) != expected:
-                    timed_out = "timed out" in fail_err.lower()
+                    timed_out = isinstance(fail_err, _GemmaCropTimeoutError)
                     outputs.append(
                         PageOutput(
                             page_num=page_num,

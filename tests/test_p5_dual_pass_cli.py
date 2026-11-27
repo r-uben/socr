@@ -58,7 +58,9 @@ def _run_capturing_config(
     # #885: this file is about dual_pass_tables precedence, not engine
     # selection, but `process` resolves AUTO in cli.py before the (stubbed)
     # pipeline is built. Pin it so the run does not shell out to `ollama`.
-    monkeypatch.setattr("socr.engines.registry.resolve_auto_engine", lambda: EngineType.QWEN)
+    monkeypatch.setattr(
+        "socr.engines.registry.resolve_auto_engine_for_config", lambda _cfg=None: EngineType.QWEN
+    )
 
     cmd = ["process", str(pdf)]
     if config_text is not None:

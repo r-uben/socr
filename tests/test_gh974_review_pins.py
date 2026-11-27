@@ -283,8 +283,6 @@ def _winning(out_dir: Path, page_num: int) -> dict:
 def test_budget_exhaustion_demotes_page_and_document_through_process(tmp_path):
     """Page 1's first reader stalls past the budget, so the second is skipped; page 2
     is healthy and gets a fresh budget. Only the budget differs between the runs."""
-    from socr.tables.binding import BindingEvidence
-
     text = {CLEAN_PAGE: CLEAN_MD, SHIFT_PAGE: SHIFT_CORRECT_MD}
 
     def rungs(clock):
@@ -293,22 +291,12 @@ def test_budget_exhaustion_demotes_page_and_document_through_process(tmp_path):
             _KeyedRung("r1", {}, clock),
         ]
 
-    # Geometry must abstain on CLEAN_PAGE (e.g. scan) so the table actually enters
-    # the visual ladder and exercises page-budget exhaustion on r0.
-    orig_binding = UnifiedPipeline._binding_evidence_for_witness
-
-    def _abstain_on_clean(self_pipe, state, page_num, witness):
-        if page_num == CLEAN_PAGE:
-            return None, BindingEvidence.ABSTAIN
-        return orig_binding(self_pipe, state, page_num, witness)
-
-    with patch.object(UnifiedPipeline, "_binding_evidence_for_witness", _abstain_on_clean):
-        tight, tight_state, tight_out = _process(
-            tmp_path, "tight", text, rungs, table_judge_page_budget_sec=SLOW / 3
-        )
-        loose, loose_state, loose_out = _process(
-            tmp_path, "loose", text, rungs, table_judge_page_budget_sec=60.0
-        )
+    tight, tight_state, tight_out = _process(
+        tmp_path, "tight", text, rungs, table_judge_page_budget_sec=SLOW / 3
+    )
+    loose, loose_state, loose_out = _process(
+        tmp_path, "loose", text, rungs, table_judge_page_budget_sec=60.0
+    )
 
     assert loose.status == DocumentStatus.SUCCESS
     assert tight.status == DocumentStatus.AUDIT_FAILED

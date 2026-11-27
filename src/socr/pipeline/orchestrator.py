@@ -92,11 +92,8 @@ from socr.core.state import (
 )
 from socr.engines.registry import (
     get_engine,
-    resolve_auto_engine,
     resolve_auto_engine_for_config,
 )
-
-_ORIG_RESOLVE_AUTO_ENGINE = resolve_auto_engine
 from socr.figures import crop_descriptions as _crop_descriptions
 from socr.figures import figure_crop as _figure_crop
 from socr.figures import figure_presence as _figure_presence
@@ -2099,8 +2096,6 @@ class UnifiedPipeline:
         gate and ``process()`` agree.
         """
         if self.config.primary_engine == EngineType.AUTO:
-            if resolve_auto_engine is not _ORIG_RESOLVE_AUTO_ENGINE:
-                return resolve_auto_engine()
             return resolve_auto_engine_for_config(self.config)
         return self.config.primary_engine
 
@@ -2783,11 +2778,7 @@ class UnifiedPipeline:
 
         # Resolve AUTO engine before starting
         if self.config.primary_engine == EngineType.AUTO:
-            self.config.primary_engine = (
-                resolve_auto_engine()
-                if resolve_auto_engine is not _ORIG_RESOLVE_AUTO_ENGINE
-                else resolve_auto_engine_for_config(self.config)
-            )
+            self.config.primary_engine = resolve_auto_engine_for_config(self.config)
             if not self.config.quiet:
                 console.print(
                     f"[dim]Auto-selected engine: {self.config.primary_engine.value}[/dim]"
@@ -11054,7 +11045,6 @@ class UnifiedPipeline:
             CAUSE_RUNG_UNAVAILABLE,
             CAUSE_UNKNOWN,
             CAUSE_WITNESS_PREPARATION_ERROR,
-            REASON_VERIFIED_BY_GEOMETRY,
             TABLE_BINDING_ADJUDICATED_KIND,
             TABLE_LADDER_ACCEPTED_KIND,
             TABLE_LADDER_REJECTED_KIND,
@@ -11164,29 +11154,6 @@ class UnifiedPipeline:
                     ):
                         forced_by_binding[witness.table_id] = binding
                         markdown_by_table[witness.table_id] = witness.markdown
-
-                    if (
-                        evidence is BindingEvidence.PASS
-                        and bo.judge_outcome != JUDGE_OUTCOME_TIMEOUT
-                    ):
-                        # Free native geometry already verified every cell's row
-                        # and column against an admissible born-digital text layer
-                        # (and the guard chain overrules any reader refusal on
-                        # BindingEvidence.PASS anyway). Skip paid cloud rungs
-                        # except on page-judge timeout, where #713 requires an
-                        # executed visual rung to mint a timeout credential.
-                        guard_reason_by_table[witness.table_id] = REASON_VERIFIED_BY_GEOMETRY
-                        guard_detail_by_table[witness.table_id] = (
-                            "native geometry verified rows and columns (readers skipped)"
-                        )
-                        guard_cleared_ids.add(witness.table_id)
-                        table_results.append(
-                            TableLadderResult(
-                                table_id=witness.table_id,
-                                outcome=TableLadderOutcome.ACCEPTED,
-                            )
-                        )
-                        continue
 
                     if not rungs:
                         # No CLI available (strict_local, or flag-on with
@@ -11431,16 +11398,10 @@ class UnifiedPipeline:
                 kind = TABLE_LADDER_ACCEPTED_KIND
                 reason = guard_reason_by_table.get(result.table_id, "")
                 if reason:
-                    if not result.rung_results and reason == REASON_VERIFIED_BY_GEOMETRY:
-                        detail = (
-                            f"table {result.table_id} accepted: "
-                            f"{guard_detail_by_table.get(result.table_id, reason)}"
-                        )
-                    else:
-                        detail = (
-                            f"table {result.table_id} accepted: the readers were overruled "
-                            f"({guard_detail_by_table.get(result.table_id, reason)})"
-                        )
+                    detail = (
+                        f"table {result.table_id} accepted: the readers were overruled "
+                        f"({guard_detail_by_table.get(result.table_id, reason)})"
+                    )
                 else:
                     detail = f"table {result.table_id} accepted by the judge ladder"
             elif result.outcome is TableLadderOutcome.WITHHELD:
@@ -11956,7 +11917,13 @@ class UnifiedPipeline:
         return tuple(items), limits
 
     def _cell_transcribe_budget_allows(self, state: DocumentState | None) -> bool:
-        """Whether document ``--cost-budget`` still permits a cloud cell transcription."""
+        """Whether document ``--cost-budget`` still permits a cloud cell transcription.
+
+        Note: cell transcriptions are not metered into ``state.total_cost`` (their
+        default model is $0-priced ``glm-5.3-flash:cloud``), so this gate stops
+        further cloud cell transcriptions once tracked document spend reaches
+        ``--cost-budget`` or becomes unmetered (``None``).
+        """
         if state is None or self.config.cost_budget <= 0:
             return True
         total_cost = state.total_cost
@@ -12165,11 +12132,28 @@ class UnifiedPipeline:
         The PROVIDER half still scans the reason: a provider timeout is recorded
         there and has nothing typed to read. Extracted from the loop so the test
         can pin THIS expression rather than a copy of it.
+
+        Cloud-tier provider timeouts (e.g. Gemma Cloud, Gemini, Mistral, or a
+        ``:cloud`` model) are excluded because the cascade-halt probe tests the
+        LOCAL Ollama/vLLM backend — a remote cloud slowdown says nothing about
+        local GPU health and must not halt the document as ``PARTIAL_SAVE_VLM_TIMEOUT``.
         """
+        from socr.core.providers import DEFAULT_PROVIDERS, TIER_LOCAL, is_cloud_model
+
+        def _is_cloud_attempt(att) -> bool:
+            engine = getattr(att, "engine", None)
+            prof = DEFAULT_PROVIDERS.get(engine) if engine is not None else None
+            if prof is not None and prof.tier != TIER_LOCAL:
+                return True
+            if is_cloud_model(getattr(att, "model", "") or getattr(att, "provider_id", "")):
+                return True
+            return False
+
         return any(
             "timeout" in (getattr(att, "reason", "") or "")
             for att in attempts
             if getattr(getattr(att, "output", None), "judge_outcome", "") != JUDGE_OUTCOME_TIMEOUT
+            and not _is_cloud_attempt(att)
         )
 
     # ------------------------------------------------------------------
@@ -13069,6 +13053,16 @@ class UnifiedPipeline:
                             plan=_replan
                             if _replan is not None
                             else NativeTablePlan(REFUSE, reason=CELL_MISMATCH_REASON),
+                        )
+                    elif _replan is not None and _replan.action == "refuse":
+                        # Non-retryable refusal from cell repair (e.g. budget skip):
+                        # keep the exact refusal reason on the plan so
+                        # _refuse_native_table_first surfaces it without escalating
+                        # to whole-page model OCR.
+                        _cells_work = native_table_plans[page_num]
+                        native_table_plans[page_num] = dataclasses.replace(
+                            _cells_work,
+                            plan=_replan,
                         )
                     elif _replan is not None and _replan.action == "defer":
                         self._record_native_ship_gate(state, page_num, _replan)
@@ -16546,8 +16540,13 @@ class UnifiedPipeline:
         normalize to the grid token that failed. The repaired markdown must
         then exact-pass on its own; a partial repair does not ship.
         """
+        from socr.core.audit_log import AuditEvent
+        from socr.judge.ladder_budget import TABLE_LADDER_BUDGET_EXHAUSTED_KIND
         from socr.tables.native_first import (
+            CELL_BUDGET_SKIPPED_REASON,
+            REFUSE,
             SHIP,
+            NativeTablePlan,
             plan_native_table,
             splice_cell_tokens,
             transcription_matches_native,
@@ -16561,12 +16560,32 @@ class UnifiedPipeline:
 
             limit = self._page_ladder_budget_sec([])
             if limit > 0:
-                self._ladder_budget = PageLadderBudget(limit)
+                self._ladder_budget = PageLadderBudget(
+                    limit,
+                    on_exhausted=lambda msg: state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind=TABLE_LADDER_BUDGET_EXHAUSTED_KIND,
+                            engine="native",
+                            detail=msg,
+                            data={"budget_sec": limit, "phase": "native_cell_repair"},
+                        )
+                    ),
+                )
                 created_budget = True
         try:
             for cell in plan.cells:
                 if not self._cell_transcribe_budget_allows(state):
-                    return None, None
+                    return None, NativeTablePlan(REFUSE, reason=CELL_BUDGET_SKIPPED_REASON)
+                if self._ladder_budget is not None and self._ladder_budget.remaining() <= 0:
+                    self._ladder_budget.call(
+                        "cell_transcribe",
+                        self.config.table_judge_rung1_model,
+                        lambda: None,
+                        lambda _msg: None,
+                    )
+                    return None, NativeTablePlan(REFUSE, reason=CELL_BUDGET_SKIPPED_REASON)
+                prior_skips = self._ladder_budget.skipped if self._ladder_budget is not None else 0
                 crop = self._render_adjudication_crop(state.handle.path, page_num, cell.bbox)
                 token = None
                 if crop is not None:
@@ -16574,6 +16593,8 @@ class UnifiedPipeline:
                         token = self._transcribe_cell_token(crop)
                     finally:
                         crop.unlink(missing_ok=True)
+                if self._ladder_budget is not None and self._ladder_budget.skipped > prior_skips:
+                    return None, NativeTablePlan(REFUSE, reason=CELL_BUDGET_SKIPPED_REASON)
                 if not token or not transcription_matches_native(
                     str(token), cell.native_token, cell.grid_token
                 ):
