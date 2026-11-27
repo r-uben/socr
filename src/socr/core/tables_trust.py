@@ -596,27 +596,32 @@ def build_tables_trust(
     # no-table_id branch made B1's emission discipline (always attach
     # table_id) load-bearing for correctness, with no test or contract
     # actually requiring it. Fail closed instead: no-op, not erase.
-    resolved_pages: set[int] = set()
-    resolved_tables: set[tuple[int, str]] = set()
-    for event in events:
+    # Chronological resolution: a resolving event supersedes ONLY distrust events
+    # that PRECEDED it in ``events`` (matching ``_boundary_fully_resolved_tables``
+    # above). Tracking the last index per page/table ensures an earlier acceptance
+    # can never silently erase a later rejection, withhold, or drift event on the
+    # same table or page.
+    resolved_page_last_idx: dict[int, int] = {}
+    resolved_table_last_idx: dict[tuple[int, str], int] = {}
+    for idx, event in enumerate(events):
         kind = getattr(event, "kind", "")
         if kind not in RESOLVING_KINDS:
             continue
         page_num = getattr(event, "page_num", 0)
         table_id = (getattr(event, "data", None) or {}).get("table_id")
         if table_id is not None:
-            resolved_tables.add((page_num, str(table_id)))
+            resolved_table_last_idx[(page_num, str(table_id))] = idx
         elif kind in WHOLE_PAGE_RESOLVING_KINDS:
-            resolved_pages.add(page_num)
+            resolved_page_last_idx[page_num] = idx
         # else: a resolving kind with neither a table_id nor whole-page
         # opt-in resolves nothing -- see the module comment above.
-    trust.resolved_pages = sorted(resolved_pages)
+    trust.resolved_pages = sorted(resolved_page_last_idx)
 
     # GH-609 round 4: word-keyed clearance for NON_RESOLVABLE_DISTRUST_KINDS
     # members, computed once up front -- see ``_boundary_fully_resolved_tables``.
     boundary_resolved = _boundary_fully_resolved_tables(events)
 
-    for event in events:
+    for idx, event in enumerate(events):
         page_num = getattr(event, "page_num", 0)
         kind = getattr(event, "kind", "")
         if kind not in TABLE_DISTRUST_KINDS:
@@ -663,9 +668,11 @@ def build_tables_trust(
             if page_num not in ditto_unresolved_pages:
                 continue
         else:
-            if page_num in resolved_pages:
+            if idx < resolved_page_last_idx.get(page_num, -1):
                 continue
-            if table_id is not None and (page_num, str(table_id)) in resolved_tables:
+            if table_id is not None and idx < resolved_table_last_idx.get(
+                (page_num, str(table_id)), -1
+            ):
                 continue
 
         advisory_only = native_cell_advisory and kind in NATIVE_CELL_ADVISORY_DISTRUST_KINDS

@@ -163,12 +163,69 @@ EXPECTED_RESUME_KINDS = frozenset(
         # restored, so losing the event would lose only the audit-log twin. A deliberate
         # addition, like the ones above.
         "source_evidence_table_corroborated",
+        # P0 data-integrity: TABLE_DISTRUST_KINDS emitted inside the page loop / judge / crop /
+        # escalation steps (skipped on terminal resumed pages), plus RESOLVING_KINDS peer
+        # ``table_escalation_accepted`` and recent page-loop/second-reader records.
+        "dualpass_flagged",
+        "dualpass_crop_timeout",
+        "dualpass_crop_failed",
+        "native_table_verifier_warn",
+        "native_table_verifier_hard_fail",
+        "table_value_drift_unadjudicated",
+        "value_guard_row_count_warning",
+        "source_evidence_table_reject",
+        "table_row_repetition_truncated",
+        "table_unexplained_lanes",
+        "table_not_scorable",
+        "table_structure_failed",
+        "candidate_truncated",
+        "table_escalation_accepted",
+        "chart_table_arbitration",
+        "paid_reading_lifted_floor",
+        "uncovered_text_in_chart_picture",
+        "source_evidence_table_extra_resolution",
+        "numbers_disagree_with_second_reader",
     }
 )
+
+#: ``TABLE_DISTRUST_KINDS`` members deliberately NOT in ``resume_restore_kinds()`` because
+#: they are re-derived unconditionally on every run (analyze or assemble), even for resumed
+#: terminal pages. Every other distrust kind MUST survive resume replay.
+_RECOMPUTED_TABLE_DISTRUST_KINDS: dict[str, str] = {
+    "table_region_geometry_hard_fail": "re-emitted unconditionally in _phase_analyze",
+    "d3_floor_model_table_kept": "re-emitted unconditionally in _phase_assemble",
+    "table_region_unverifiable": "re-emitted unconditionally in _phase_assemble",
+    "structure_class_model_table_kept": "re-emitted unconditionally in _phase_assemble",
+    "structure_class_ladder_exhausted_floor": "re-emitted unconditionally in _phase_assemble",
+    "structure_class_row_corroborated": "re-emitted unconditionally in finalized_page_records",
+    "structure_floor_overrode_ladder": "re-derived unconditionally in build_run_audit",
+}
 
 
 def test_resume_restore_kinds_is_exactly_the_pre_refactor_union() -> None:
     assert UnifiedPipeline.resume_restore_kinds() == EXPECTED_RESUME_KINDS
+
+
+def test_every_table_distrust_and_resolving_kind_survives_resume_or_is_recomputed() -> None:
+    """Completeness guard: a new TABLE_DISTRUST_KINDS or RESOLVING_KINDS member cannot
+    silently disappear on resume."""
+    from socr.core.tables_trust import RESOLVING_KINDS, TABLE_DISTRUST_KINDS
+
+    replayed = UnifiedPipeline.resume_restore_kinds()
+    missing_distrust = sorted(
+        TABLE_DISTRUST_KINDS - replayed - set(_RECOMPUTED_TABLE_DISTRUST_KINDS)
+    )
+    assert not missing_distrust, (
+        f"TABLE_DISTRUST_KINDS dropped on resume: {missing_distrust}. "
+        "Add to _RESUME_REPLAYED (or document in _RECOMPUTED_TABLE_DISTRUST_KINDS if "
+        "unconditionally re-emitted on resume)."
+    )
+    missing_resolving = sorted(RESOLVING_KINDS - replayed)
+    assert not missing_resolving, (
+        f"RESOLVING_KINDS dropped on resume: {missing_resolving}. Add to _RESUME_REPLAYED."
+    )
+    stale_exempt = sorted(set(_RECOMPUTED_TABLE_DISTRUST_KINDS) - TABLE_DISTRUST_KINDS)
+    assert not stale_exempt, f"stale recomputed exemptions: {stale_exempt}"
 
 
 def test_the_hard_coded_set_has_the_expected_size() -> None:
@@ -195,4 +252,6 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 77 with #1361's paid_reading_after_table_withhold.
     # 78 with #1355's source_evidence_table_corroborated.
     # 80 with #1385's two uncaptioned-chart kinds.
-    assert len(EXPECTED_RESUME_KINDS) == 80
+    # 99 with P0 data-integrity replay of skipped page-loop TABLE_DISTRUST_KINDS,
+    # table_escalation_accepted, and recent page-loop/second-reader kinds.
+    assert len(EXPECTED_RESUME_KINDS) == 99

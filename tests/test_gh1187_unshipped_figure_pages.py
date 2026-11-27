@@ -1691,19 +1691,19 @@ def test_the_tool_demotes_the_document_and_recounts_its_tables(tmp_path: Path) -
     """Argon P1-B. The tool wrote a non-empty ``error`` and left ``status`` as it found it, so
     a clean document came out claiming ``completed`` with an error on it -- the GH-177
     contract inverted, and different from what ``process()`` writes for the same pages."""
-    from socr.core.result import DocumentStatus
+    from ocr_output_contract import Status
 
     pdf = _pdf_with_a_figure(tmp_path / "paper.pdf", draw_figure=False)
     _out_dir, doc_dir = _run_dir(tmp_path, pdf, f"{_CAPTION}\n\n{_PROSE}")
     meta_path = doc_dir / "metadata.json"
     meta = json.loads(meta_path.read_text())
-    meta["status"] = DocumentStatus.SUCCESS.value
+    meta["status"] = Status.COMPLETED.value
     meta["tables"] = {"shipped_text": 0, "verified_text": 0, "unverified_text": 0, "withheld": 0}
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     assert tool.refinalize_document(doc_dir, pdf_dir=tmp_path)
     after = json.loads(meta_path.read_text())
-    assert after["status"] == DocumentStatus.AUDIT_FAILED.value, after["status"]
+    assert after["status"] == Status.PARTIAL.value, after["status"]
     assert after.get("error")
 
 

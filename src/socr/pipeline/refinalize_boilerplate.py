@@ -58,12 +58,39 @@ def _write_json(path: Path, data) -> None:
     _write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + newline)
 
 
-def _invalidate_doc_resume_gate(doc_dir: Path) -> None:
+def _canonical_doc_markdown(doc_dir: Path) -> Path | None:
+    """Resolve ONLY the canonical assembled document markdown inside ``doc_dir``.
+
+    Never globs and unlinks arbitrary ``*.md`` files (user notes, READMEs) that
+    happen to sit beside the document output.
+    """
+    meta_path = doc_dir / "metadata.json"
+    if meta_path.is_file():
+        meta = _read_json(meta_path)
+        output_path = meta.get("output_path")
+        if isinstance(output_path, str) and output_path:
+            candidate = Path(output_path)
+            if not candidate.is_absolute():
+                candidate = doc_dir / candidate
+            try:
+                if candidate.resolve().parent == doc_dir.resolve() and candidate.suffix == ".md":
+                    return candidate if candidate.is_file() else None
+            except OSError:
+                pass
+    stem_md = doc_dir / f"{doc_dir.name}.md"
+    if stem_md.is_file():
+        return stem_md
+    md_paths = sorted(doc_dir.glob("*.md"))
+    return md_paths[0] if len(md_paths) == 1 else None
+
+
+def _invalidate_doc_resume_gate(doc_dir: Path, canonical_md: Path | None = None) -> None:
     """Drop assembled document markdown and mark the doc partial so ``process()`` re-enters."""
     from ocr_output_contract import Status
 
-    for md_path in doc_dir.glob("*.md"):
-        md_path.unlink()
+    target_md = canonical_md if canonical_md is not None else _canonical_doc_markdown(doc_dir)
+    if target_md is not None and target_md.is_file():
+        target_md.unlink()
     meta_path = doc_dir / "metadata.json"
     if not meta_path.is_file():
         return
@@ -130,8 +157,8 @@ def refinalize_document(doc_dir: Path, *, apply: bool = False) -> list[PageChang
     pages_dir = doc_dir / "pages"
     if not pages_dir.is_dir():
         return []
-    md_paths = sorted(doc_dir.glob("*.md"))
-    doc_md = md_paths[0].read_text(encoding="utf-8") if len(md_paths) == 1 else ""
+    canonical_md = _canonical_doc_markdown(doc_dir)
+    doc_md = canonical_md.read_text(encoding="utf-8") if canonical_md is not None else ""
     changes: list[PageChange] = []
     strip_writes: list[tuple[Path, Path, dict, str]] = []
     reocr_writes: list[tuple[Path, dict]] = []
@@ -154,9 +181,9 @@ def refinalize_document(doc_dir: Path, *, apply: bool = False) -> list[PageChang
             old_fragment = fragment_path.read_text(encoding="utf-8")
             if old_fragment not in (old_text, new_text):
                 raise RuntimeError(f"{fragment_path}: fragment is not its sidecar's text")
-            if len(md_paths) == 1:
+            if canonical_md is not None:
                 heading = f"## Page {page_num}\n\n"
-                doc_md = _swap_once(doc_md, heading + old_text, heading + new_text, md_paths[0])
+                doc_md = _swap_once(doc_md, heading + old_text, heading + new_text, canonical_md)
             new_sidecar = dict(sidecar)
             winning = dict(new_sidecar.get("winning_output") or {})
             winning["text"] = new_text
@@ -187,9 +214,9 @@ def refinalize_document(doc_dir: Path, *, apply: bool = False) -> list[PageChang
     for sidecar_path, sidecar in reocr_writes:
         _write_json(sidecar_path, sidecar)
     if reocr_writes:
-        _invalidate_doc_resume_gate(doc_dir)
-    if strip_writes and len(md_paths) == 1:
-        _write_text(md_paths[0], doc_md)
+        _invalidate_doc_resume_gate(doc_dir, canonical_md=canonical_md)
+    elif strip_writes and canonical_md is not None:
+        _write_text(canonical_md, doc_md)
     if changes:
         log_path = doc_dir / LOG_NAME
         log = (

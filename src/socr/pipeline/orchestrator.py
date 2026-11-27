@@ -681,6 +681,82 @@ _RESUME_REPLAYED: dict[str, str] = {
         "#1100: emitted by the page loop's blank-page step, which a terminal resumed "
         "page skips; the document note and CLI line read this event"
     ),
+    "dualpass_flagged": (
+        "emitted by the page loop's dual-pass table check, which a terminal resumed page "
+        "skips; in TABLE_DISTRUST_KINDS so dropping it silently clears tables_trust.json"
+    ),
+    "dualpass_crop_timeout": (
+        "GH-166: emitted by the crop reread inside the page loop, which a terminal resumed "
+        "page skips; in TABLE_DISTRUST_KINDS"
+    ),
+    "dualpass_crop_failed": (
+        "GH-166: emitted by the crop reread inside the page loop, which a terminal resumed "
+        "page skips; in TABLE_DISTRUST_KINDS"
+    ),
+    "native_table_verifier_warn": (
+        "emitted by the page-loop table verifier, which a terminal resumed page skips; "
+        "in TABLE_DISTRUST_KINDS"
+    ),
+    "native_table_verifier_hard_fail": (
+        "emitted by the page-loop table verifier, which a terminal resumed page skips; "
+        "in TABLE_DISTRUST_KINDS"
+    ),
+    "table_value_drift_unadjudicated": (
+        "#259: emitted by the page-loop value guard, which a terminal resumed page skips; "
+        "in TABLE_DISTRUST_KINDS and feeds document status/tables_trust.json"
+    ),
+    "value_guard_row_count_warning": (
+        "emitted by the page-loop value guard, which a terminal resumed page skips; "
+        "in TABLE_DISTRUST_KINDS"
+    ),
+    "source_evidence_table_reject": (
+        "emitted by the page-loop source-evidence gate, which a terminal resumed page skips; "
+        "in TABLE_DISTRUST_KINDS"
+    ),
+    "table_row_repetition_truncated": (
+        "GH-97: emitted by the page-loop repetition guard, which a terminal resumed page "
+        "skips; in TABLE_DISTRUST_KINDS"
+    ),
+    "table_unexplained_lanes": (
+        "#123: emitted by the page-loop table escalation scorer, which a terminal resumed "
+        "page skips; in TABLE_DISTRUST_KINDS"
+    ),
+    "table_not_scorable": (
+        "#123: emitted by the page-loop table escalation scorer, which a terminal resumed "
+        "page skips; in TABLE_DISTRUST_KINDS"
+    ),
+    "table_structure_failed": (
+        "emitted both at analyze time (native) and inside the page loop (model-side "
+        "header_unattributed); replayed with deduplication so model-side failures survive resume"
+    ),
+    "candidate_truncated": (
+        "#645: emitted from discarded attempts that a terminal resumed page does not reload; "
+        "in TABLE_DISTRUST_KINDS"
+    ),
+    "table_escalation_accepted": (
+        "GH-96: emitted by _escalate_table_page, which a terminal resumed page skips; "
+        "in RESOLVING_KINDS so dropping it un-resolves an escalated page on resume"
+    ),
+    "chart_table_arbitration": (
+        "GH-150 B1: emitted inside the page loop when chart+table arbitration decides lane "
+        "ownership; a terminal resumed page skips that step"
+    ),
+    "paid_reading_lifted_floor": (
+        "#1359: emitted inside the page loop when a paid reading lifts a table floor; "
+        "a terminal resumed page skips that step"
+    ),
+    "uncovered_text_in_chart_picture": (
+        "#1407: emitted inside the page loop when uncovered text lies inside a shipped chart "
+        "picture; a terminal resumed page skips that step"
+    ),
+    "source_evidence_table_extra_resolution": (
+        "#1357: emitted inside route_page when extra table tokens are resolved; "
+        "a terminal resumed page skips route_page"
+    ),
+    "numbers_disagree_with_second_reader": (
+        "#1409: recorded on the page sidecar by the second-reader audit; replayed so resume "
+        "does not drop the disagreement record"
+    ),
 }
 
 
@@ -2812,6 +2888,7 @@ class UnifiedPipeline:
         doc = self._document_handle_for(pdf_path)
         state = DocumentState(handle=doc)
         state.prior_halt_pending = prior_halt_latch
+        self._paid_lane_undo.clear()
 
         if not self.config.quiet:
             console.print(f"[blue]Processing:[/blue] {doc.filename}")
@@ -8801,6 +8878,7 @@ class UnifiedPipeline:
         # What a LATER gate (row binding, #1203) needs to put the page back if it withholds the
         # paid table after all: the rescue then did not happen and must not read as one.
         self._paid_lane_undo[page_num] = {
+            "state": state,
             "free": bo,
             "paid": out,
             "events_before": events_before,
@@ -8835,7 +8913,7 @@ class UnifiedPipeline:
         from socr.core.audit_log import AuditEvent
 
         rec = self._paid_lane_undo.pop(page_num, None)
-        if rec is None:
+        if rec is None or rec.get("state") is not state:
             return None
         drop = {id(e) for e in rec["trial"]}
         drop.add(id(rec["accepted_event"]))
@@ -10580,13 +10658,25 @@ class UnifiedPipeline:
             verdict = getattr(rr, "verdict", None)
             if verdict is None:
                 continue
-            candidates = list(getattr(verdict, "doubts", []) or [])
-            candidates += [f.where for f in (getattr(verdict, "findings", []) or []) if f.where]
+            doubts = list(getattr(verdict, "doubts", []) or [])
+            findings = list(getattr(verdict, "findings", []) or [])
+            if getattr(verdict, "verdict", None) == "FAIL" and not findings:
+                return []
+            candidates: list[str] = []
+            for doubt in doubts:
+                if not doubt:
+                    return []
+                candidates.append(doubt)
+            for finding in findings:
+                where = getattr(finding, "where", None)
+                if not where:
+                    return []
+                candidates.append(where)
             for candidate in candidates:
                 try:
                     parse_cell_ref(candidate)
                 except (ValueError, TypeError):
-                    continue
+                    return []
                 if candidate not in refs:
                     refs.append(candidate)
         return refs
@@ -14082,6 +14172,7 @@ class UnifiedPipeline:
                     if not ps.timings_s:
                         ps.timings_s = clock.finalize()
             finally:
+                self._paid_lane_undo.pop(page_num, None)
                 if ps is not None and not (getattr(ps, "timings_s", None) or {}):
                     ps.timings_s = clock.finalize()
                 self._page_clock = None
@@ -20691,6 +20782,15 @@ class UnifiedPipeline:
                     TABLE_BINDING_BOUNDARY_RESOLVED_KIND,
                     TABLE_BINDING_ADJUDICATED_KIND,
                 }
+            _seen_table_structure_failed = {
+                (
+                    e.engine or "",
+                    e.detail or "",
+                    json.dumps(e.data or {}, sort_keys=True, default=str),
+                )
+                for e in state.events
+                if e.page_num == page_num and e.kind == "table_structure_failed"
+            }
             for ev in meta.get("audit_events", []) or []:
                 if not isinstance(ev, dict) or ev.get("kind") not in restore_kinds:
                     continue
@@ -20708,6 +20808,16 @@ class UnifiedPipeline:
                     _seen_skeletons.add(_key)
                 ev_detail = str(ev.get("detail", "") or "")
                 ev_data = dict(ev.get("data") or {})
+                ev_engine = str(ev.get("engine", "") or "")
+                if ev_kind == "table_structure_failed":
+                    _tsf_key = (
+                        ev_engine,
+                        ev_detail,
+                        json.dumps(ev_data, sort_keys=True, default=str),
+                    )
+                    if _tsf_key in _seen_table_structure_failed:
+                        continue
+                    _seen_table_structure_failed.add(_tsf_key)
                 # #1205 round 2 (the replay audit): ``table_ladder_accepted`` is the one
                 # RESOLVING kind this loop replays -- it CLEARS that table's distrust in
                 # ``tables_trust`` -- and ``data["reason"]`` says what cleared it. The
@@ -20910,7 +21020,7 @@ class UnifiedPipeline:
         output_dir: Path,
         final_text: str,
         records: list[FinalizedPageRecord] | None = None,
-    ) -> None:
+    ) -> bool:
         """Rewrite every per-page fragment from the FINAL assembled text.
 
         This is the single authoritative fragment-write pass, called AFTER
@@ -20924,7 +21034,9 @@ class UnifiedPipeline:
         page — whether or not the page has figures, and whether or not the page
         carried phantom image references.
 
-        Non-fatal: any error is logged; the on-disk ``.md`` is already correct.
+        Returns ``True`` when every fragment was written cleanly, ``False`` on
+        any error so assemble keeps page sidecars and document metadata
+        provisional instead of stamping a diverged run terminal/completed.
         """
         from ocr_output_contract import split_native_pages
 
@@ -20933,7 +21045,7 @@ class UnifiedPipeline:
         else:
             page_bodies = split_native_pages(final_text)
         if not page_bodies:
-            return
+            return True
 
         try:
             for idx, body in enumerate(page_bodies):
@@ -20942,7 +21054,8 @@ class UnifiedPipeline:
                 frag_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp_path = frag_path.with_suffix(".md.tmp")
                 tmp_path.write_text(body, encoding="utf-8")
-                tmp_path.rename(frag_path)
+                tmp_path.replace(frag_path)
+            return True
         except Exception as exc:
             logger.warning(
                 "PP-4 [%s]: authoritative fragment rewrite failed (%s); "
@@ -20950,6 +21063,7 @@ class UnifiedPipeline:
                 state.handle.path.name,
                 exc,
             )
+            return False
 
     def _stitch_fragments(self, state: DocumentState, output_dir: Path) -> str:
         """Reconstruct the document body from ``pages/NNN.md`` fragments.
@@ -23707,13 +23821,18 @@ class UnifiedPipeline:
             and self._crop_descriptions_enabled()
             and _crop_descriptions.has_crop_ref(final_text)
         )
-        self._write_metadata(
-            state,
-            final_result,
-            output_dir,
-            has_text,
-            provisional=runs_figures or runs_descriptions,
-        )
+        # Keep the pre-finalize metadata write strictly provisional whenever text
+        # is being assembled: final-body guards, fragment rewrites, terminal sidecars,
+        # manifest, and audit/trust artifacts all run below, and only after they finish
+        # may root/doc metadata publish a non-provisional ``completed`` record.
+        if has_text:
+            self._write_metadata(
+                state,
+                final_result,
+                output_dir,
+                has_text,
+                provisional=True,
+            )
 
         # Figure extraction + description + embedding. A figure-phase failure
         # must never destroy the completed OCR run — fall back to the already-
@@ -23810,13 +23929,6 @@ class UnifiedPipeline:
             # so the chart-region crops added at construction are gone by here.
             # Re-merge before anything else reads the list.
             self._merge_chart_region_figures(state, final_result)
-            # Finalize the record (real fingerprint, final status), replacing
-            # the provisional pre-figures entry -- unless the phase raised, in
-            # which case there is nothing to finalize and the provisional entry
-            # is the honest one (GH-503).
-            self._write_metadata(
-                state, final_result, output_dir, has_text, provisional=figure_phase_failed
-            )
 
             # GH-171: and re-flush the sidecars, for the same reason the flush
             # was already moved below the audit-event append (see the MAJOR 6(a)
@@ -23850,9 +23962,6 @@ class UnifiedPipeline:
         # replay blobs must all freeze the same guarded page text and status.
         final_page_outputs: list[PageOutput] | None = None
         final_records: list[FinalizedPageRecord] | None = None
-        # GH-993: the metadata written above carries the counts of the PRE-final records.
-        counts_written = state.table_counts
-        metadata_rewritten = False
         if has_text:
             from ocr_output_contract import assemble_pages, split_native_pages
 
@@ -23912,16 +24021,6 @@ class UnifiedPipeline:
                             )
                         )
                     self._save_markdown(state, final_text, output_dir)
-                    self._write_metadata(
-                        state,
-                        final_result,
-                        output_dir,
-                        has_text,
-                        # GH-503: the LAST writer wins, so this one carries the
-                        # flag too or the fix above is undone here.
-                        provisional=figure_phase_failed,
-                    )
-                    metadata_rewritten = True
                 elif [(page.text or "").strip() for page in final_page_outputs] != final_bodies:
                     # #1177: the saved document is the assembly of THESE records, the
                     # bodies ``_rewrite_all_fragments`` writes below. The seam re-run above
@@ -23985,22 +24084,6 @@ class UnifiedPipeline:
                 final_result.error = (
                     f"{final_result.error}; {_late_note}" if final_result.error else _late_note
                 )
-                self._write_metadata(
-                    state,
-                    final_result,
-                    output_dir,
-                    has_text,
-                    provisional=figure_phase_failed,
-                )
-                metadata_rewritten = True
-
-        # GH-993: a final recount that differs from the one already persisted (a caption
-        # table the figure phase added, a guard rewrite) must reach metadata.json, which
-        # the library reads. Same provisional flag as every other late writer (GH-503).
-        if has_text and not metadata_rewritten and state.table_counts != counts_written:
-            self._write_metadata(
-                state, final_result, output_dir, has_text, provisional=figure_phase_failed
-            )
 
         # PP-4: single authoritative fragment rewrite from the FINAL text (post-
         # strip_phantom_images, post-inline-figures for figure docs, plain post-
@@ -24008,8 +24091,11 @@ class UnifiedPipeline:
         # matches the saved .md byte-for-byte regardless of whether the page has
         # figures or phantom image refs.  Supersedes the PP-1 pre-strip flush for
         # ALL pages.
+        fragments_ok = True
         if has_text:
-            self._rewrite_all_fragments(state, output_dir, final_text, records=final_records)
+            fragments_ok = self._rewrite_all_fragments(
+                state, output_dir, final_text, records=final_records
+            )
 
         # The earlier terminal sidecar flush intentionally precedes the figure
         # phase. Rewrite it once more from the exact final outputs so captions,
@@ -24031,6 +24117,7 @@ class UnifiedPipeline:
                         state,
                         rec.output.page_num,
                         output_dir,
+                        terminal=fragments_ok,
                         extra_figures=_final_figures,
                         record=rec,
                     )
@@ -24051,6 +24138,18 @@ class UnifiedPipeline:
         # Durable per-run audit log of notable events (RECITATION escalations,
         # judge rejections, dual-pass patches). Always written; never fatal.
         self._write_audit_log(state, doc_dir, records=final_records)
+
+        # Publish the authoritative doc + root metadata LAST, after the final body,
+        # authoritative fragments, terminal sidecars, manifest, audit log, and
+        # tables_trust.json have all been written. Stays provisional when the figure
+        # phase crashed (GH-503) or when fragment rewrite failed so a rerun repairs it.
+        self._write_metadata(
+            state,
+            final_result,
+            output_dir,
+            has_text,
+            provisional=figure_phase_failed or not fragments_ok,
+        )
 
         # GH-993: what a reader can actually use, next to the defect lines above.
         if state.table_counts is not None and not self.config.quiet:
@@ -24410,13 +24509,13 @@ class UnifiedPipeline:
             from socr.core.audit_log import build_run_audit
 
             audit = build_run_audit(state)
+            audit_path = doc_dir / "audit_log.json"
             if audit.events:
-                audit.save(doc_dir / "audit_log.json")
+                audit.save(audit_path)
                 if not self.config.quiet:
-                    console.print(
-                        f"  [dim]Audit log: {doc_dir / 'audit_log.json'} "
-                        f"({audit.summary_line()})[/dim]"
-                    )
+                    console.print(f"  [dim]Audit log: {audit_path} ({audit.summary_line()})[/dim]")
+            elif audit_path.exists():
+                audit_path.unlink()
             self._write_tables_trust(state, audit, doc_dir, records=records)
         except Exception as exc:  # never lose output over an audit-log write
             logger.warning("audit log write failed (non-fatal): %s", exc)
@@ -26056,7 +26155,9 @@ class UnifiedPipeline:
         doc_dir = doc_dir_for(output_dir, rel_key)
         doc_dir.mkdir(parents=True, exist_ok=True)
         md_path = markdown_path_for(doc_dir, rel_key)
-        md_path.write_text(text, encoding="utf-8")
+        tmp_path = md_path.with_suffix(".md.tmp")
+        tmp_path.write_text(text, encoding="utf-8")
+        tmp_path.replace(md_path)
         return md_path
 
     # ------------------------------------------------------------------

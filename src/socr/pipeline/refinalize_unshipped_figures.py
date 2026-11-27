@@ -623,7 +623,7 @@ def refinalize_document(
         from what ``process()`` writes for the same pages. ``socr-refinalize-own-text`` does
         both; so does this now.
         """
-        from socr.core.result import DocumentStatus
+        from ocr_output_contract import Status
 
         error = _NOTE_RE.sub("", str(record.get("error") or "")).strip().strip(";").strip()
         merged = f"{error}; {note}" if error and note else (note or error) or None
@@ -631,14 +631,16 @@ def refinalize_document(
             record.pop("error", None)
         else:
             record["error"] = merged
-        if marked_pages and record.get("status") == DocumentStatus.SUCCESS.value:
-            record["status"] = DocumentStatus.AUDIT_FAILED.value
+        if marked_pages and record.get("status") == Status.COMPLETED.value:
+            record["status"] = Status.PARTIAL.value
 
+    for path, data in sidecars:
+        _write_json(path, data)
     _record(meta)
     _write_json(meta_path, meta)
     # #1187 round 4 (Argon P1-B): a page demoted from success no longer counts as a verified
     # table, so the document's table block is stale until something recomputes it. Same
-    # helper ``socr-refinalize-own-text`` uses, from the sidecars as they now are.
+    # helper ``socr-refinalize-own-text`` uses, from the sidecars as they now are on disk.
     _recount_tables(doc_dir, meta_path, meta)
     root_path = doc_dir.parent / "metadata.json"
     if root_path.is_file():
@@ -663,8 +665,6 @@ def refinalize_document(
         audit["event_count"] = len(kept)
         audit["counts"] = dict(Counter(e.get("kind") for e in kept))
         _write_json(audit_path, audit)
-    for path, data in sidecars:
-        _write_json(path, data)
     return changes
 
 

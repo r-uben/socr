@@ -587,12 +587,18 @@ def refinalize_document(
             )
             if c.output is not None:
                 fragment_path = path.with_suffix(".md")
-                if fragment_path.read_text(encoding="utf-8") != c.old_text:
+                old_fragment = fragment_path.read_text(encoding="utf-8")
+                if old_fragment not in (c.old_text, c.output.text):
                     raise RuntimeError(f"{fragment_path}: fragment is not its sidecar's text")
                 heading = f"## Page {page_num}\n\n"
-                doc_md = _swap_once(
-                    doc_md, heading + c.old_text, heading + c.output.text, md_paths[0]
-                )
+                if (heading + c.old_text) in doc_md:
+                    doc_md = _swap_once(
+                        doc_md, heading + c.old_text, heading + c.output.text, md_paths[0]
+                    )
+                elif doc_md.count(heading + c.output.text) != 1:
+                    doc_md = _swap_once(
+                        doc_md, heading + c.old_text, heading + c.output.text, md_paths[0]
+                    )
             compared.append(c)
     results = [c.result for c in compared]
     if not apply:
