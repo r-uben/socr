@@ -290,6 +290,14 @@ class FailureMode(str, Enum):
     #: #1306: the page's own text layer holds control bytes, shipped as U+FFFD under a mark.
     #: In ``PERMANENTLY_UNRESOLVABLE_MODES``: the same layer gives the same bytes.
     CONTROL_BYTES_REPLACED = "control_bytes_replaced"
+    #: #1409: the page's numbers differ from a second, independent reading of its image
+    #: (``second_reader_numbers`` FAIL). Shipped unchanged under a mark naming the rows. Set
+    #: only by ``socr-refinalize-second-reader``. In ``PERMANENTLY_UNRESOLVABLE_MODES``: no
+    #: run can re-run that check, and re-reading the page would only drop the mark.
+    NUMBERS_DISAGREE_WITH_SECOND_READER = "numbers_disagree_with_second_reader"
+    #: #1409: the second reading could not be compared (``second_reader_numbers`` UNKNOWN:
+    #: its output was empty or cut off). Permanent for the same reason as the mode above.
+    SECOND_READER_UNUSABLE = "second_reader_unusable"
     #: #1251 (C3): a model reading the page judge accepted and nothing independent confirmed.
     #: The judge is a model call on the same page, so its acceptance is not a check; the page
     #: ships under a ``page_judge=UNKNOWN`` mark until a page-scope check of the page's own text

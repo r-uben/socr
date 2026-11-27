@@ -101,6 +101,7 @@ socr-refinalize-point-drops = "socr.pipeline.refinalize_point_drops:main"
 socr-refinalize-prior-ocr = "socr.pipeline.refinalize_prior_ocr:main"
 socr-refinalize-unshipped-figures = "socr.pipeline.refinalize_unshipped_figures:main"
 socr-refinalize-boilerplate = "socr.pipeline.refinalize_boilerplate:main"
+socr-refinalize-second-reader = "socr.pipeline.refinalize_second_reader:main"
 
 [build-system]
 requires = ["hatchling>=1.27"]

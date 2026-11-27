@@ -290,6 +290,11 @@ class Check(str, Enum):
     #: #1306: control bytes of the page's own text layer, shipped as U+FFFD. Each stood for a
     #: glyph the layer could not map (often a minus), so the page's numbers may be wrong.
     CONTROL_BYTES = "control_bytes"
+    #: #1409: whether the numbers the page ships agree with an independent second reading of
+    #: the page IMAGE (``tables/second_reader.py``). Written only by
+    #: ``socr-refinalize-second-reader``, on a page that shipped unmarked: FAIL names the rows
+    #: that differ, UNKNOWN says the second reading could not be used. No run derives it.
+    SECOND_READER_NUMBERS = "second_reader_numbers"
     UNREADABLE_INPUT = "unreadable_input"
     #: The fail-closed fallback: the page is not CHECKED and nothing more specific named
     #: the reason. Never silence it -- a page with no clause at all ships unmarked, which

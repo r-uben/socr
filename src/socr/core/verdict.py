@@ -1002,6 +1002,10 @@ PERMANENTLY_UNRESOLVABLE_MODES: frozenset[FailureMode] = frozenset(
         FailureMode.WORDS_MISSING_FROM_PAGE,
         # #1306: the same layer holds the same control bytes.
         FailureMode.CONTROL_BYTES_REPLACED,
+        # #1409: only ``socr-refinalize-second-reader`` runs the second reader; a run that
+        # re-read the page could not repeat the check and would ship it unmarked again.
+        FailureMode.NUMBERS_DISAGREE_WITH_SECOND_READER,
+        FailureMode.SECOND_READER_UNUSABLE,
         # #1251: re-reading cannot produce an independent check the layer does not offer, and
         # the reading is not deterministic, so re-reading would only change shipped text.
         FailureMode.READING_UNCORROBORATED,
@@ -1032,6 +1036,11 @@ NUMBER_CHECK_MODES: dict[FailureMode, Check] = {
 TEXT_LAYER_WORDS_MODES: dict[FailureMode, Check] = {
     FailureMode.WORDS_MISSING_FROM_PAGE: Check.TEXT_LAYER_WORDS,
 }
+#: #1409: the demotion modes of the ``second_reader_numbers`` clause (FAIL, UNKNOWN).
+SECOND_READER_MODES: dict[FailureMode, Check] = {
+    FailureMode.NUMBERS_DISAGREE_WITH_SECOND_READER: Check.SECOND_READER_NUMBERS,
+    FailureMode.SECOND_READER_UNUSABLE: Check.SECOND_READER_NUMBERS,
+}
 #: Every mode a text-layer clause demotes a page with, for the consumers that treat them
 #: alike (the resume WARNING guard, ``_mode_is_explained``).
 LAYER_CHECK_MODES: dict[FailureMode, Check] = {
@@ -1039,6 +1048,10 @@ LAYER_CHECK_MODES: dict[FailureMode, Check] = {
     **TEXT_LAYER_WORDS_MODES,
     # #1306: the control-byte clause is a fact about the page's own layer too.
     FailureMode.CONTROL_BYTES_REPLACED: Check.CONTROL_BYTES,
+    # #1409: not a layer check (the witness is a second reading of the image), and treated
+    # alike by both consumers: the status is explained when the clause is present, and the
+    # modes are written only by the verdict demotion of a SUCCESS page.
+    **SECOND_READER_MODES,
 }
 
 
@@ -2364,6 +2377,9 @@ _SILENT_SUCCESS_ORDER: tuple[tuple[Check, str], ...] = (
     (Check.TEXT_LAYER_WORDS, SCOPE_PAGE),
     # #1306: last again, for the same reason.
     (Check.CONTROL_BYTES, SCOPE_PAGE),
+    # #1409: last again. Only an ORDER: no run derives this clause (it is not in
+    # ``silent_success_clauses`` nor in the pass trace); ``socr-refinalize-second-reader`` adds it.
+    (Check.SECOND_READER_NUMBERS, SCOPE_PAGE),
 )
 
 

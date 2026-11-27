@@ -189,6 +189,46 @@ class VLLMEngine(BaseHTTPEngine):
                 engine=self.name,
             )
 
+    def read_page(
+        self, png: bytes, prompt: str, *, max_tokens: int, temperature: float
+    ) -> tuple[str, str | None]:
+        """#1409: one page image and a prompt in, ``(raw text, finish_reason)`` out.
+
+        For a caller that needs what the model wrote, untouched, and whether it was cut off
+        (``finish_reason == "length"``): the second reader. The prompt is the system message
+        and the image the whole user message, the shape the reader's stored readings were
+        made with. The PNG is sent as it is (no JPEG re-encode: digits are the point).
+        Raises on a transport or HTTP error, and on a response without a choice: a reading
+        that was not made must never look like an empty one.
+        """
+        encoded = base64.b64encode(png).decode("ascii")
+        response = self._get_client().post(
+            "/chat/completions",
+            json={
+                "model": self.config.model,
+                "messages": [
+                    {"role": "system", "content": prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{encoded}"},
+                            }
+                        ],
+                    },
+                ],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+        )
+        response.raise_for_status()
+        choices = response.json().get("choices") or []
+        if not choices:
+            raise RuntimeError("vLLM returned no choice for the page")
+        content = (choices[0].get("message") or {}).get("content")
+        return (content if isinstance(content, str) else ""), choices[0].get("finish_reason")
+
     @staticmethod
     def _detect_figure_type(description: str, default: str) -> str:
         desc_lower = description.lower()
