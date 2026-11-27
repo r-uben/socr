@@ -655,16 +655,61 @@ def dropped_numbers(reference_text: str, reading: str) -> DropRecord:
     )
 
 
+_CONTRADICTION_TEMPLATE = "text layer says {ref}, reading says {read}"
+_LAYER_SILENT_TEMPLATE = "reading says {read}, not in the text layer"
+_DISPUTE_SEP = " / "
+_CONTRADICTION_RE = re.compile(r"^text layer says (?P<ref>.+), reading says (?P<read>.+)$")
+_LAYER_SILENT_RE = re.compile(r"^reading says (?P<read>.+), not in the text layer$")
+#: Where the first dispute starts inside a reason that may open with a prefix sentence.
+_FIRST_DISPUTE_RE = re.compile(r"(?=(?:text layer says|reading says) )")
+LAYER_SILENT_COUNT_TEMPLATE = "{count} number(s) in the reading are not in this page's text layer"
+
+
 def describe_disputes(record: AgreementRecord) -> str:
     """The disputed numbers as one mark reason: every one is named, none is dropped.
+
+    This is the RECORD form (the sidecar's ``verdict.clauses[].reason``). The shipped page
+    banner renders it through :func:`summarise_disputes_for_banner` (#1347).
 
     Joined with `` / `` because the mark grammar turns ``;`` into ``,`` (``clean_reason``),
     which would run one dispute into the next.
     """
     parts = [
-        f"text layer says {ref}, reading says {read}"
+        _CONTRADICTION_TEMPLATE.format(ref=ref, read=read)
         if ref is not None
-        else f"reading says {read}, not in the text layer"
+        else _LAYER_SILENT_TEMPLATE.format(read=read)
         for ref, read in record.disputed
     ]
-    return " / ".join(parts)
+    return _DISPUTE_SEP.join(parts)
+
+
+def summarise_disputes_for_banner(reason: str) -> str:
+    """``reason`` with its layer-silent disputes counted in one phrase (#1347).
+
+    Two kinds of dispute, and the rule is by kind, never by length: a contradiction (the layer
+    says A, the reading says B) is named, because it is a specific claim a reader can check; a
+    layer-silent entry (the reading says B, the layer lacks it) is counted, because on a page
+    whose layer is damaged or near-empty every number is one and a list of them is noise. The
+    full list stays in the sidecar: this only changes what the page banner shows.
+
+    Parses :func:`describe_disputes` output, so a stored reason written before #1347 renders
+    the same banner as a live run. A reason that is not entirely that format (a prefix sentence
+    followed by disputes is accepted) is returned unchanged.
+    """
+    head = _FIRST_DISPUTE_RE.search(reason)
+    if head is None:
+        return reason
+    prefix, body = reason[: head.start()], reason[head.start() :]
+    named: list[str] = []
+    silent = 0
+    for part in body.split(_DISPUTE_SEP):
+        if _LAYER_SILENT_RE.match(part):
+            silent += 1
+        elif _CONTRADICTION_RE.match(part):
+            named.append(part)
+        else:
+            return reason
+    if not silent:
+        return reason
+    summary = LAYER_SILENT_COUNT_TEMPLATE.format(count=silent)
+    return prefix + _DISPUTE_SEP.join([*named, summary])

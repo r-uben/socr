@@ -202,7 +202,7 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
 
     *event_kinds* are the kinds of the page's events in the run's ``audit_log.json``: with
     the run's own prior-OCR flag they decide where the clause sits in the verdict."""
-    from socr.core.manifest import apply_verdict_marks
+    from socr.core.manifest import apply_verdict_marks, restate_legacy_banners
     from socr.core.marks import Check
     from socr.core.result import PageOutput
     from socr.core.state import PageState
@@ -271,6 +271,12 @@ def refinalize_page(sidecar: dict, pa, event_kinds: frozenset[str] = frozenset()
         ),
     )
     if extended == replace(published, page_num=output.page_num):
+        # #1347: an unchanged verdict can still sit under a banner an older run wrote in the long
+        # form; that line alone is restated, so the page reads as a live run's does.
+        if restate_legacy_banners(output.text or "", extended, output.page_num) != (
+            output.text or ""
+        ):
+            return apply_verdict_marks(output, p, output.page_num, published=extended)
         return None
     return apply_verdict_marks(output, p, output.page_num, published=extended)
 
