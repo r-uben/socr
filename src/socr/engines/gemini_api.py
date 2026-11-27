@@ -8,6 +8,7 @@ extracted figure images via the Gemini generateContent API.
 import base64
 import io
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
@@ -21,6 +22,7 @@ from socr.core.ollama_utils import (
     safe_host_label,
 )
 from socr.core.config import DEFAULT_GEMINI_MODEL
+from socr.core.providers import gemini_usage_cost_usd
 from socr.core.result import FigureInfo
 from socr.engines._figure_prompt import (
     CAPTION_MARKER as _CAPTION_MARKER,  # noqa: F401  re-exported for tests
@@ -58,6 +60,13 @@ class GeminiAPIEngine:
     def __init__(self, config: GeminiAPIConfig | None = None) -> None:
         self.config = config or GeminiAPIConfig()
         self._client: httpx.Client | None = None
+        #: Metered cost of the LAST ``describe_figure`` call (#1405): ``0.0`` when
+        #: nothing billable was sent or the API refused the request, the priced
+        #: token usage of a 200 response, and ``None`` when a request went out
+        #: and its usage is not known (transport error after sending, or a 200
+        #: without ``usageMetadata``). ``None`` means unknown and is recorded as
+        #: unknown; it is never read as zero.
+        self.last_call_cost_usd: float | None = 0.0
         self._initialized: bool = False
 
     @property
@@ -101,6 +110,7 @@ class GeminiAPIEngine:
         context: str = "",
     ) -> FigureInfo:
         """Describe a figure image using the Gemini vision API."""
+        self.last_call_cost_usd = 0.0
         if not self._initialized and not self.initialize():
             return FigureInfo(
                 figure_num=0,
@@ -134,9 +144,14 @@ class GeminiAPIEngine:
             }
 
             client = self._get_client()
+            # From here a request is on the wire: its cost is unknown until the
+            # response says otherwise.
+            self.last_call_cost_usd = None
             response = client.post(self._build_url(), json=payload)
 
             if response.status_code != 200:
+                # A refused request generated no tokens.
+                self.last_call_cost_usd = 0.0
                 return FigureInfo(
                     figure_num=0,
                     page_num=0,
@@ -145,7 +160,9 @@ class GeminiAPIEngine:
                     engine=self.name,
                 )
 
-            raw = _extract_text(response.json()) or "Unable to generate description"
+            body = response.json()
+            self.last_call_cost_usd = _usage_cost_usd(body)
+            raw = _extract_text(body) or "Unable to generate description"
             detected_type = _detect_figure_type(raw, figure_type)
             # Only wrap genuine model output — not the fallback error string.
             description = _wrap_caption(raw) if raw != "Unable to generate description" else raw
@@ -183,6 +200,42 @@ class GeminiAPIEngine:
 #: cascade halt).
 FIGURE_ASK_TIMEOUT_SEC: float = 120.0
 
+#: Environment override for the context window of ONE Ollama figure call.
+FIGURE_NUM_CTX_ENV = "SOCR_FIGURE_NUM_CTX"
+
+#: Context window (tokens) requested for ONE Ollama figure call (#1405).
+#:
+#: Without ``options.num_ctx`` the daemon's own default applies, and the daemon
+#: sizes the loaded model for that window. On a daemon whose default was 262144
+#: the caption model (``qwen3-vl:30b-a3b-instruct``) occupied about 42 GB; at
+#: this value it occupied about 21 GB (measured on a 64 GB Apple-silicon host,
+#: 2026-11-24). A figure call is one image, the fixed prompt and at most the
+#: 500 characters of page context ``_get_page_context`` passes, so the request
+#: never approaches the daemon default. 32768 is the window socr's vLLM recipe
+#: serves the same model with (``--max-model-len 32768``), so both local
+#: backends give the caption model the same room. Override per deployment with
+#: ``SOCR_FIGURE_NUM_CTX``.
+FIGURE_NUM_CTX_DEFAULT: int = 32768
+
+
+def resolve_figure_num_ctx(num_ctx: int | None = None) -> int:
+    """Context window for a figure call: argument, then env var, then the default.
+
+    A value that is not a positive integer is ignored rather than raised on: the
+    caller is building a request on the caption path, and a malformed override
+    must not cost the document its figures.
+    """
+    for candidate in (num_ctx, os.environ.get(FIGURE_NUM_CTX_ENV)):
+        if candidate is None:
+            continue
+        try:
+            value = int(str(candidate).strip())
+        except ValueError:
+            continue
+        if value > 0:
+            return value
+    return FIGURE_NUM_CTX_DEFAULT
+
 
 class OllamaFigureEngine:
     """Local-first figure description engine using Ollama.
@@ -195,10 +248,19 @@ class OllamaFigureEngine:
     def __init__(
         self,
         model: str = "qwen3-vl:30b-a3b-instruct",
-        host: str = "http://localhost:11434",
+        host: str | None = None,
+        num_ctx: int | None = None,
     ) -> None:
+        # #1405: the host used to default to a literal localhost URL, so a
+        # deployment whose ``OLLAMA_HOST`` points elsewhere had its table judge
+        # there and its figure captions on localhost. Resolved the way every
+        # other Ollama caller resolves it (GH-222). Imported here, not at module
+        # top: ``socr.tables.extract`` pulls in the crop-reader stack.
+        from socr.tables.extract import resolve_ollama_host
+
         self.model = model
-        self.host = host.rstrip("/")
+        self.host = resolve_ollama_host(host).rstrip("/")
+        self.num_ctx = resolve_figure_num_ctx(num_ctx)
         self._last_available = False
 
     @property
@@ -257,6 +319,7 @@ class OllamaFigureEngine:
                     }
                 ],
                 "stream": False,
+                "options": {"num_ctx": self.num_ctx},
             }
             url, extra = ollama_endpoint(self.host, "/api/chat")
             resp = call_with_total_deadline(
@@ -313,6 +376,7 @@ class OllamaFigureEngine:
                     }
                 ],
                 "stream": False,
+                "options": {"num_ctx": self.num_ctx},
             }
             url, extra = ollama_endpoint(self.host, "/api/chat")
             resp = call_with_total_deadline(
@@ -335,8 +399,74 @@ class OllamaFigureEngine:
         pass  # stateless HTTP — nothing to close
 
 
+#: Opens the visible mark a figure carries when its paid caption call was
+#: refused (#1405). Number-free and free of Markdown control characters on
+#: purpose: a figure on a certified-floor page keeps its caption only if the
+#: caption passes ``crop_descriptions``' number-free check, and a mark that
+#: failed it would be blanked there -- a refusal with no trace on the page.
+PAID_CAPTION_REFUSED_PREFIX = "[figure description withheld:"
+
+
+def paid_caption_refused_mark(reason: str) -> str:
+    """The description a figure ships with when its paid caption was refused."""
+    return f"{PAID_CAPTION_REFUSED_PREFIX} {reason}]"
+
+
+class BudgetedPaidFigureEngine:
+    """A paid caption engine behind an admission gate and a cost recorder (#1405).
+
+    ``GeminiAPIEngine`` calls a paid API directly. It used to be handed out bare,
+    so every caption call was outside ``--max-paid-pages`` and ``--cost-budget``
+    and left nothing in the run's cost journal. This wrapper is the only form
+    in which the orchestrator hands the paid engine out:
+
+    - ``admit()`` runs before EVERY call and returns ``None`` to allow it or a
+      short reason to refuse it. A refused call sends nothing and returns the
+      refusal mark as the description, so the figure shows why it has no caption.
+    - ``record(cost)`` runs after every call that was allowed, with the engine's
+      metered cost (``None`` = unknown).
+    """
+
+    def __init__(
+        self,
+        inner: "GeminiAPIEngine",
+        admit: Callable[[], str | None],
+        record: Callable[[float | None], None],
+    ) -> None:
+        self._inner = inner
+        self._admit = admit
+        self._record = record
+
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+    def describe_figure(
+        self,
+        image: Image.Image,
+        figure_type: str = "unknown",
+        context: str = "",
+    ) -> FigureInfo:
+        refusal = self._admit()
+        if refusal:
+            return FigureInfo(
+                figure_num=0,
+                page_num=0,
+                figure_type=figure_type,
+                description=paid_caption_refused_mark(refusal),
+                engine=self.name,
+            )
+        try:
+            return self._inner.describe_figure(image, figure_type=figure_type, context=context)
+        finally:
+            self._record(getattr(self._inner, "last_call_cost_usd", None))
+
+    def close(self) -> None:
+        self._inner.close()
+
+
 class LocalFirstFigureEngine:
-    """Composite engine: try Ollama first, fall back to Gemini per-call.
+    """Composite engine: try the local engine first, fall back to Gemini per-call.
 
     Used by the orchestrator's _get_vision_engine() when Ollama is available.
     On each describe_figure call:
@@ -351,10 +481,16 @@ class LocalFirstFigureEngine:
     def __init__(
         self,
         ollama: "OllamaFigureEngine",
-        gemini: "GeminiAPIEngine | None" = None,
+        gemini: "GeminiAPIEngine | BudgetedPaidFigureEngine | None" = None,
+        is_failure: Callable[[FigureInfo], bool] | None = None,
     ) -> None:
+        # ``ollama`` is whichever LOCAL engine runs first; the name predates the
+        # vLLM tier (#1405) and is kept because callers pass it positionally.
+        # ``is_failure`` replaces the Ollama error-prefix test for a local engine
+        # whose failure strings differ.
         self._ollama = ollama
         self._gemini = gemini
+        self._is_failure = is_failure
 
     @property
     def name(self) -> str:
@@ -368,7 +504,11 @@ class LocalFirstFigureEngine:
     ) -> FigureInfo:
         """Describe via Ollama; fall back to Gemini on empty or error."""
         info = self._ollama.describe_figure(image, figure_type=figure_type, context=context)
-        if info.description and not info.description.startswith(self._OLLAMA_ERROR_PREFIX):
+        if self._is_failure is not None:
+            failed = self._is_failure(info)
+        else:
+            failed = not info.description or info.description.startswith(self._OLLAMA_ERROR_PREFIX)
+        if not failed:
             return info
 
         # Ollama returned empty or an error — try Gemini
@@ -405,6 +545,27 @@ def _image_to_base64(image: Image.Image) -> str:
         image = image.convert("RGB")
     image.save(buffered, format="JPEG", quality=90)
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+
+def _usage_cost_usd(data: dict) -> float | None:
+    """Cost of a 200 ``generateContent`` response from its ``usageMetadata``.
+
+    ``None`` when the response does not report a prompt token count: the call
+    ran and was billed, and a missing figure is unknown spend, not zero spend.
+    """
+    usage = data.get("usageMetadata") if isinstance(data, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    prompt = usage.get("promptTokenCount")
+    if not isinstance(prompt, int) or isinstance(prompt, bool):
+        return None
+    billed_as_output = 0
+    for key in ("candidatesTokenCount", "thoughtsTokenCount"):
+        value = usage.get(key, 0)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return None
+        billed_as_output += value
+    return gemini_usage_cost_usd(prompt, billed_as_output)
 
 
 def _extract_text(data: dict) -> str:

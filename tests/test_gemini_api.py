@@ -14,6 +14,7 @@ from PIL import Image
 from socr.core.config import DEFAULT_GEMINI_MODEL
 from socr.engines.gemini_api import (
     _CAPTION_MARKER,
+    BudgetedPaidFigureEngine,
     GeminiAPIConfig,
     GeminiAPIEngine,
     LocalFirstFigureEngine,
@@ -356,8 +357,9 @@ class TestGetVisionEngineFallback:
                 with patch.dict("os.environ", {"GEMINI_API_KEY": "test-key"}, clear=False):
                     result = orch._get_vision_engine()
 
-        assert result is not None
-        assert isinstance(result, GeminiAPIEngine)
+        # #1405: the paid engine is only ever handed out behind its budget gate.
+        assert isinstance(result, BudgetedPaidFigureEngine)
+        assert isinstance(result._inner, GeminiAPIEngine)
 
     def test_returns_local_first_engine_when_ollama_available(self):
         """When Ollama is available, _get_vision_engine returns LocalFirstFigureEngine."""
@@ -381,8 +383,8 @@ class TestGetVisionEngineFallback:
                     result = orch._get_vision_engine()
 
         assert isinstance(result, LocalFirstFigureEngine)
-        assert result._gemini is not None
-        assert isinstance(result._gemini, GeminiAPIEngine)
+        assert isinstance(result._gemini, BudgetedPaidFigureEngine)
+        assert isinstance(result._gemini._inner, GeminiAPIEngine)
 
     def test_returns_none_when_both_unavailable(self):
         """Returns None when Ollama is down and no API key is set."""

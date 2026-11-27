@@ -22,6 +22,12 @@ from socr.engines._figure_prompt import (
 from socr.engines.base import BaseHTTPEngine
 
 
+#: Bound on the ``/models`` probe of ``VLLMEngine.serves_model``: the same five
+#: seconds the vLLM judge's availability probe allows (``judge/vllm_judge.py``),
+#: so the two probes of one server agree on what "not answering" means.
+MODELS_PROBE_TIMEOUT_SEC: float = 5.0
+
+
 @dataclass
 class VLLMConfig:
     """Configuration for vLLM vision engine."""
@@ -88,6 +94,34 @@ class VLLMEngine(BaseHTTPEngine):
             return False
         except Exception:
             return False
+
+    def serves_model(self) -> bool:
+        """True if the server is up and serves EXACTLY ``config.model`` (#1405).
+
+        ``initialize`` accepts a server that lists any model at all, which is
+        right for the ``--hpc`` pipeline that starts the server itself and wrong
+        for a caption tier pointed at somebody else's server: a name mismatch
+        would pass the probe and then 404 on every figure, sending each one to
+        the paid fallback. Matched on the full id, as the vLLM judge's probe is.
+        """
+        if not self.config.model:
+            return False
+        headers = {"Authorization": f"Bearer {self.config.api_key}"} if self.config.api_key else {}
+        try:
+            resp = httpx.get(
+                f"{self.config.base_url.rstrip('/')}/models",
+                headers=headers,
+                timeout=MODELS_PROBE_TIMEOUT_SEC,
+            )
+            if resp.status_code != 200:
+                return False
+            served = {m.get("id", "") for m in resp.json().get("data", [])}
+        except (httpx.HTTPError, ValueError, AttributeError):
+            return False
+        if self.config.model not in served:
+            return False
+        self._initialized = True
+        return True
 
     def process_image(self, image: Image.Image, page_num: int = 1) -> PageOutput:
         """Not supported — vLLM engine is for figure description only."""

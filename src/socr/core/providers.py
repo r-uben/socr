@@ -116,6 +116,23 @@ GEMINI_COST_PER_PAGE_USD = (
     + _GEMINI_MEASURED_OUTPUT_TOKENS * _GEMINI_USD_PER_M_OUTPUT_TOKENS
 ) / (1_000_000 * _GEMINI_MEASURED_PAGES)
 
+
+def gemini_usage_cost_usd(input_tokens: int, output_tokens: int) -> float:
+    """Price of ONE Gemini call from the token usage its response reported (#1405).
+
+    ``GEMINI_COST_PER_PAGE_USD`` is a mean over whole OCR pages and says nothing
+    about a call of another shape (a figure caption is one crop and a short
+    answer). A call that reports its own usage is metered from that usage at the
+    same two rates the page price is built from, so both stay in step when the
+    rates are re-measured. ``output_tokens`` is everything billed at the output
+    rate: the answer and any thinking tokens.
+    """
+    return (
+        max(0, int(input_tokens)) * _GEMINI_USD_PER_M_INPUT_TOKENS
+        + max(0, int(output_tokens)) * _GEMINI_USD_PER_M_OUTPUT_TOKENS
+    ) / 1_000_000
+
+
 PROFILE_GEMINI = ProviderProfile(
     engine=EngineType.GEMINI,
     tier=TIER_CLOUD,
