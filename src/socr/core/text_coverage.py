@@ -21,6 +21,7 @@ from __future__ import annotations
 import collections
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -145,6 +146,11 @@ class CoveragePage:
     #: lets the raster be: every glyph-sized ink component of the rendered page lies under a
     #: character box of the layer. False when the page has no invisible layer.
     hidden_layer_ink_accounted: bool = False
+    #: #1402 (rule B): the looser fact for the same kind of page. The scan's dark ink outside the
+    #: layer's character boxes holds nothing of letter height, no dash, and nothing beside a
+    #: number, except a dash that a page number alone on its row has in its own text
+    #: (:func:`scan_residual_ink_holds_no_character`). False when the page has no invisible layer.
+    hidden_layer_ink_below_letter: bool = False
 
     @property
     def kept(self) -> list[CoverageRegion]:
@@ -967,6 +973,119 @@ def page_ink_is_fully_accounted(page, mat, dark, light, layer, *, raster_is_scan
         return False
 
 
+#: #1402: the dashes a scan flanks a page number with (hyphen-minus, en dash, em dash).
+_PAGE_NUMBER_DASHES = "-–—"
+#: A layer word that is a page number as a scan prints it: digits, with or without those dashes
+#: (``35``, ``-35``, ``-35-``).
+_PAGE_NUMBER_WORD_RE = re.compile(rf"^[{_PAGE_NUMBER_DASHES}]*\d+[{_PAGE_NUMBER_DASHES}]*$")
+_HAS_DIGIT_RE = re.compile(r"\d")
+
+
+def _layer_words_px(page, mat) -> list[tuple[int, int, int, int, str]]:
+    """The layer's words (visible and invisible) as pixel boxes with their text."""
+    return [(*_to_pix(w[:4], page, mat), str(w[4])) for w in page.get_text("words")]
+
+
+def _beside(cx: int, cy: int, w: int, h: int, word, reach: float) -> bool:
+    """Whether a component shares a row with *word* (their boxes overlap vertically) and lies
+    within *reach* pixels of it horizontally."""
+    x0, y0, x1, y1 = word[:4]
+    return cy < y1 and cy + h > y0 and cx < x1 + reach and cx + w > x0 - reach
+
+
+def _is_dash_the_page_number_reads(cx: int, cy: int, w: int, h: int, word, reach: float) -> bool:
+    """Whether a component is a dash the page-number *word* already has in its TEXT, on that
+    side: beside the word, in its right half when the text ends with a dash, in its left half
+    when the text starts with one. The layer read the dash; only its box misses the ink. A dash
+    the text does not have is never this: ink ``-5`` over a layer ``5`` is a lost sign."""
+    if not _beside(cx, cy, w, h, word, reach):
+        return False
+    text = word[4]
+    middle = (word[0] + word[2]) / 2
+    centre = cx + w / 2
+    return (text[-1] in _PAGE_NUMBER_DASHES and centre > middle) or (
+        text[0] in _PAGE_NUMBER_DASHES and centre < middle
+    )
+
+
+def scan_residual_ink_holds_no_character(page, mat, dark, layer) -> bool:
+    """#1402 (rule B): whether a scan's dark ink outside its layer could hold a character.
+
+    The looser sibling of :func:`page_ink_is_fully_accounted` for a scan. That check fails on
+    ANY residual component of glyph width, which on a 1990s scan is a speck or the closing dash
+    of a page number on 95% of pages (27 of 519 pilot pages passed). This one fails only on ink
+    that could be a character the layer does not have. Fail closed: any doubt is ``False``.
+
+    A residual dark component (same residual split, same width floor ``GLYPH_W_P02_PX``, same
+    horizontal-rule excuse as the strict check) is excused in two cases only.
+
+    * A SPECK: lower than a letter of this page in both directions, and not beside a layer word
+      that holds a digit (one median glyph height of reach, the page's own em). Beside a number
+      it may be an unread decimal point or a short minus sign, so it fails.
+    * A PAGE NUMBER'S OWN DASH: lower than a letter, beside a page number that stands alone on
+      its row (:data:`_PAGE_NUMBER_WORD_RE`, no other kind of layer word on the row), on a side
+      where the layer's text already has a dash (:func:`_is_dash_the_page_number_reads`). The
+      measured case: layer text ``-3-`` whose boxes do not reach the closing dash.
+
+    Everything else fails: ink of letter height or more in either direction (a dropped page
+    label ``V-3``, a letter, a digit) and a dash anywhere else, a dash before a lone number
+    whose text has none included.
+
+    The page's letter height is its median covered-glyph height scaled by the corpus ratio of
+    the letter valley to the median glyph (``LETTER_H_PX / GLYPH_H_P50_PX``); the page median is
+    used under the same condition as the region finder (``H_MED_MIN_COVERED``).
+
+    Both excuses are narrower than the rule as first measured (#1402), which excused every
+    component under letter height and any dash beside a lone page number. On the 515 pilot pages
+    the narrowing changes no outcome (74 pass either way).
+
+    Drawings are held to the strict check's rule: anything but a horizontal rule fails.
+
+    Not checked (measured limits, #1402): the light-on-dark polarity, and ink UNDER a layer box
+    (#1383)."""
+    try:
+        for d in page.get_drawings():
+            box = _drawing_extent(d)
+            if box is None:
+                continue
+            x0, y0, x1, y1 = _to_pix(box, page, mat)
+            if not _is_horizontal_rule_px(x1 - x0, y1 - y0):
+                return False
+        _labels, stats, resid_idx, covered_idx, _glyph = _residual_components(dark, layer)
+        h_med = (
+            float(np.median(stats[covered_idx, 3]))
+            if len(covered_idx) >= H_MED_MIN_COVERED
+            else GLYPH_H_P50_PX
+        )
+        letter_h = h_med * LETTER_H_PX / GLYPH_H_P50_PX
+        words = _layer_words_px(page, mat)
+        numbers = [a for a in words if _HAS_DIGIT_RE.search(a[4])]
+        lone_page_numbers = [
+            a
+            for a in words
+            if _PAGE_NUMBER_WORD_RE.match(a[4])
+            and not any(
+                b is not a and b[1] < a[3] and b[3] > a[1] and not _PAGE_NUMBER_WORD_RE.match(b[4])
+                for b in words
+            )
+        ]
+        for i in resid_idx:
+            cx, cy, w, h = (int(stats[i, k]) for k in range(4))
+            if max(w, h) < GLYPH_W_P02_PX or _is_horizontal_rule_px(w, h):
+                continue
+            if h < letter_h and any(
+                _is_dash_the_page_number_reads(cx, cy, w, h, a, h_med) for a in lone_page_numbers
+            ):
+                continue
+            if max(w, h) < letter_h and not any(_beside(cx, cy, w, h, a, h_med) for a in numbers):
+                continue
+            return False
+        return True
+    except Exception as exc:
+        logger.debug("text coverage: scan residual check failed closed (%s)", exc)
+        return False
+
+
 def analyze_page(page, *, group: bool = True) -> CoveragePage:
     """Ink-vs-layer check on one page. Never raises; failures are ``unknown``.
 
@@ -996,21 +1115,19 @@ def analyze_page(page, *, group: bool = True) -> CoveragePage:
             # about what belongs together, and its crop is the whole figure.
             regions = merge_regions_by_figure(page, mat, regions)
             regions = merge_regions_by_container(page, mat, regions, native_px)
+        whole_layer = _paint(dark.shape, [*vis, *inv], page, mat) if inv else None
         return CoveragePage(
             verdict=VERDICT_FLAGGED if regions else VERDICT_PASSED,
             regions=regions,
             seconds=round(time.perf_counter() - t0, 3),
             ink_fully_accounted=not regions
             and page_ink_is_fully_accounted(page, mat, dark, light, layer),
-            hidden_layer_ink_accounted=bool(inv)
+            hidden_layer_ink_accounted=whole_layer is not None
             and page_ink_is_fully_accounted(
-                page,
-                mat,
-                dark,
-                light,
-                _paint(dark.shape, [*vis, *inv], page, mat),
-                raster_is_scan=True,
+                page, mat, dark, light, whole_layer, raster_is_scan=True
             ),
+            hidden_layer_ink_below_letter=whole_layer is not None
+            and scan_residual_ink_holds_no_character(page, mat, dark, whole_layer),
         )
     except Exception as exc:
         logger.debug("text coverage: page failed closed (%s)", exc)

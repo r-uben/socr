@@ -162,7 +162,14 @@ def test_refinalize_needs_the_runs_ink_fact(tmp_path: Path, monkeypatch) -> None
 
     sidecar, pa = _confirmed(tmp_path, monkeypatch)
     assert refinalize_page(sidecar, pa) is None
-    no_ink = {k: v for k, v in sidecar.items() if k != "text_hidden_layer_ink_accounted"}
+    # #1402: either ink fact satisfies completeness, so each one alone keeps the page confirmed
+    # and the tool turns the page back into a warning only when it restores neither.
+    strict, below_letter = "text_hidden_layer_ink_accounted", "text_hidden_layer_ink_below_letter"
+    assert sidecar.get(strict) is True and sidecar.get(below_letter) is True
+    for kept in (strict, below_letter):
+        one = {k: v for k, v in sidecar.items() if k not in {strict, below_letter} - {kept}}
+        assert refinalize_page(one, pa) is None, kept
+    no_ink = {k: v for k, v in sidecar.items() if k not in (strict, below_letter)}
     assert refinalize_page(no_ink, pa) is not None
 
 

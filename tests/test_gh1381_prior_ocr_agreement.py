@@ -127,7 +127,8 @@ def test_only_layout_whitespace_is_normalised() -> None:
         ("inflation", "deflation"),
         ("economy.", "economy"),
         ("economy.", "economy,"),
-        ("economy.", "**economy**."),
+        # #1402 (rule B): a Markdown mark in the reading no longer decides; the case that stood
+        # here, ``**economy**.``, is in ``test_gh1402_prior_ocr_rule_b.py`` as an accepted one.
     ],
 )
 def test_any_character_difference_keeps_the_page_warned(layer_form: str, reading_form: str) -> None:
@@ -168,14 +169,19 @@ def test_a_failure_marker_does_not_agree_with_a_layer() -> None:
     assert not _agrees("[page 1 failed: unreadable]")
 
 
-def test_hyphenated_line_breaks_stay_unknown() -> None:
+def test_the_exact_comparison_refuses_hyphenated_line_breaks() -> None:
+    """#1381's exact comparison refuses any line-break hyphen, identical on both sides included.
+    #1402 (rule B) compares such a word in either form, so the PAGE now agrees; the cases are in
+    ``test_gh1402_prior_ocr_rule_b.py``."""
+    from socr.core.verdict import _reading_matches_layer_exactly
+
     layer = LAYER.replace("conditions in", "condi-\ntions in")
+    joined = layer.replace("condi-\ntions", "conditions")
     # both sides carry the identical break: the tokens are equal, only the guard refuses it
-    assert not _agrees(layer, _page(layer))
-    assert _agrees(
-        layer.replace("condi-\ntions", "conditions"),
-        _page(layer.replace("condi-\ntions", "conditions")),
-    )
+    assert not _reading_matches_layer_exactly(layer, layer)
+    assert _reading_matches_layer_exactly(joined, joined)
+    assert _agrees(layer, _page(layer))
+    assert _agrees(joined, _page(joined))
 
 
 # --- nothing ships that was not compared ----------------------------------------------
