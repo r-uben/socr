@@ -110,10 +110,22 @@ def _state(pdf: Path) -> tuple[DocumentState, PageOutput]:
     return state, out
 
 
-def _run(pdf: Path, rungs: list) -> DocumentState:
+def _run(pdf: Path, rungs: list, *, abstain_binding: bool = False) -> DocumentState:
+    from unittest.mock import patch
+
+    from socr.tables.binding import BindingEvidence
+
     pipeline = _pipeline()
     state, out = _state(pdf)
-    pipeline._run_table_judge_gate(state, 1, state.pages[1], out, rungs)
+    if abstain_binding:
+        with patch.object(
+            pipeline,
+            "_binding_evidence_for_witness",
+            return_value=(None, BindingEvidence.ABSTAIN),
+        ):
+            pipeline._run_table_judge_gate(state, 1, state.pages[1], out, rungs)
+    else:
+        pipeline._run_table_judge_gate(state, 1, state.pages[1], out, rungs)
     return state
 
 
@@ -149,7 +161,9 @@ def test_a_located_witness_with_no_rungs_is_not_retryable(tmp_path: Path) -> Non
     outage" and kept the retryable wording; GH-581 found that was the same
     empty promise #560 itself was filed against.
     """
-    state = _run(_ruled_pdf(tmp_path / "r"), [])
+    # Binding abstains (e.g. scan / inadmissible layer) so geometry cannot clear
+    # the table without rungs and the empty-ladder terminal is exercised.
+    state = _run(_ruled_pdf(tmp_path / "r"), [], abstain_binding=True)
 
     event = _unverified_event(state)
     assert event.data["rung_trail"] == [], "no rung ran; this is the empty-ladder case"
@@ -179,7 +193,7 @@ def test_the_document_note_separates_the_two(tmp_path: Path) -> None:
 
     # GH-581: an empty-ladder witnessed terminal never latches either, so the
     # note must name it "not retryable" -- and still name it, not drop it.
-    unlatched = _run(_ruled_pdf(tmp_path / "nr"), [])
+    unlatched = _run(_ruled_pdf(tmp_path / "nr"), [], abstain_binding=True)
     unlatched_note = pipeline._table_judge_ladder_note(unlatched)
     assert unlatched_note is not None
     assert "retryable on resume" not in unlatched_note, (
