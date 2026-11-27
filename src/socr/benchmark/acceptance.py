@@ -192,6 +192,7 @@ ENGINE_NATIVE = "native"
 ENGINE_NATIVE_EQUATIONS = "native+equations"
 ENGINE_CHART = "chart_asset"
 ENGINE_BLANK = "blank"
+ENGINE_TWO_READERS = "two-readers"  # ``tables.two_readers.ENGINE``
 
 EVENT_BLANK_PAGE = "blank_page"
 EVENT_EQUATION_ATTACHED = "equation_region_reading_attached"
@@ -441,7 +442,39 @@ def rule_blank(page: Page) -> list[str]:
     return out
 
 
+def rule_two_readers(page: Page) -> list[str]:
+    """#1409: a scanned page shipped because two independent readings of its image agree
+    (``socr-refinalize-two-readers``). CHECKED only on the tool's own record of it: the
+    sidecar names the rule and two DIFFERENT reader models, and the pass trace holds the
+    rule's PASS computed on the very text that ships. The page's earlier-OCR flag is not
+    asked: this agreement is the independent comparison that flag waits for, and the layer
+    is not what ships."""
+    from socr.core.verdict import page_text_digest
+    from socr.tables.two_readers import RULE
+
+    record = page.sidecar.get(RULE)
+    readers = (record.get("readers") or {}) if isinstance(record, dict) else {}
+    models = [(readers.get(side) or {}).get("reader_model") for side in ("a", "b")]
+    text = page.wo.get("text")
+    confirmed = (
+        isinstance(record, dict)
+        and record.get("rule") == RULE
+        and all(models)
+        and models[0] != models[1]
+        and isinstance(text, str)
+        and any(
+            isinstance(e, dict)
+            and e.get("check") == RULE
+            and e.get("result") == "PASS"
+            and e.get("text_sha") == page_text_digest(text)
+            for e in page.sidecar.get("checks") or []
+        )
+    )
+    return [] if confirmed else [SUCCESS_UNCHECKED]
+
+
 LANE_RULES: dict[str, Callable[[Page], list[str]]] = {
+    ENGINE_TWO_READERS: rule_two_readers,
     ENGINE_QWEN: rule_qwen,
     ENGINE_NATIVE: rule_native,
     ENGINE_NATIVE_EQUATIONS: rule_native_equations,

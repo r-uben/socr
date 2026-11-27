@@ -201,6 +201,12 @@ def _rows_to_markdown(parsed: list[list[tuple[str, int, int]]]) -> str:
     return "\n".join(lines)
 
 
+def html_table_grid(table_html: str) -> list[list[str]]:
+    """One HTML table as the rectangular grid of cell strings its markdown is built from
+    (``colspan``/``rowspan`` expanded): for a caller that compares two tables as shipped."""
+    return _grid_from_rows(_parse_rows(table_html))
+
+
 def html_table_to_markdown(table_html: str) -> str:
     """One HTML table -> a GitHub-markdown table (or "" if nothing parses)."""
     return _rows_to_markdown(_parse_rows(table_html))

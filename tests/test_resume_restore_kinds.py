@@ -163,6 +163,9 @@ EXPECTED_RESUME_KINDS = frozenset(
         # restored, so losing the event would lose only the audit-log twin. A deliberate
         # addition, like the ones above.
         "source_evidence_table_corroborated",
+        # #1409 step 3: recorded on a lifted scanned page by socr-refinalize-two-readers;
+        # replayed so resuming another page of the same document keeps the agreement event.
+        "two_reader_agreement",
     }
 )
 
@@ -195,4 +198,5 @@ def test_the_hard_coded_set_has_the_expected_size() -> None:
     # 77 with #1361's paid_reading_after_table_withhold.
     # 78 with #1355's source_evidence_table_corroborated.
     # 80 with #1385's two uncaptioned-chart kinds.
-    assert len(EXPECTED_RESUME_KINDS) == 80
+    # 81 with #1409 step 3's two_reader_agreement.
+    assert len(EXPECTED_RESUME_KINDS) == 81

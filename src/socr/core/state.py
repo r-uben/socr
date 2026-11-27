@@ -730,6 +730,10 @@ class PageState:
     #: sidecar written before this field existed -- and the gate then falls
     #: back to asking about any rung.
     table_judge_retry_rungs: list[str] = field(default_factory=list)
+    #: #1409 step 3: persisted two-reader agreement provenance written by
+    #: ``socr-refinalize-two-readers``. Restored and re-flushed verbatim so resuming
+    #: another page of the same document does not wipe the record ``rule_two_readers`` checks.
+    two_reader_agreement: dict | None = None
     #: VI-B1: wall-clock seconds for this page's agentic loop.
     #: Exclusive keys: route, extract, tables, ladder, adjudication, figures,
     #: equations, flush. ``total`` is the independent page wall, not the sum

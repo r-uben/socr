@@ -681,6 +681,10 @@ _RESUME_REPLAYED: dict[str, str] = {
         "#1100: emitted by the page loop's blank-page step, which a terminal resumed "
         "page skips; the document note and CLI line read this event"
     ),
+    "two_reader_agreement": (
+        "#1409 step 3: recorded by socr-refinalize-two-readers when two independent "
+        "readings agreed on a scanned page; replayed so resume keeps the agreement event"
+    ),
 }
 
 
@@ -18819,6 +18823,12 @@ class UnifiedPipeline:
             if _words_record is not None:
                 payload["text_layer_words"] = _words_record
 
+        # #1409 step 3: preserve two-reader agreement provenance on lifted scanned pages
+        # across resume re-flushes so ``acceptance.rule_two_readers`` stays satisfied.
+        _two_reader = getattr(ps, "two_reader_agreement", None) if ps else None
+        if isinstance(_two_reader, dict) and _two_reader:
+            payload["two_reader_agreement"] = dict(_two_reader)
+
         # #1269: sparse, only on a page whose chart floor declined (key absent otherwise).
         _abstention = getattr(ps, "chart_floor_abstention", None) if ps else None
         if isinstance(_abstention, dict) and _abstention:
@@ -20214,6 +20224,8 @@ class UnifiedPipeline:
         ps.persisted_text_layer_words = (
             dict(_words_record) if isinstance(_words_record, dict) else None
         )
+        _two_reader = meta.get("two_reader_agreement")
+        ps.two_reader_agreement = dict(_two_reader) if isinstance(_two_reader, dict) else None
         # #1251: the page-judge calls of the original run, so the writer leaves the same file.
         if meta.get("judge_calls") is not None:
             (
