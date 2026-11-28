@@ -8294,6 +8294,7 @@ class UnifiedPipeline:
         import concurrent.futures
 
         from socr.core.audit_log import AuditEvent
+        from socr.pipeline.agentic import _provider_call_never_ran
         from socr.tables.escalation_decision import decide_escalation
 
         def _record_attempt_cost() -> None:
@@ -8325,6 +8326,36 @@ class UnifiedPipeline:
                         state, page_num, page, ps, bo
                     )
                 if not needs_escalation:
+                    return False, bo
+
+                # #1394 / cost audit: never double-call a paid engine on a page
+                # where ``route_page`` already ran a real paid call (measured
+                # 0/61 yield after Gemini won). Keep the incumbent, record
+                # ``table_escalation_refused`` (in ``TABLE_DISTRUST_KINDS``) and
+                # mark escalation not received so the suspect table stays
+                # untrusted in ``tables_trust.json`` rather than silently
+                # going trusted. Skipped $0 paid stubs (judge breaker open,
+                # paid escalation blocked, quota non-run) do NOT count as a
+                # paid call that ran, so the table lane still fires for them.
+                if is_paid_profile(profile) and self._page_had_real_paid_attempt(ps):
+                    logger.info(
+                        "p%d: skipping redundant paid table escalation (%s); "
+                        "page already had a paid reading",
+                        page_num,
+                        profile.engine.value,
+                    )
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="table_escalation_refused",
+                            engine=profile.engine.value,
+                            detail=(
+                                "paid reading already taken on this page; "
+                                "skipping redundant paid table escalation"
+                            ),
+                        )
+                    )
+                    self._mark_escalation_not_received(ps)
                     return False, bo
 
                 # GH-851: evidence of a wedge, not of one slow page. An earlier
@@ -8472,7 +8503,14 @@ class UnifiedPipeline:
                             ),
                         )
                     )
-                    _record_attempt_cost()
+                    if out is None or (
+                        not _provider_call_never_ran(out)
+                        and not (
+                            out.engine == "native"
+                            and out.failure_mode == FailureMode.MODEL_UNAVAILABLE
+                        )
+                    ):
+                        _record_attempt_cost()
                     return False, bo
                 if out.status is not PageStatus.SUCCESS or not (out.text or "").strip():
                     state.events.append(
@@ -8483,7 +8521,11 @@ class UnifiedPipeline:
                             detail=f"candidate status={out.status}, no usable text",
                         )
                     )
-                    _record_attempt_cost()
+                    # A circuit-blocked or cap-blocked non-run (PageStatus.ERROR +
+                    # MODEL_UNAVAILABLE + empty text) never sent an API call; do not
+                    # record phantom page_cost_usd.
+                    if not _provider_call_never_ran(out):
+                        _record_attempt_cost()
                     return False, bo
 
                 # #688: the escalation candidate crosses the same boundary
@@ -8575,6 +8617,44 @@ class UnifiedPipeline:
         except Exception as exc:  # a failed escalation must never lose a page
             logger.warning("table escalation failed on p%d (%s); keeping text", page_num, exc)
             return False, bo
+
+    def _page_had_real_paid_attempt(self, ps) -> bool:
+        """Whether a paid reader ACTUALLY RAN (or billed) on this page.
+
+        Narrower than :meth:`_page_had_paid_attempt`: ignores $0 skip stubs from
+        ``route_page`` (judge circuit open, budget exceeded, paid escalation
+        blocked) and ``_provider_call_never_ran`` / native ``MODEL_UNAVAILABLE``
+        non-runs, so pages where no paid call ever executed still get their
+        table-escalation lane. Unknown spend (``None``) still fails closed.
+        """
+        from socr.pipeline.agentic import _provider_call_never_ran
+
+        cost = getattr(ps, "page_cost_usd", 0.0)
+        if cost is None or cost > 0.0:
+            return True
+        for att in ps.attempts:
+            prof = profile_by_id(getattr(att, "provider_id", "") or "")
+            if prof is None or not is_paid_profile(prof):
+                continue
+            if _provider_call_never_ran(att):
+                continue
+            if att.engine == "native" and att.failure_mode == FailureMode.MODEL_UNAVAILABLE:
+                continue
+            # route_page skip stubs are ERROR + FailureMode.NONE + empty text + empty engine.
+            if (
+                att.status == PageStatus.ERROR
+                and att.failure_mode == FailureMode.NONE
+                and not (att.text or "").strip()
+                and not (att.engine or "").strip()
+            ):
+                continue
+            if (
+                getattr(att, "cost_usd", 0.0) > 0.0
+                or att.status == PageStatus.SUCCESS
+                or att.engine == prof.engine.value
+            ):
+                return True
+        return False
 
     def _page_had_paid_attempt(self, ps) -> bool:
         """#1361: whether a paid reader was already tried (or billed) for this page.
@@ -17126,7 +17206,7 @@ class UnifiedPipeline:
     # cloud entry at all; a cloud judge is only ever reached via an explicit
     # ``--judge-model`` override (still subject to the strict_local /
     # zero-cap-pinned policy check below).
-    _JUDGE_MODEL_CANDIDATES = [JUDGE_MODEL_DEFAULT, "minicpm-v:8b", "qwen3-vl:8b"]
+    _JUDGE_MODEL_CANDIDATES = [JUDGE_MODEL_DEFAULT, "minicpm-v:8b"]
 
     @staticmethod
     def _probe_judge_candidate(model: str) -> tuple[bool, str]:

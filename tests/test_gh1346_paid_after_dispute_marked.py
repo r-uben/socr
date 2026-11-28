@@ -70,15 +70,16 @@ class _Reader:
 
 
 class _LadderJudge:
-    """Rejects the free rung with *free_reason*, accepts the paid one."""
+    """Rejects the free rung with *free_reason*, accepts the winning rung."""
 
-    def __init__(self, free_reason: str) -> None:
+    def __init__(self, free_reason: str, *, accept_engine: str = "gemini") -> None:
         self._free_reason = free_reason
+        self._accept_engine = accept_engine
 
     def assess(self, output, provider):
         from socr.pipeline.agentic import AcceptDecision
 
-        if provider.engine.value == "gemini":
+        if provider.engine.value == self._accept_engine:
             return AcceptDecision(accept=True, reason="faithful")
         return AcceptDecision(accept=False, reason=self._free_reason)
 
@@ -94,7 +95,7 @@ def _run(
     lane_forced: bool = False,
 ):
     from socr.core.config import EngineType, PipelineConfig
-    from socr.core.providers import PROFILE_GEMINI, PROFILE_QWEN_LOCAL
+    from socr.core.providers import PROFILE_GEMINI, PROFILE_MARKER, PROFILE_QWEN_LOCAL
     from socr.pipeline import orchestrator as orch
     from socr.pipeline.orchestrator import UnifiedPipeline
 
@@ -116,13 +117,18 @@ def _run(
                     accepted=True, gate="exactness", reason="forced"
                 ),
             )
+        enabled = (
+            [EngineType.QWEN, EngineType.MARKER, EngineType.GEMINI]
+            if lane_forced
+            else [EngineType.QWEN, EngineType.GEMINI]
+        )
         pipe = UnifiedPipeline(
             PipelineConfig(
                 agentic=True,
                 quiet=True,
                 primary_engine=EngineType.QWEN,
                 local_engine=EngineType.QWEN,
-                enabled_engines=[EngineType.QWEN, EngineType.GEMINI],
+                enabled_engines=enabled,
                 native_first=True,
                 write_manifest=True,
                 reprocess=reprocess,
@@ -133,8 +139,18 @@ def _run(
                 describe_figure_crops=False,
             )
         )
-        pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL, PROFILE_GEMINI]
-        pipe._build_page_judge = lambda state: _LadderJudge(free_reason)
+        if lane_forced:
+            # Keep route_page on free rungs (QWEN rejected -> MARKER accepted) so
+            # no paid call runs before _escalate_table_page promotes Gemini once.
+            pipe._available_engines_for_agentic = lambda: [
+                PROFILE_QWEN_LOCAL,
+                PROFILE_MARKER,
+                PROFILE_GEMINI,
+            ]
+            pipe._build_page_judge = lambda state: _LadderJudge(free_reason, accept_engine="marker")
+        else:
+            pipe._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL, PROFILE_GEMINI]
+            pipe._build_page_judge = lambda state: _LadderJudge(free_reason)
         pipe._resolve_crop_vlm_model = lambda: None
         pipe._resolve_judge_model = lambda *a, **k: ""
         return pipe.process(pdf, output_dir=out_dir)
