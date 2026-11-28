@@ -155,14 +155,15 @@ def test_the_source_digest_is_what_makes_dropping_the_key_free():
     root = pathlib.Path(socr.__file__).resolve().parent
     expected = hashlib.sha256()
     for path in sorted(root.rglob("*.py")):
-        if "__pycache__" in path.parts:
+        rel = path.relative_to(root)
+        if orchestrator._is_source_digest_excluded(rel):
             continue
-        expected.update(str(path.relative_to(root)).encode("utf-8"))
+        expected.update(str(rel).encode("utf-8"))
         expected.update(b"\x00")
         expected.update(path.read_bytes())
         expected.update(b"\x00")
 
     assert orchestrator._socr_source_digest() == expected.hexdigest(), (
-        "the run fingerprint must depend on socr's own source bytes; if it does "
+        "the run fingerprint must depend on socr's reading-path source bytes; if it does "
         "not, the argument for deleting the audit key needs re-examining"
     )

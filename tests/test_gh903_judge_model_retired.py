@@ -271,7 +271,7 @@ def test_retired_default_falls_through_to_the_next_candidate(monkeypatch):
 def test_every_candidates_reason_is_recorded_not_just_the_last(monkeypatch):
     from socr.pipeline.orchestrator import UnifiedPipeline as _UP
 
-    status = {_UP.JUDGE_MODEL_DEFAULT: "TIMEOUT", "minicpm-v:8b": 404, "qwen3-vl:8b": 410}
+    status = {_UP.JUDGE_MODEL_DEFAULT: "TIMEOUT", "minicpm-v:8b": 404}
     _stub_generate_with_status(monkeypatch, status)
 
     pipe = _pipeline()
@@ -281,7 +281,6 @@ def test_every_candidates_reason_is_recorded_not_just_the_last(monkeypatch):
     reason = pipe._judge_unavailable_reason
     assert _UP.JUDGE_MODEL_DEFAULT in reason and "timed out" in reason
     assert "minicpm-v:8b" in reason and "404" in reason
-    assert "qwen3-vl:8b" in reason and "410" in reason
 
 
 def test_degradation_audit_event_carries_every_candidates_reason(monkeypatch):
@@ -289,7 +288,7 @@ def test_degradation_audit_event_carries_every_candidates_reason(monkeypatch):
     from socr.core.state import DocumentState
     from socr.pipeline.orchestrator import UnifiedPipeline as _UP
 
-    status = {_UP.JUDGE_MODEL_DEFAULT: "TIMEOUT", "minicpm-v:8b": 404, "qwen3-vl:8b": 410}
+    status = {_UP.JUDGE_MODEL_DEFAULT: "TIMEOUT", "minicpm-v:8b": 404}
     _stub_generate_with_status(monkeypatch, status)
 
     pipe = _pipeline(quiet=True)
@@ -308,7 +307,6 @@ def test_degradation_audit_event_carries_every_candidates_reason(monkeypatch):
     reason = events[0].data["unavailable_reason"]
     assert _UP.JUDGE_MODEL_DEFAULT in reason and "timed out" in reason
     assert "minicpm-v:8b" in reason and "404" in reason
-    assert "qwen3-vl:8b" in reason and "410" in reason
 
 
 # ---------------------------------------------------------------------------

@@ -1172,8 +1172,45 @@ def _socr_version() -> str:
     return str(getattr(socr, "__version__", ""))
 
 
+#: Non-reading top-level packages excluded from ``_socr_source_digest``.
+#: Editing benchmarks, developer tooling, UI renderers, or offline refinalizers
+#: cannot alter how a page is OCR'd or verified, so edits there must not
+#: invalidate cached page OCR readings across a corpus.
+_SOURCE_DIGEST_EXCLUDED_PACKAGES: frozenset[str] = frozenset(
+    {"benchmark", "devtools", "refinalize", "ui"}
+)
+
+
+def _is_source_digest_excluded(rel_path: Path) -> bool:
+    """True when *rel_path* (relative to the ``socr`` package root) is non-reading code."""
+    parts = rel_path.parts
+    if "__pycache__" in parts:
+        return True
+    if parts and parts[0] in _SOURCE_DIGEST_EXCLUDED_PACKAGES:
+        return True
+    if len(parts) >= 2 and parts[0] == "pipeline" and rel_path.name.startswith("refinalize_"):
+        return True
+    return False
+
+
+def _compute_source_digest(root: Path) -> str:
+    """Compute the deterministic SHA-256 digest of reading-path ``.py`` files under *root*."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root)
+        if _is_source_digest_excluded(rel):
+            continue
+        digest.update(str(rel).encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update(path.read_bytes())
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
 def _socr_source_digest() -> str:
-    """SHA-256 over every shipped ``socr`` ``.py`` file, computed once per process.
+    """SHA-256 over every reading-path ``socr`` ``.py`` file, computed once per process.
 
     GH-214. ``_run_fingerprint`` records the run *configuration*, never socr's own
     code, so fixing an extraction bug without touching config leaves the fingerprint
@@ -1181,12 +1218,11 @@ def _socr_source_digest() -> str:
     code never reaches them. The document then reports SUCCESS carrying output the
     fix was supposed to replace.
 
-    Hashing the whole package rather than a curated module list is deliberate. A
-    curated list has to be maintained, and a module someone forgets to register
-    fails DANGEROUS — it silently reuses stale output, which is the very bug this
-    closes. Hashing everything can only fail SAFE: an output-neutral edit (a
-    comment, a docstring) costs one needless reprocess. Re-OCR is cheap; a stale
-    number in a citation corpus is not.
+    Non-reading packages (``benchmark/``, ``devtools/``, ``refinalize/``, ``ui/``,
+    and offline ``pipeline/refinalize_*.py`` scripts) are excluded so refactoring
+    analysis harnesses or UI code does not invalidate cached page OCR readings;
+    every reading, verification, judging, routing, and assembly module stays
+    hashed automatically (fail-safe: any new runtime package is included by default).
 
     ``normalizer_version`` / ``assembly_version`` (issue #38) are the narrow,
     hand-maintained form of this idea and stay where they are — they cover two
@@ -1201,22 +1237,13 @@ def _socr_source_digest() -> str:
     if _SOURCE_DIGEST_CACHE is not None:
         return _SOURCE_DIGEST_CACHE
 
-    import hashlib
     from pathlib import Path as _Path
 
     import socr
 
     root = _Path(socr.__file__).resolve().parent
-    digest = hashlib.sha256()
     try:
-        for path in sorted(root.rglob("*.py")):
-            if "__pycache__" in path.parts:
-                continue
-            digest.update(str(path.relative_to(root)).encode("utf-8"))
-            digest.update(b"\x00")
-            digest.update(path.read_bytes())
-            digest.update(b"\x00")
-        _SOURCE_DIGEST_CACHE = digest.hexdigest()
+        _SOURCE_DIGEST_CACHE = _compute_source_digest(root)
     except OSError:
         # An unreadable tree must not silently degrade into "no code identity",
         # which would re-open GH-214. A FIXED sentinel is not enough: two runs from
@@ -8338,6 +8365,7 @@ class UnifiedPipeline:
         import concurrent.futures
 
         from socr.core.audit_log import AuditEvent
+        from socr.pipeline.agentic import _provider_call_never_ran
         from socr.tables.escalation_decision import decide_escalation
 
         def _record_attempt_cost() -> None:
@@ -8369,6 +8397,34 @@ class UnifiedPipeline:
                         state, page_num, page, ps, bo
                     )
                 if not needs_escalation:
+                    return False, bo
+
+                # #1394 / cost audit: never double-call a paid engine on a page
+                # where ``route_page`` already ran a paid attempt (measured 0/61
+                # yield after Gemini won). Keep the incumbent cleanly without
+                # firing a second paid call or attaching a false distrust event.
+                if is_paid_profile(profile) and self._page_had_paid_attempt(ps):
+                    logger.info(
+                        "p%d: skipping redundant paid table escalation (%s); "
+                        "page already had a paid attempt",
+                        page_num,
+                        profile.engine.value,
+                    )
+                    return False, bo
+
+                # Never launch or bill a Gemini escalation once the quota/402
+                # circuit is already open (avoids phantom page_cost_usd).
+                if profile.engine == EngineType.GEMINI and getattr(
+                    self, "_gemini_quota_circuit_open", False
+                ):
+                    self._gemini_circuit_skips = getattr(self, "_gemini_circuit_skips", 0) + 1
+                    if state.paid_disabled is not None:
+                        state.paid_disabled["pages_skipped"] = self._gemini_circuit_skips
+                    logger.info(
+                        "p%d: skipping table escalation (%s); Gemini quota circuit is open",
+                        page_num,
+                        profile.engine.value,
+                    )
                     return False, bo
 
                 # GH-851: evidence of a wedge, not of one slow page. An earlier
@@ -8516,7 +8572,8 @@ class UnifiedPipeline:
                             ),
                         )
                     )
-                    _record_attempt_cost()
+                    if out is None or not _provider_call_never_ran(out):
+                        _record_attempt_cost()
                     return False, bo
                 if out.status is not PageStatus.SUCCESS or not (out.text or "").strip():
                     state.events.append(
@@ -8527,7 +8584,11 @@ class UnifiedPipeline:
                             detail=f"candidate status={out.status}, no usable text",
                         )
                     )
-                    _record_attempt_cost()
+                    # A circuit-blocked or cap-blocked non-run (PageStatus.ERROR +
+                    # MODEL_UNAVAILABLE + empty text) never sent an API call; do not
+                    # record phantom page_cost_usd.
+                    if not _provider_call_never_ran(out):
+                        _record_attempt_cost()
                     return False, bo
 
                 # #688: the escalation candidate crosses the same boundary
@@ -17170,7 +17231,7 @@ class UnifiedPipeline:
     # cloud entry at all; a cloud judge is only ever reached via an explicit
     # ``--judge-model`` override (still subject to the strict_local /
     # zero-cap-pinned policy check below).
-    _JUDGE_MODEL_CANDIDATES = [JUDGE_MODEL_DEFAULT, "minicpm-v:8b", "qwen3-vl:8b"]
+    _JUDGE_MODEL_CANDIDATES = [JUDGE_MODEL_DEFAULT, "minicpm-v:8b"]
 
     @staticmethod
     def _probe_judge_candidate(model: str) -> tuple[bool, str]:

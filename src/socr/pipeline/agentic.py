@@ -885,6 +885,25 @@ def route_page(
     for prof in ladder:
         if tried >= limit:
             break
+        if is_paid_profile(prof) and _judge_circuit_is_open(judge):
+            logger.info(
+                "page %s: skipping paid rung %s (page-judge circuit breaker is open)",
+                page_num,
+                prof.engine.value,
+            )
+            attempts.append(
+                ProviderAttempt(
+                    engine=prof.engine,
+                    output=_error_output(page_num, "judge circuit open"),
+                    cost_usd=0.0,
+                    accepted=False,
+                    reason="paid escalation skipped (judge circuit open)",
+                    provider_id=prof.id,
+                    model=prof.model,
+                    backend=prof.backend,
+                )
+            )
+            continue
         if paid_escalation_blocked and is_paid_profile(prof):
             logger.info(
                 "page %s: skipping paid rung %s (prior %s)",
@@ -1209,6 +1228,11 @@ class CircuitBreakerPageJudge:
         self._inner = inner
         self._is_open = is_open
 
+    @property
+    def is_circuit_open(self) -> bool:
+        """True when the page-judge circuit breaker has tripped open."""
+        return bool(self._is_open())
+
     def assess(self, output: PageOutput, provider: ProviderProfile) -> AcceptDecision:
         if self._is_open():
             raise PageJudgeCircuitOpenError(
@@ -1216,6 +1240,41 @@ class CircuitBreakerPageJudge:
                 "earlier in this document; failing closed without waiting"
             )
         return self._inner.assess(output, provider)
+
+
+def _judge_circuit_is_open(judge: object | None) -> bool:
+    """Return True if *judge* or any wrapped ``_inner`` judge has an open circuit breaker.
+
+    Production chains nest ``CircuitBreakerPageJudge`` inside
+    ``SourceEvidenceTableJudge -> NativeTableVerifierJudge -> _TimeoutJudge``.
+    Walking ``_inner`` lets ``route_page`` skip paid rungs immediately once the
+    judge breaker has opened (0/40 judge-accepted measured on open circuits).
+    """
+    seen: set[int] = set()
+    cur = judge
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, CircuitBreakerPageJudge):
+            try:
+                if cur.is_circuit_open:
+                    return True
+            except Exception:
+                return False
+        else:
+            attr = getattr(cur, "is_circuit_open", None)
+            if callable(attr):
+                try:
+                    if attr():
+                        return True
+                except Exception:
+                    return False
+            elif isinstance(attr, bool) and attr:
+                return True
+            flag = getattr(cur, "circuit_open", None)
+            if isinstance(flag, bool) and flag:
+                return True
+        cur = getattr(cur, "_inner", None)
+    return False
 
 
 class VLMPageJudge:
