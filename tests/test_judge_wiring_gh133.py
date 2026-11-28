@@ -277,19 +277,27 @@ def test_resolved_model_is_the_one_constructed(monkeypatch):
     pipe = _pipeline()
     state = _State()
 
-    built = []
+    built: list[tuple[object, str]] = []
     real_init = OllamaVisionJudge.__init__
 
     def _spy(self, model=None, *a, **k):
-        built.append(model)
-        return real_init(self, model=model, *a, **k) if model else real_init(self, *a, **k)
+        res = real_init(self, model=model, *a, **k) if model else real_init(self, *a, **k)
+        built.append((model, self.model))
+        return res
 
     monkeypatch.setattr(OllamaVisionJudge, "__init__", _spy)
 
     pipe._build_page_judge(state)
 
-    assert "minicpm-v:8b" in built
-    assert "qwen2-vl:7b" not in built, "module default must never reach the judge"
+    from socr.judge import ollama_judge
+
+    assert ollama_judge.DEFAULT_MODEL != "minicpm-v:8b"
+    assert built, "expected judge construction"
+    assert all(arg is not None for arg, _ in built), "bare OllamaVisionJudge() must never be called"
+    final_arg, final_model = built[-1]
+    assert final_arg == "minicpm-v:8b"
+    assert final_model == "minicpm-v:8b"
+    assert final_model != ollama_judge.DEFAULT_MODEL, "module default must never reach the judge"
     assert state.agentic_judge_model == "minicpm-v:8b"
 
 

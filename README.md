@@ -125,7 +125,6 @@ $ socr engines
 
   [+] qwen         local via Ollama (qwen3-vl:30b-a3b-instruct)
   [+] marker       local, layout-aware (Surya + Texify)
-  [+] gemma        Ollama Cloud (gemma4:31b-cloud)
   [+] gemini       cloud (gemini-4-hydrogen), ~$0.0207/page
   [+] mistral      cloud, ~$0.001/page
   [+] deepseek     local via Ollama

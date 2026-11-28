@@ -30,8 +30,14 @@ def page_sidecar_paths(pages_dir: Path, pattern: str = "*.json") -> list[Path]:
     return sorted(p for p in pages_dir.glob(pattern) if is_page_sidecar_name(p.name))
 
 
-# Process-lifetime cache for the package source digest (matches orchestrator._socr_source_digest).
+# Process-lifetime cache for the package source digest (shared with orchestrator).
 _SOURCE_DIGEST_CACHE: str | None = None
+
+
+def reset_source_digest_cache() -> None:
+    """Clear the cached package source digest (for tests patching ``socr.__file__``)."""
+    global _SOURCE_DIGEST_CACHE
+    _SOURCE_DIGEST_CACHE = None
 
 
 def page_blob_key(page_output_dict: dict) -> str:

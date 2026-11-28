@@ -36,7 +36,7 @@ for the external leaderboard, and the design logs under `docs/log/` for the raw 
 | **`gemma4:31b-cloud`** | Ollama Cloud | strong | fast | free* | **Cloud vision rung** (`EngineType.GEMMA`, layout-aware crops via `routing/gemma_crops.py`) ahead of paid Gemini |
 | **`gemini-4-hydrogen`** | cloud API | best on board | fast | ~$0.0207/pg | **Edge-case escalation** (#1343, measured across 100 hard Fed pages: 391 missing numbers vs 919 on Gemini 3.8 Flash and 1781 on local Qwen) |
 | ~~`qwen3.5:cloud`~~ (retired 2026-09-25) | Ollama Cloud | ~0.57 | ~49s/pg | free* | **HISTORICAL.** Was the workhorse VLM; every call now 410s |
-| ~~`qwen3-vl:8b`~~ (forbidden) | local Ollama | ~0.47 | ~135s/pg | free | **FORBIDDEN.** Collapses dense tables and times out (>300s) |
+| ~~`qwen3-vl:8b`~~ (not for local OCR) | local Ollama | ~0.47 | ~135s/pg | free | **Not for local OCR tier.** Collapses dense tables and times out (>300s); retained as a judge fallback |
 | Mistral OCR | cloud API | 0.45 | fast | ~$0.001/pg | **Manual only** (`--primary mistral`); lower quality than local Qwen / Gemini |
 | GLM-OCR (`glm-ocr`) | local Ollama | 0.37 | ~10s/pg | free | Fast local emergency fallback |
 | DeepSeek-OCR | local Ollama | 0.085 | — | free | **Dead weight.** Dropped from auto/local ladders; reach via `--primary deepseek` only |
@@ -81,8 +81,8 @@ The thinking build never terminates — the timeout guard is its only defence.
   model is reached only by an explicit `--qwen-model <tag>:cloud` pin, which is treated as
   cloud egress: refused (console line plus a `qwen_cloud_pin_refused` audit event) under
   `--strict-local` or an explicit `--max-cost-per-page 0`.
-- **Escalation:** `gemma4:31b-cloud` (Ollama Cloud) then `gemini-4-hydrogen` (~$0.0207/page)
-  when local Qwen is unavailable or rejected.
+- **Escalation:** `marker` (local layout OCR), then `gemma4:31b-cloud` (Ollama Cloud),
+  then `gemini-4-hydrogen` (~$0.0207/page) when local Qwen is unavailable or rejected.
 - **Offline verification (`src/socr/refinalize/`):** finished runs can be audited and
   re-finalized without re-running OCR (`socr-refinalize-own-text`, `-point-drops`,
   `-prior-ocr`, `-unshipped-figures`, `-boilerplate`, and `-second-reader`).

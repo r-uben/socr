@@ -140,7 +140,8 @@ document budget cannot cover it.
     adapters (`VLMPageJudge`, `HeuristicPageJudge`).
   - `reconciler.py`, `hpc_pipeline.py`: reconciliation and the HPC/vLLM path.
 - `refinalize/`: offline post-processing CLIs (`socr-refinalize-*`) that re-finalize
-  finished runs without re-running full-page OCR: `own_text.py`, `point_drops.py`,
+  finished runs without re-running the original OCR pipeline (the optional
+  `second_reader.py` tool can still make model calls): `own_text.py`, `point_drops.py`,
   `prior_ocr.py`, `unshipped_figures.py`, `boilerplate.py`, and `second_reader.py`,
   sharing atomic JSON/text I/O and table-recount helpers in `refinalize/__init__.py`.
 - `figures/`: `FigureExtractor` (PyMuPDF embedded-image extraction + VLM captions)
