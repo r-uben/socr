@@ -999,9 +999,9 @@ def process(
         # `primary_engine`, so probing the engine registry for an HPC run cost
         # startup latency to pick a value nothing would read.
         if config.primary_engine == EngineType.AUTO:
-            from socr.engines.registry import resolve_auto_engine
+            from socr.engines.registry import resolve_auto_engine_for_config
 
-            config.primary_engine = resolve_auto_engine()
+            config.primary_engine = resolve_auto_engine_for_config(config)
             if not config.quiet:
                 console.print(f"[dim]Auto-selected engine: {config.primary_engine.value}[/dim]")
 
@@ -1081,9 +1081,9 @@ def preflight_cmd(**kwargs) -> None:
     allow_missing = kwargs.pop("allow_missing", ())
     config = build_config(**kwargs)
     if config.primary_engine == EngineType.AUTO and not config.hpc.enabled:
-        from socr.engines.registry import resolve_auto_engine
+        from socr.engines.registry import resolve_auto_engine_for_config
 
-        config.primary_engine = resolve_auto_engine()
+        config.primary_engine = resolve_auto_engine_for_config(config)
     from socr.pipeline.orchestrator import UnifiedPipeline
 
     checks = preflight_checks.run_preflight(config, UnifiedPipeline(config))
@@ -1143,9 +1143,9 @@ def batch(
 
     # Resolve AUTO engine
     if config.primary_engine == EngineType.AUTO:
-        from socr.engines.registry import resolve_auto_engine
+        from socr.engines.registry import resolve_auto_engine_for_config
 
-        config.primary_engine = resolve_auto_engine()
+        config.primary_engine = resolve_auto_engine_for_config(config)
         if not config.quiet:
             console.print(f"[dim]Auto-selected engine: {config.primary_engine.value}[/dim]")
 

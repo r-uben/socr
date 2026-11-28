@@ -65,7 +65,9 @@ def _run_capturing_config(
     # selection, but `process`/`batch` resolve AUTO in cli.py before the
     # (stubbed) pipeline is built. Pin it so the run does not shell out to
     # `ollama`.
-    monkeypatch.setattr("socr.engines.registry.resolve_auto_engine", lambda: EngineType.QWEN)
+    monkeypatch.setattr(
+        "socr.engines.registry.resolve_auto_engine_for_config", lambda _cfg=None: EngineType.QWEN
+    )
 
     if command == "batch":
         cmd = ["batch", str(tmp_path)]
@@ -111,7 +113,9 @@ def _run_capturing_config_via_profile(
 
     monkeypatch.setattr("socr.pipeline.orchestrator.UnifiedPipeline", _Stub)
     # #885: pin AUTO resolution (see the note in _run_capturing_config).
-    monkeypatch.setattr("socr.engines.registry.resolve_auto_engine", lambda: EngineType.QWEN)
+    monkeypatch.setattr(
+        "socr.engines.registry.resolve_auto_engine_for_config", lambda _cfg=None: EngineType.QWEN
+    )
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     profile_dir = tmp_path / ".config" / "socr"
     profile_dir.mkdir(parents=True, exist_ok=True)

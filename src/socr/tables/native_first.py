@@ -44,6 +44,11 @@ DEFER = "defer"
 
 #: Reason on a CELLS plan: the failing cells' tokens disagree with the text layer.
 CELL_MISMATCH_REASON = "cell_mismatch"
+#: Reason when a CELLS repair could not run because document cost or page
+#: wall-clock budget was exhausted. Deliberately NOT in
+#: ``MODEL_RETRY_REFUSAL_REASONS`` so a budget-skipped free native repair never
+#: escalates to whole-page (potentially paid) model OCR.
+CELL_BUDGET_SKIPPED_REASON = "cell_repair_budget_skipped"
 
 PlanAction = Literal["ship", "cells", "refuse", "defer"]
 

@@ -68,7 +68,10 @@ def _exit_codes(tmp_path: Path, status: DocumentStatus, error: str | None) -> tu
 
     with (
         patch.object(UnifiedPipeline, "process", _fake_process),
-        patch("socr.engines.registry.resolve_auto_engine", lambda: EngineType.QWEN),
+        patch(
+            "socr.engines.registry.resolve_auto_engine_for_config",
+            lambda _cfg=None: EngineType.QWEN,
+        ),
     ):
         single = CliRunner().invoke(cli, ["process", str(pdf), "-o", str(tmp_path / "o1"), "-q"])
         batch = CliRunner().invoke(
@@ -175,7 +178,10 @@ def test_batch_exits_nonzero_when_a_file_raises(tmp_path: Path) -> None:
 
     with (
         patch.object(UnifiedPipeline, "process", _process),
-        patch("socr.engines.registry.resolve_auto_engine", lambda: EngineType.QWEN),
+        patch(
+            "socr.engines.registry.resolve_auto_engine_for_config",
+            lambda _cfg=None: EngineType.QWEN,
+        ),
     ):
         res = CliRunner().invoke(cli, ["batch", str(in_dir), "-o", str(tmp_path / "o"), "-q"])
 

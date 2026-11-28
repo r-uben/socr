@@ -90,7 +90,10 @@ from socr.core.state import (
     canonical_native_text,
     add_page_cost,
 )
-from socr.engines.registry import get_engine, resolve_auto_engine
+from socr.engines.registry import (
+    get_engine,
+    resolve_auto_engine_for_config,
+)
 from socr.figures import crop_descriptions as _crop_descriptions
 from socr.figures import figure_crop as _figure_crop
 from socr.figures import figure_presence as _figure_presence
@@ -2169,7 +2172,7 @@ class UnifiedPipeline:
         gate and ``process()`` agree.
         """
         if self.config.primary_engine == EngineType.AUTO:
-            return resolve_auto_engine()
+            return resolve_auto_engine_for_config(self.config)
         return self.config.primary_engine
 
     def _resume_skip(self, pdf_path: Path, out_dir: Path) -> EngineResult | None:
@@ -2851,7 +2854,7 @@ class UnifiedPipeline:
 
         # Resolve AUTO engine before starting
         if self.config.primary_engine == EngineType.AUTO:
-            self.config.primary_engine = resolve_auto_engine()
+            self.config.primary_engine = resolve_auto_engine_for_config(self.config)
             if not self.config.quiet:
                 console.print(
                     f"[dim]Auto-selected engine: {self.config.primary_engine.value}[/dim]"
@@ -4451,7 +4454,10 @@ class UnifiedPipeline:
         )
         if reader_failures:
             detail += f"; reader failures: {'; '.join(dict.fromkeys(reader_failures))}"
-        call_cost_usd = 0.0 if model_disabled_reason else None
+        # Local math_model (default qwen3-vl:30b-a3b-instruct) is a known $0.00,
+        # matching _equation_lane_call_cost; only an unpriced :cloud model records
+        # None (unknown spend, Round 6 fail-closed rule).
+        call_cost_usd = 0.0 if (model_disabled_reason or not is_cloud_model(math_model)) else None
         state.events.append(
             AuditEvent(
                 page_num=page_num,
@@ -11892,6 +11898,8 @@ class UnifiedPipeline:
         prior = (ps.binding_adjudication or {}).get(table_id)
 
         def _transcribe(bbox: tuple[float, float, float, float]) -> str | None:
+            if not self._cell_transcribe_budget_allows(state):
+                return None
             crop = self._render_adjudication_crop(
                 state.handle.path, page_num, bbox, clip_limits=limits[bbox]
             )
@@ -11994,6 +12002,21 @@ class UnifiedPipeline:
             )
             items.append(replace(item, cell_bbox=bbox, address_source=source))
         return tuple(items), limits
+
+    def _cell_transcribe_budget_allows(self, state: DocumentState | None) -> bool:
+        """Whether document ``--cost-budget`` still permits a cloud cell transcription.
+
+        Note: cell transcriptions are not metered into ``state.total_cost`` (their
+        default model is $0-priced ``glm-5.3-flash:cloud``), so this gate stops
+        further cloud cell transcriptions once tracked document spend reaches
+        ``--cost-budget`` or becomes unmetered (``None``).
+        """
+        if state is None or self.config.cost_budget <= 0:
+            return True
+        total_cost = state.total_cost
+        if total_cost is None:
+            return False
+        return self.config.cost_budget - total_cost > 0.0
 
     def _transcribe_cell_token(self, crop_path: Path) -> str | None:
         """Constrained transcriber seam. Returns a token or None. Never raises.
@@ -12196,11 +12219,28 @@ class UnifiedPipeline:
         The PROVIDER half still scans the reason: a provider timeout is recorded
         there and has nothing typed to read. Extracted from the loop so the test
         can pin THIS expression rather than a copy of it.
+
+        Cloud-tier provider timeouts (e.g. Gemma Cloud, Gemini, Mistral, or a
+        ``:cloud`` model) are excluded because the cascade-halt probe tests the
+        LOCAL Ollama/vLLM backend — a remote cloud slowdown says nothing about
+        local GPU health and must not halt the document as ``PARTIAL_SAVE_VLM_TIMEOUT``.
         """
+        from socr.core.providers import DEFAULT_PROVIDERS, TIER_LOCAL, is_cloud_model
+
+        def _is_cloud_attempt(att) -> bool:
+            engine = getattr(att, "engine", None)
+            prof = DEFAULT_PROVIDERS.get(engine) if engine is not None else None
+            if prof is not None and prof.tier != TIER_LOCAL:
+                return True
+            if is_cloud_model(getattr(att, "model", "") or getattr(att, "provider_id", "")):
+                return True
+            return False
+
         return any(
             "timeout" in (getattr(att, "reason", "") or "")
             for att in attempts
             if getattr(getattr(att, "output", None), "judge_outcome", "") != JUDGE_OUTCOME_TIMEOUT
+            and not _is_cloud_attempt(att)
         )
 
     # ------------------------------------------------------------------
@@ -13100,6 +13140,16 @@ class UnifiedPipeline:
                             plan=_replan
                             if _replan is not None
                             else NativeTablePlan(REFUSE, reason=CELL_MISMATCH_REASON),
+                        )
+                    elif _replan is not None and _replan.action == "refuse":
+                        # Non-retryable refusal from cell repair (e.g. budget skip):
+                        # keep the exact refusal reason on the plan so
+                        # _refuse_native_table_first surfaces it without escalating
+                        # to whole-page model OCR.
+                        _cells_work = native_table_plans[page_num]
+                        native_table_plans[page_num] = dataclasses.replace(
+                            _cells_work,
+                            plan=_replan,
                         )
                     elif _replan is not None and _replan.action == "defer":
                         self._record_native_ship_gate(state, page_num, _replan)
@@ -16578,29 +16628,71 @@ class UnifiedPipeline:
         normalize to the grid token that failed. The repaired markdown must
         then exact-pass on its own; a partial repair does not ship.
         """
+        from socr.core.audit_log import AuditEvent
+        from socr.judge.ladder_budget import TABLE_LADDER_BUDGET_EXHAUSTED_KIND
         from socr.tables.native_first import (
+            CELL_BUDGET_SKIPPED_REASON,
+            REFUSE,
             SHIP,
+            NativeTablePlan,
             plan_native_table,
             splice_cell_tokens,
             transcription_matches_native,
         )
 
         replacements: list[tuple[str, int, str, str]] = []
-        for cell in plan.cells:
-            crop = self._render_adjudication_crop(state.handle.path, page_num, cell.bbox)
-            token = None
-            if crop is not None:
-                try:
-                    token = self._transcribe_cell_token(crop)
-                finally:
-                    crop.unlink(missing_ok=True)
-            if not token or not transcription_matches_native(
-                str(token), cell.native_token, cell.grid_token
-            ):
-                return None, None
-            replacements.append(
-                (cell.row_line, cell.cell_index, cell.grid_token, cell.native_token)
-            )
+        prior_budget = self._ladder_budget
+        created_budget = False
+        if self._ladder_budget is None and self.config.table_judge_page_budget_sec != 0:
+            from socr.judge.ladder_budget import PageLadderBudget
+
+            limit = self._page_ladder_budget_sec([])
+            if limit > 0:
+                self._ladder_budget = PageLadderBudget(
+                    limit,
+                    on_exhausted=lambda msg: state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind=TABLE_LADDER_BUDGET_EXHAUSTED_KIND,
+                            engine="native",
+                            detail=msg,
+                            data={"budget_sec": limit, "phase": "native_cell_repair"},
+                        )
+                    ),
+                )
+                created_budget = True
+        try:
+            for cell in plan.cells:
+                if not self._cell_transcribe_budget_allows(state):
+                    return None, NativeTablePlan(REFUSE, reason=CELL_BUDGET_SKIPPED_REASON)
+                if self._ladder_budget is not None and self._ladder_budget.remaining() <= 0:
+                    self._ladder_budget.call(
+                        "cell_transcribe",
+                        self.config.table_judge_rung1_model,
+                        lambda: None,
+                        lambda _msg: None,
+                    )
+                    return None, NativeTablePlan(REFUSE, reason=CELL_BUDGET_SKIPPED_REASON)
+                prior_skips = self._ladder_budget.skipped if self._ladder_budget is not None else 0
+                crop = self._render_adjudication_crop(state.handle.path, page_num, cell.bbox)
+                token = None
+                if crop is not None:
+                    try:
+                        token = self._transcribe_cell_token(crop)
+                    finally:
+                        crop.unlink(missing_ok=True)
+                if self._ladder_budget is not None and self._ladder_budget.skipped > prior_skips:
+                    return None, NativeTablePlan(REFUSE, reason=CELL_BUDGET_SKIPPED_REASON)
+                if not token or not transcription_matches_native(
+                    str(token), cell.native_token, cell.grid_token
+                ):
+                    return None, None
+                replacements.append(
+                    (cell.row_line, cell.cell_index, cell.grid_token, cell.native_token)
+                )
+        finally:
+            if created_budget:
+                self._ladder_budget = prior_budget
         spliced = splice_cell_tokens(ps.native_text or "", replacements)
         if spliced is None:
             return None, None
@@ -16903,7 +16995,13 @@ class UnifiedPipeline:
                     pass
                 continue
             if engine_type is EngineType.GEMMA:
-                if not self.config.enable_gemma_cloud:
+                from socr.core.providers import zero_cap_pinned_forbids_cloud
+
+                if (
+                    not self.config.enable_gemma_cloud
+                    or self.config.strict_local
+                    or zero_cap_pinned_forbids_cloud(self.config)
+                ):
                     continue
                 from socr.engines.gemma_cloud import GemmaCloudEngine
 

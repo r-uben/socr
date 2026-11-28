@@ -145,7 +145,8 @@ class TestLimitOutputPersists:
 
         # AUTO must resolve to a configurable-model engine without probing CLIs.
         monkeypatch.setattr(
-            "socr.engines.registry.resolve_auto_engine", lambda: EngineType.DEEPSEEK
+            "socr.engines.registry.resolve_auto_engine_for_config",
+            lambda _cfg=None: EngineType.DEEPSEEK,
         )
 
         # GH-903 round 4: `.process()`/CLI `batch` calls `_run_fingerprint`,

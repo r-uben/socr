@@ -112,7 +112,7 @@ class TestOrchestratorAgenticLane:
                 # module scope, so the patch target is the orchestrator's own
                 # bound name, not the registry module.
                 patch(
-                    "socr.pipeline.orchestrator.resolve_auto_engine",
+                    "socr.pipeline.orchestrator.resolve_auto_engine_for_config",
                     return_value=EngineType.QWEN,
                 ),
             ):

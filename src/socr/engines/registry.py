@@ -70,6 +70,54 @@ def resolve_auto_engine() -> EngineType:
     return EngineType.GEMINI
 
 
+def resolve_auto_engine_for_config(config) -> EngineType:
+    """Policy-aware auto engine selection respecting strict-local, zero-cap pin,
+    cloud-pinned qwen refusal, and gemma opt-out."""
+    from socr.core.providers import (
+        DEFAULT_PROVIDERS,
+        TIER_LOCAL,
+        cloud_pinned_qwen_refusal,
+        zero_cap_pinned_forbids_cloud,
+    )
+
+    forbid_cloud = bool(
+        getattr(config, "strict_local", False) or zero_cap_pinned_forbids_cloud(config)
+    )
+    allow_gemma = bool(getattr(config, "enable_gemma_cloud", True))
+    qwen_cloud_refusal = cloud_pinned_qwen_refusal(config) if forbid_cloud else ""
+
+    for engine_type in AUTO_ENGINE_ORDER:
+        if engine_type is EngineType.GEMMA and not allow_gemma:
+            continue
+        if forbid_cloud:
+            prof = DEFAULT_PROVIDERS.get(engine_type)
+            if prof is None or prof.tier != TIER_LOCAL:
+                continue
+            if engine_type is EngineType.QWEN and qwen_cloud_refusal:
+                continue
+        try:
+            cli_engine = _ENGINES.get(engine_type)
+            if cli_engine is None:
+                continue
+            instance = cli_engine()
+            if instance.is_available():
+                logger.info(f"Auto-selected engine: {engine_type.value}")
+                return engine_type
+        except Exception:
+            continue
+
+    if forbid_cloud:
+        fallback = EngineType.MARKER if qwen_cloud_refusal else EngineType.QWEN
+        logger.warning(
+            "No local engines available under strict-local or pinned zero cost cap; "
+            "falling back to %s",
+            fallback.value,
+        )
+        return fallback
+    logger.warning("No engines available; falling back to gemini (will likely fail)")
+    return EngineType.GEMINI
+
+
 # Local-only engines for tiered routing (no API keys needed).
 # Qwen-VL leads: best open OCR quality (socOCRbench ~0.47-0.58), though slower per page
 # than GLM. Quality-first ordering — the tiered router only sends *easy* pages here anyway.

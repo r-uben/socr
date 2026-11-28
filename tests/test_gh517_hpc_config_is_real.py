@@ -68,7 +68,10 @@ def _run(tmp_path: Path, body: str):
     with (
         patch("socr.pipeline.hpc_pipeline.HPCPipeline", hpc),
         patch("socr.pipeline.orchestrator.UnifiedPipeline", unified),
-        patch("socr.engines.registry.resolve_auto_engine", lambda: EngineType.QWEN),
+        patch(
+            "socr.engines.registry.resolve_auto_engine_for_config",
+            lambda _cfg=None: EngineType.QWEN,
+        ),
     ):
         result = CliRunner().invoke(
             cli, ["process", str(_pdf(tmp_path)), "--config", str(_config(tmp_path, body))]
@@ -190,7 +193,10 @@ def test_batch_still_works_without_an_hpc_config(tmp_path: Path) -> None:
 
     with (
         patch("socr.pipeline.orchestrator.UnifiedPipeline", _Unified),
-        patch("socr.engines.registry.resolve_auto_engine", lambda: EngineType.QWEN),
+        patch(
+            "socr.engines.registry.resolve_auto_engine_for_config",
+            lambda _cfg=None: EngineType.QWEN,
+        ),
     ):
         result = CliRunner().invoke(
             cli, ["batch", str(tmp), "--config", str(_config(tmp, "quiet: true\n"))]

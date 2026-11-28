@@ -123,11 +123,14 @@ class ContradictionItem:
 class ItemOutcome:
     item: ContradictionItem
     disproof: DisproofKind | None
+    skipped: bool = False
 
     @property
-    def outcome(self) -> Literal["disproved", "held", "abstained"]:
+    def outcome(self) -> Literal["disproved", "held", "abstained", "skipped"]:
         if self.disproof is not None:
             return "disproved"
+        if self.skipped:
+            return "skipped"
         return "abstained" if self.item.cell_bbox is None else "held"
 
 
@@ -140,11 +143,17 @@ class AdjudicationRecord:
     items: tuple[ItemOutcome, ...]
 
     def to_dict(self) -> dict:
+        records = []
+        for outcome in self.items:
+            rec = outcome.item.to_record(outcome.disproof)
+            if outcome.skipped and "outcome" in rec:
+                rec["outcome"] = outcome.outcome
+            records.append(rec)
         return {
             "status": self.status,
             "markdown_sha256": self.markdown_sha256,
             "signatures": [list(outcome.item.lift_signature()) for outcome in self.items],
-            "items": [outcome.item.to_record(outcome.disproof) for outcome in self.items],
+            "items": records,
         }
 
 
@@ -292,9 +301,12 @@ def adjudicate(
     """Decide whether *every* contradiction is independently disproved.
 
     ``transcribe`` is given a geometry cell bbox and returns a token or None.
-    It is not called for encoding-garbage items or when a matching prior
-    lift already covers the whole set. A missing transcriber (None) is
-    absence of evidence, not a conviction of either side.
+    It is not called for encoding-garbage items, when a matching prior lift
+    already covers the whole set, or once the table is doomed to remain
+    ``"held"`` (either because an item has no geometry address and is not
+    encoding garbage, or because an earlier item failed to disprove; those
+    un-transcribed items are recorded with outcome ``"skipped"``). A missing
+    transcriber (None) is absence of evidence, not a conviction of either side.
     """
     digest = markdown_sha256(markdown)
     if not items:
@@ -312,10 +324,28 @@ def adjudicate(
         outcomes = tuple(ItemOutcome(item=item, disproof="prior_lift") for item in items)
         return AdjudicationRecord(status="lifted", markdown_sha256=digest, items=outcomes)
 
+    # Lifting requires EVERY contradiction to be disproved. If any item already
+    # lacks a geometry address and is not encoding garbage, the table is doomed
+    # to remain "held", so skip all cloud transcription calls up front. Once a
+    # single item fails to disprove during the loop, skip remaining cloud calls.
+    doomed = any(
+        item.cell_bbox is None and not token_is_encoding_garbage(item.native_token)
+        for item in items
+    )
     outcomes: list[ItemOutcome] = []
     for item in items:
-        disproof = _disprove_one(item, transcribe)
-        outcomes.append(ItemOutcome(item=item, disproof=disproof))
+        was_doomed = doomed
+        needs_transcribe = item.cell_bbox is not None and not token_is_encoding_garbage(
+            item.native_token
+        )
+        effective_transcribe = None if doomed else transcribe
+        disproof = _disprove_one(item, effective_transcribe)
+        skipped = bool(
+            was_doomed and needs_transcribe and transcribe is not None and disproof is None
+        )
+        outcomes.append(ItemOutcome(item=item, disproof=disproof, skipped=skipped))
+        if disproof is None:
+            doomed = True
 
     status: Literal["lifted", "held"] = (
         "lifted" if outcomes and all(o.disproof is not None for o in outcomes) else "held"
