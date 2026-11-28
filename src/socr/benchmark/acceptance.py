@@ -470,7 +470,9 @@ def rule_two_readers(page: Page) -> list[str]:
             for e in page.sidecar.get("checks") or []
         )
     )
-    return [] if confirmed else [SUCCESS_UNCHECKED]
+    if confirmed:
+        return []
+    return [*_prior_ocr_unchecked(page), SUCCESS_UNCHECKED]
 
 
 LANE_RULES: dict[str, Callable[[Page], list[str]]] = {
