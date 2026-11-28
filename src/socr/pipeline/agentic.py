@@ -1243,12 +1243,16 @@ class CircuitBreakerPageJudge:
 
 
 def _judge_circuit_is_open(judge: object | None) -> bool:
-    """Return True if *judge* or any wrapped ``_inner`` judge has an open circuit breaker.
+    """Return True if *judge* or any wrapped ``_inner`` judge is an open ``CircuitBreakerPageJudge``.
 
     Production chains nest ``CircuitBreakerPageJudge`` inside
     ``SourceEvidenceTableJudge -> NativeTableVerifierJudge -> _TimeoutJudge``.
     Walking ``_inner`` lets ``route_page`` skip paid rungs immediately once the
     judge breaker has opened (0/40 judge-accepted measured on open circuits).
+
+    Only real ``CircuitBreakerPageJudge`` instances are probed (avoiding false
+    positives on duck-typed test mocks), and a raising breaker probe fails
+    closed (returns ``True``) so a broken breaker cannot launch paid rungs.
     """
     seen: set[int] = set()
     cur = judge
@@ -1259,21 +1263,9 @@ def _judge_circuit_is_open(judge: object | None) -> bool:
                 if cur.is_circuit_open:
                     return True
             except Exception:
-                return False
-        else:
-            attr = getattr(cur, "is_circuit_open", None)
-            if callable(attr):
-                try:
-                    if attr():
-                        return True
-                except Exception:
-                    return False
-            elif isinstance(attr, bool) and attr:
                 return True
-            flag = getattr(cur, "circuit_open", None)
-            if isinstance(flag, bool) and flag:
-                return True
-        cur = getattr(cur, "_inner", None)
+        inst_dict = getattr(cur, "__dict__", None)
+        cur = inst_dict.get("_inner") if isinstance(inst_dict, dict) else None
     return False
 
 

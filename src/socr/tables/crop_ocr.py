@@ -38,6 +38,10 @@ BoxT = TypeVar("BoxT")
 
 #: Default IoU cutoff above which a candidate table box is treated as overlapping
 #: a detected chart/figure region and dropped.
+#: Derived from the 55-page Fed table-crop audit (``ocria-test/nano``): the 6
+#: ``ocria-nano-1`` chart mis-crops had coverage >= 0.60 against detected chart
+#: regions while genuine table borders touching an adjacent chart stayed <= 0.05.
+#: Callers dropping a box must fall back to the page reading and log a diagnostic.
 DEFAULT_CHART_OVERLAP_MAX_IOU = 0.15
 #: Default coverage cutoff (``intersection_area / table_box_area``) above which a
 #: candidate table box lying substantially inside a chart/figure region is dropped.
@@ -45,6 +49,7 @@ DEFAULT_CHART_OVERLAP_MAX_COVER = 0.25
 #: Maximum leading rows of a Markdown table eligible for pure-header inspection.
 _MAX_HEADER_TIERS = 4
 
+_FURNITURE_TAGS = ("page_header", "page_footer", "page_number", "watermark")
 _FENCE_LINE_RE = re.compile(r"^\s*```[A-Za-z0-9_-]*\s*$")
 _FURNITURE_BLOCK_RE = re.compile(
     r"<(page_header|page_footer|page_number|watermark)>(.*?)</\1>",
@@ -53,6 +58,10 @@ _FURNITURE_BLOCK_RE = re.compile(
 _TABLE_BLOCK_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.S | re.I)
 _TABLE_OPEN_RE = re.compile(r"<table[\s>]", re.I)
 _TABLE_CLOSE_RE = re.compile(r"</table>", re.I)
+_THEAD_BLOCK_RE = re.compile(r"<thead\b[^>]*>.*?</thead>", re.S | re.I)
+_TR_BLOCK_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S | re.I)
+_TR_SPLIT_RE = re.compile(r"<tr[^>]*>", re.I)
+_CELL_TAG_RE = re.compile(r"<(t[dh])(?:\s[^>]*)?>", re.I)
 _TR_OPEN_RE = re.compile(r"<tr[\s>]", re.I)
 _TR_CLOSE_RE = re.compile(r"</tr>", re.I)
 
@@ -185,12 +194,22 @@ def _has_unclosed_html_table(text: str) -> bool:
     ) != len(_TR_CLOSE_RE.findall(text))
 
 
+def _has_unclosed_furniture_tag(text: str) -> bool:
+    return any(
+        len(re.findall(rf"<{tag}(?:\s[^>]*)?>", text, re.I))
+        != len(re.findall(rf"</{tag}>", text, re.I))
+        for tag in _FURNITURE_TAGS
+    )
+
+
 def _has_unclosed_markup(text: str) -> bool:
-    """True when *text* has an unclosed markdown code fence or unclosed HTML table/row tag."""
+    """True when *text* has an unclosed code fence, furniture tag, or HTML table/row tag."""
     if not (text or "").strip():
         return False
     unfenced, open_fence = _unfenced_if_closed(text)
     if open_fence:
+        return True
+    if _has_unclosed_furniture_tag(unfenced):
         return True
     cleaned = _FURNITURE_BLOCK_RE.sub("\n", unfenced)
     return _has_unclosed_html_table(cleaned)
@@ -267,10 +286,42 @@ def _strip_year_from_header_cell(cell: str, year: str) -> str:
     return " ".join(updated.split())
 
 
-def _normalize_spanned_headers_in_table(table_md: str) -> str:
-    """Deduplicate repeated colspan/rowspan 4-digit year tokens in leading pure header rows.
+def _html_table_header_row_indices(raw_table: str) -> frozenset[int]:
+    """Return 0-based logical row indices of semantic header rows in *raw_table*.
 
-    Never alters cell counts, data rows, minus signs, decimals, or non-year tokens.
+    Matches :func:`socr.core.html_tables._parse_rows` row numbering. A row counts
+    as a semantic header row ONLY when it lies inside ``<thead>...</thead>`` or
+    every cell in the row uses ``<th>`` (never ``<td>`` data or continuation rows).
+    """
+    thead_spans = [(m.start(), m.end()) for m in _THEAD_BLOCK_RE.finditer(raw_table)]
+    header_rows: set[int] = set()
+    row_idx = 0
+    for m in _TR_BLOCK_RE.finditer(raw_table):
+        in_thead = any(start <= m.start() < end for start, end in thead_spans)
+        for part in _TR_SPLIT_RE.split(m.group(1)):
+            tags = [t.lower() for t in _CELL_TAG_RE.findall(part)]
+            if not tags:
+                continue
+            if in_thead or all(t == "th" for t in tags):
+                header_rows.add(row_idx)
+            row_idx += 1
+    return frozenset(header_rows)
+
+
+def _normalize_spanned_headers_in_table(
+    table_md: str,
+    *,
+    semantic_header_rows: frozenset[int] | None = None,
+) -> str:
+    """Deduplicate repeated colspan/rowspan 4-digit year tokens in leading semantic header rows.
+
+    When *semantic_header_rows* is provided (HTML tables), ONLY logical row
+    indices present in that set (``<thead>`` or all-``<th>`` rows) are eligible;
+    ``<td>`` rows — including first-row data in continuation tables and empty-stub
+    continuation rows — are NEVER modified. For plain Markdown tables without
+    HTML metadata, only row 0 of a multi-row table with an explicit separator is
+    eligible. Cell counts, data rows, minus signs, decimals, and non-year tokens
+    are NEVER altered.
     """
     raw_lines = [line for line in table_md.strip().splitlines() if line.strip()]
     parsed: list[tuple[bool, list[str]]] = []
@@ -280,31 +331,30 @@ def _normalize_spanned_headers_in_table(table_md: str) -> str:
             return table_md
         parsed.append((_is_md_separator_row(cells), cells))
 
-    # Identify leading pure header rows (stopping at the first non-header row).
-    # Once past the Markdown separator row (``| --- |``), a row is only eligible
-    # as a secondary header tier if its first cell is empty or repeats row 0's
-    # top-left stub label (vertical rowspan). Any new non-empty row label (e.g.
-    # ``| Total loans | 1950 | 1950 |``) begins data rows and stops immediately.
     header_indices: list[int] = []
-    non_sep_seen = 0
-    seen_sep = False
-    header0_stub = ""
-    for idx, (is_sep, cells) in enumerate(parsed):
-        if is_sep:
-            seen_sep = True
-            continue
-        if non_sep_seen >= _MAX_HEADER_TIERS:
-            break
-        if seen_sep:
-            stub = cells[0].strip()
-            if stub and stub != header0_stub:
+    if semantic_header_rows is not None:
+        logical_row = 0
+        for idx, (is_sep, cells) in enumerate(parsed):
+            if is_sep:
+                continue
+            if logical_row >= _MAX_HEADER_TIERS:
                 break
-        if not _row_is_pure_header_row(cells):
-            break
-        if non_sep_seen == 0:
-            header0_stub = cells[0].strip()
-        header_indices.append(idx)
-        non_sep_seen += 1
+            if logical_row not in semantic_header_rows:
+                break
+            if not _row_is_pure_header_row(cells):
+                break
+            header_indices.append(idx)
+            logical_row += 1
+    else:
+        # Plain Markdown without HTML <th>/<thead> semantics: only normalize row 0
+        # when an explicit separator row follows and at least one data row exists.
+        if (
+            len(parsed) >= 3
+            and not parsed[0][0]
+            and parsed[1][0]
+            and _row_is_pure_header_row(parsed[0][1])
+        ):
+            header_indices.append(0)
 
     # 1. Horizontal consecutive colspan year deduplication within each header row.
     #    E.g. ``| | 1999 July | 1999 Aug. | 2000 Jan. | 2000 Feb. |`` ->
@@ -375,18 +425,34 @@ def _extract_markdown_table_blocks(text: str) -> list[str]:
     return blocks
 
 
-def normalize_html_table_for_comparison(html_or_md: str) -> str:
-    """Extract table blocks, convert HTML to Markdown, and normalize spanned year headers.
+def _converted_reading_markdown(html_or_md: str) -> str:
+    """Convert HTML ``<table>`` blocks to Markdown WITHOUT stripping context or deduplicating headers.
 
-    Surrounding page headers, footers, page numbers, and chart captions are
-    stripped when ``<table>...</table>`` or Markdown pipe-table blocks are
-    present. Truncated/unclosed code fences or HTML tables are returned
-    unconverted so downstream comparison fails closed as ``UNKNOWN``.
+    Used to produce the verified ``CropAgreementResult.markdown`` once two readers
+    agree, so surrounding table titles, units, footnotes, and the full multiset of
+    numeric tokens from reader A's reading are preserved verbatim.
     """
     if not (html_or_md or "").strip():
         return ""
     unfenced, open_fence = _unfenced_if_closed(html_or_md)
     if open_fence:
+        return html_or_md
+    return convert_html_tables(unfenced).strip()
+
+
+def normalize_html_table_for_comparison(html_or_md: str) -> str:
+    """Extract table blocks, convert HTML to Markdown, and normalize spanned year headers.
+
+    Intended strictly for two-reader comparison (never as shipped output).
+    Surrounding page headers, footers, page numbers, and chart captions are
+    stripped when ``<table>...</table>`` or Markdown pipe-table blocks are
+    present. Truncated/unclosed code fences, furniture tags, or HTML tables are
+    returned unconverted so downstream comparison fails closed as ``UNKNOWN``.
+    """
+    if not (html_or_md or "").strip():
+        return ""
+    unfenced, open_fence = _unfenced_if_closed(html_or_md)
+    if open_fence or _has_unclosed_furniture_tag(unfenced):
         return html_or_md
     cleaned = _FURNITURE_BLOCK_RE.sub("\n", unfenced)
     if _has_unclosed_html_table(cleaned):
@@ -398,12 +464,17 @@ def normalize_html_table_for_comparison(html_or_md: str) -> str:
         for raw_table in html_tables:
             converted = convert_html_tables(raw_table).strip()
             if converted:
-                md_tables.append(_normalize_spanned_headers_in_table(converted))
+                header_rows = _html_table_header_row_indices(raw_table)
+                md_tables.append(
+                    _normalize_spanned_headers_in_table(converted, semantic_header_rows=header_rows)
+                )
         return "\n\n".join(md_tables)
 
     md_blocks = _extract_markdown_table_blocks(cleaned)
     if md_blocks:
-        return "\n\n".join(_normalize_spanned_headers_in_table(b) for b in md_blocks)
+        return "\n\n".join(
+            _normalize_spanned_headers_in_table(b, semantic_header_rows=None) for b in md_blocks
+        )
 
     return cleaned.strip()
 
@@ -555,7 +626,7 @@ def verify_table_crop_two_readers(
 
     return CropAgreementResult(
         agreed=agreed,
-        markdown=norm_a if agreed else "",
+        markdown=_converted_reading_markdown(raw_a) if agreed else "",
         differences=tuple(combined_diffs),
         reader_a_model=model_a,
         reader_b_model=model_b,

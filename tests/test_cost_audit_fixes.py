@@ -1,17 +1,16 @@
-"""Hermetic regression tests for measured paid-call leaks and cache scoping.
+"""Hermetic regression tests for measured paid-call leaks and judge safety.
 
-Pins four fixes derived from the Fed full-run cost audit:
+Pins three fixes derived from the Fed full-run cost audit:
   1. ``_escalate_table_page`` (GH-96 / #1394) must NEVER double-call a paid
-     engine after ``route_page`` already ran a paid attempt on that page, and
-     must NEVER record phantom ``page_cost_usd`` when Gemini is skipped by the
-     quota/402 circuit or a non-run ``MODEL_UNAVAILABLE`` stub.
+     engine after ``route_page`` already ran a real paid call on that page
+     (while still firing when ``route_page`` only recorded a $0 paid stub, and
+     recording ``table_escalation_refused`` so the suspect table stays untrusted),
+     and must NEVER record phantom ``page_cost_usd`` when Gemini is skipped by
+     the quota/402 circuit or a non-run ``MODEL_UNAVAILABLE`` / native fallback.
   2. ``route_page`` / ``process()`` must skip paid rungs when
-     ``CircuitBreakerPageJudge`` is open (paired difference: open vs closed).
+     ``CircuitBreakerPageJudge`` is open or its probe raises (fail closed).
   3. ``UnifiedPipeline._JUDGE_MODEL_CANDIDATES`` must contain no forbidden
      ``qwen3-vl:8b`` (or any ``:8b`` Qwen) model (``AGENTS.md`` compliance).
-  4. ``_socr_source_digest`` ignores non-reading packages (``benchmark/``,
-     ``refinalize/``, ``ui/``, ``devtools/``, ``pipeline/refinalize_*.py``)
-     while still changing on reading-path edits.
 
 All tests are 100% synthetic and hermetic (no live Ollama, no network, no API).
 """
@@ -22,7 +21,6 @@ import json
 import re
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import fitz
 import pytest
@@ -36,7 +34,6 @@ from socr.core.state import DocumentState
 from socr.judge.judge import JudgeVerdict
 from socr.judge.ollama_judge import OllamaVisionJudge
 from socr.pipeline import agentic as agentic_mod
-from socr.pipeline import orchestrator as orch
 from socr.pipeline.agentic import (
     AcceptDecision,
     CircuitBreakerPageJudge,
@@ -126,11 +123,16 @@ def _run_process_for_escalation(
     monkeypatch: pytest.MonkeyPatch,
     *,
     qwen_accepted: bool,
-) -> tuple[list[tuple[str, int]], dict[int, dict]]:
+    judge_circuit_open: bool = False,
+) -> tuple[list[tuple[str, int]], dict[int, dict], dict]:
     """Drive real ``process()`` on a born-digital table page with [QWEN, GEMINI].
 
     * ``qwen_accepted=False`` -> ``route_page`` rejects Qwen and runs Gemini once;
-      ``_escalate_table_page`` must NOT call Gemini a second time.
+      ``_escalate_table_page`` must NOT call Gemini a second time, AND must record
+      ``table_escalation_refused`` so the suspect table stays untrusted.
+    * ``qwen_accepted=False, judge_circuit_open=True`` -> ``route_page`` skips
+      Gemini with a $0 stub (NO real paid call ran); ``_escalate_table_page``
+      MUST still fire Gemini once (table exactness does not depend on the judge).
     * ``qwen_accepted=True`` -> ``route_page`` accepts Qwen (no paid call yet);
       ``_escalate_table_page`` runs Gemini once on the disagreeing table.
     """
@@ -191,10 +193,18 @@ def _run_process_for_escalation(
                 )
             return AcceptDecision(accept=True, reason="faithful")
 
-    pipe._build_page_judge = lambda state: _StubJudge()
+    def _build_judge(state):
+        inner = _StubJudge()
+        if judge_circuit_open:
+            return CircuitBreakerPageJudge(inner, lambda: True)
+        return inner
+
+    pipe._build_page_judge = _build_judge
 
     pipe.process(pdf, output_dir=out_dir)
-    return calls, _sidecars(out_dir)
+    trust_files = list(out_dir.rglob("tables_trust.json"))
+    trust = json.loads(trust_files[0].read_text()) if trust_files else {}
+    return calls, _sidecars(out_dir), trust
 
 
 def test_process_never_double_calls_gemini_in_table_escalation(
@@ -202,66 +212,149 @@ def test_process_never_double_calls_gemini_in_table_escalation(
 ) -> None:
     """Paired difference through real ``process()``:
 
-    * When ``route_page`` ALREADY ran Gemini (``qwen_accepted=False``),
-      ``_escalate_table_page`` skips the redundant paid re-call -> exactly 1
-      Gemini call and 1x ``page_cost_usd``.
-    * Control (``qwen_accepted=True``): ``route_page`` ran only free Qwen ->
-      ``_escalate_table_page`` DOES fire Gemini once -> 1 Gemini call.
+    * Real paid run arm (``qwen_accepted=False``): ``route_page`` ALREADY ran
+      Gemini -> ``_escalate_table_page`` skips the redundant paid re-call
+      (1 Gemini call, 1x cost), emits ``table_escalation_refused``, and keeps
+      the suspect table untrusted in ``tables_trust.json``.
+    * Paid-stub arm (``qwen_accepted=False, judge_circuit_open=True``):
+      ``route_page`` skipped Gemini with a $0 stub -> NO real paid call ran ->
+      ``_escalate_table_page`` MUST still fire Gemini once!
+    * Free-winner control (``qwen_accepted=True``): ``route_page`` ran only
+      free Qwen -> ``_escalate_table_page`` fires Gemini once.
     """
-    after_gemini_calls, after_gemini_sc = _run_process_for_escalation(
+    after_gemini_calls, after_gemini_sc, after_gemini_trust = _run_process_for_escalation(
         tmp_path / "after_gemini", monkeypatch, qwen_accepted=False
     )
-    after_qwen_calls, after_qwen_sc = _run_process_for_escalation(
+    after_stub_calls, after_stub_sc, _ = _run_process_for_escalation(
+        tmp_path / "after_stub", monkeypatch, qwen_accepted=False, judge_circuit_open=True
+    )
+    after_qwen_calls, _, _ = _run_process_for_escalation(
         tmp_path / "after_qwen", monkeypatch, qwen_accepted=True
     )
 
     gemini_after_gemini = [c for c in after_gemini_calls if c[0] == "gemini"]
+    gemini_after_stub = [c for c in after_stub_calls if c[0] == "gemini"]
     gemini_after_qwen = [c for c in after_qwen_calls if c[0] == "gemini"]
 
     assert len(gemini_after_gemini) == 1, (
         f"expected 1 Gemini call (no GH-96 double call), got {after_gemini_calls}"
     )
+    assert len(gemini_after_stub) == 1, (
+        f"paid stub from judge breaker must NOT block GH-96 table escalation: {after_stub_calls}"
+    )
     assert len(gemini_after_qwen) == 1, (
         f"control: GH-96 escalation after free Qwen must still fire once, got {after_qwen_calls}"
     )
     assert after_gemini_sc[1]["page_cost_usd"] == pytest.approx(PROFILE_GEMINI.cost_per_page_usd)
+    assert after_stub_sc[1]["page_cost_usd"] == pytest.approx(PROFILE_GEMINI.cost_per_page_usd)
+
+    # Distrust trace must stay visible when redundant paid escalation is skipped.
+    event_kinds = [e.get("kind") for e in after_gemini_sc[1].get("audit_events", [])]
+    assert "table_escalation_refused" in event_kinds
+    assert after_gemini_trust, "expected tables_trust.json for table page"
+    pages_trust = after_gemini_trust.get("pages") or {}
+    p1_trust = pages_trust.get("1") or pages_trust.get(1) or {}
+    assert p1_trust.get("flagged") is True
+    assert "table_escalation_refused" in (p1_trust.get("reasons") or [])
 
 
 def test_escalate_table_page_records_zero_phantom_cost_when_quota_circuit_open(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Neither an open ``_gemini_quota_circuit_open`` nor a non-run
-    ``MODEL_UNAVAILABLE`` stub may record phantom ``page_cost_usd``, whereas a
-    real executed ``CLI_ERROR`` attempt still bills (paired difference)."""
-    pdf = _table_pdf(tmp_path, pages=1)
+    """Quota-blocked and native-unavailable non-runs must cost $0 AND emit
+    ``table_escalation_refused``, whereas a real executed ``CLI_ERROR`` still bills."""
+    # Arm A: real process() on a 2-page table PDF driving real _run_engine_on_pages.
+    # p1 trips Gemini's quota circuit with HTTP 429 spending cap; p2 hits the open
+    # circuit -> 0 Gemini calls on p2, $0.0 cost on p2, AND table_escalation_refused
+    # stays recorded so p2's suspect table remains flagged in tables_trust.json.
+    from socr.pipeline import orchestrator as orch_mod
 
-    # Arm A: pipe._gemini_quota_circuit_open is already True -> no provider call, $0 cost.
-    state_a = DocumentState(DocumentHandle(pdf))
-    state_a.paid_disabled = {"reason": "quota_exhausted", "detail": "402", "pages_skipped": 0}
-    ps_a = state_a.pages[1]
-    bo_a = PageOutput(page_num=1, text=_SHIFTED_MD, status=PageStatus.SUCCESS, engine="qwen")
-    ps_a.attempts.append(bo_a)
-    ps_a.best_output = bo_a
+    pdf_2p = _table_pdf(tmp_path / "quota_doc", pages=2)
+    out_2p = tmp_path / "quota_out"
+    gemini_pages_called: list[int] = []
 
-    pipe_a = UnifiedPipeline(PipelineConfig(quiet=True, escalate_ambiguous_tables=True))
-    pipe_a._gemini_quota_circuit_open = True
-    called_a: list[int] = []
+    class _FakeEngine:
+        def __init__(self, eng_name: str) -> None:
+            self.name = eng_name
 
-    def _must_not_run(profile, page_num):
-        called_a.append(page_num)
-        return PageOutput(
-            page_num=page_num, text=_PERFECT_MD, status=PageStatus.SUCCESS, engine="gemini"
+        def is_available(self) -> bool:
+            return True
+
+        def process_pages(self, pdf_path, page_nums, config, dpi, subprocess_timeout=None, **_kw):
+            out: list[PageOutput] = []
+            for pn in page_nums:
+                if self.name == "gemini":
+                    gemini_pages_called.append(pn)
+                    out.append(
+                        PageOutput(
+                            page_num=pn,
+                            text="",
+                            status=PageStatus.ERROR,
+                            engine="gemini",
+                            failure_mode=FailureMode.CLI_ERROR,
+                            error=(
+                                "CLI exited 1: quota/rate-limit: HTTP 429 exceeded "
+                                "monthly spending cap for generativelanguage.googleapis.com"
+                            ),
+                        )
+                    )
+                else:
+                    out.append(
+                        PageOutput(
+                            page_num=pn,
+                            text=_SHIFTED_MD,
+                            status=PageStatus.SUCCESS,
+                            engine=self.name,
+                        )
+                    )
+            return out
+
+    monkeypatch.setattr(orch_mod, "get_engine", lambda et: _FakeEngine(et.value))
+    pipe_q = UnifiedPipeline(
+        PipelineConfig(
+            agentic=True,
+            quiet=True,
+            primary_engine=EngineType.QWEN,
+            local_engine=EngineType.QWEN,
+            enabled_engines=[EngineType.QWEN, EngineType.GEMINI],
+            escalate_ambiguous_tables=True,
+            dual_pass_tables=False,
+            table_judge_ladder=False,
+            write_manifest=False,
         )
-
-    degraded, out = pipe_a._escalate_table_page(
-        state_a, 1, ps_a, bo_a, PROFILE_GEMINI, _must_not_run, pdf, needs_escalation=True
     )
-    assert degraded is False
-    assert out is bo_a
-    assert called_a == []
-    assert state_a.total_cost == 0.0
-    assert ps_a.page_cost_usd == 0.0
-    assert state_a.paid_disabled["pages_skipped"] == 1
+    detect_q = pipe_q.bd_detector.detect
+
+    def _force_ocr_q(path: Path):
+        assessment = detect_q(path)
+        for p in assessment.pages:
+            p.needs_ocr_enhancement = True
+        return assessment
+
+    pipe_q.bd_detector.detect = _force_ocr_q
+    pipe_q._available_engines_for_agentic = lambda: [PROFILE_QWEN_LOCAL, PROFILE_GEMINI]
+    pipe_q._resolve_judge_model = lambda *a, **k: ""
+    pipe_q._resolve_crop_vlm_model = lambda: None
+
+    class _AcceptQwenJudge:
+        def assess(self, output: PageOutput, provider) -> AcceptDecision:
+            return AcceptDecision(accept=True, reason="faithful")
+
+    pipe_q._build_page_judge = lambda state: _AcceptQwenJudge()
+    pipe_q.process(pdf_2p, output_dir=out_2p)
+
+    quota_sc = _sidecars(out_2p)
+    assert gemini_pages_called == [1], f"p2 must short-circuit with 0 calls: {gemini_pages_called}"
+    assert quota_sc[2]["page_cost_usd"] == 0.0
+    p2_kinds = [e.get("kind") for e in quota_sc[2].get("audit_events", [])]
+    assert "table_escalation_refused" in p2_kinds
+    trust_files_q = list(out_2p.rglob("tables_trust.json"))
+    assert trust_files_q
+    p2_trust = (json.loads(trust_files_q[0].read_text()).get("pages") or {}).get("2") or {}
+    assert p2_trust.get("flagged") is True
+    assert "table_escalation_refused" in (p2_trust.get("reasons") or [])
+
+    pdf = _table_pdf(tmp_path, pages=1)
 
     # Arm B: provider returns circuit-blocked PageOutput (MODEL_UNAVAILABLE + empty text) -> $0 cost.
     state_b = DocumentState(DocumentHandle(pdf))
@@ -279,6 +372,37 @@ def test_escalate_table_page_records_zero_phantom_cost_when_quota_circuit_open(
     )
     assert state_b.total_cost == 0.0
     assert ps_b.page_cost_usd == 0.0
+
+    # Arm B2: wrong-engine branch receiving native MODEL_UNAVAILABLE fallback -> $0 cost!
+    state_b2 = DocumentState(DocumentHandle(pdf))
+    ps_b2 = state_b2.pages[1]
+    bo_b2 = PageOutput(page_num=1, text=_SHIFTED_MD, status=PageStatus.SUCCESS, engine="qwen")
+    ps_b2.attempts.append(bo_b2)
+    ps_b2.best_output = bo_b2
+    pipe_b2 = UnifiedPipeline(PipelineConfig(quiet=True, escalate_ambiguous_tables=True))
+
+    def _returns_native_unavailable(profile, page_num):
+        return PageOutput(
+            page_num=page_num,
+            text="fallback native text",
+            status=PageStatus.WARNING,
+            engine="native",
+            failure_mode=FailureMode.MODEL_UNAVAILABLE,
+        )
+
+    pipe_b2._escalate_table_page(
+        state_b2,
+        1,
+        ps_b2,
+        bo_b2,
+        PROFILE_GEMINI,
+        _returns_native_unavailable,
+        pdf,
+        needs_escalation=True,
+    )
+    assert state_b2.total_cost == 0.0
+    assert ps_b2.page_cost_usd == 0.0
+    assert any(e.kind == "table_escalation_refused" for e in state_b2.events)
 
     # Arm C (control): real executed CLI_ERROR -> still billed!
     state_c = DocumentState(DocumentHandle(pdf))
@@ -352,6 +476,30 @@ def test_route_page_skips_paid_rung_when_circuit_breaker_judge_is_open() -> None
     assert open_cost == 0.0
     assert closed_calls == ["qwen", "gemini"]
     assert closed_cost == pytest.approx(PROFILE_GEMINI.cost_per_page_usd)
+
+    # Breaker probe raising must fail closed (skip paid rung at $0 cost).
+    err_calls: list[str] = []
+
+    def _boom_probe() -> bool:
+        raise RuntimeError("breaker probe failed")
+
+    def _run_err_provider(prof, pn: int) -> PageOutput:
+        err_calls.append(prof.engine.value)
+        return PageOutput(
+            page_num=pn,
+            text="Estimated table text " * 20,
+            status=PageStatus.SUCCESS,
+            engine=prof.engine.value,
+        )
+
+    err_decision = route_page(
+        1,
+        [PROFILE_QWEN_LOCAL, PROFILE_GEMINI],
+        _run_err_provider,
+        _OuterWrap(CircuitBreakerPageJudge(_RejectLeaf(), _boom_probe)),
+    )
+    assert err_calls == ["qwen"]
+    assert err_decision.total_cost_usd == 0.0
 
 
 def test_process_skips_paid_gemini_once_judge_circuit_breaker_opens(
@@ -456,65 +604,3 @@ def test_judge_model_candidates_contain_no_forbidden_qwen_8b() -> None:
         assert "qwen3-vl:8b" not in lower
         assert not re.search(r"qwen.*:8b\b", lower), f"forbidden :8b Qwen model: {model!r}"
         assert lower != "qwen3-vl:30b", "thinking qwen3-vl:30b is forbidden"
-
-
-# ---------------------------------------------------------------------------
-# 4. _socr_source_digest ignores non-reading packages while tracking reading edits
-# ---------------------------------------------------------------------------
-
-
-def test_socr_source_digest_ignores_non_reading_packages_and_tracks_reading_edits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    pkg = tmp_path / "socr"
-    files = {
-        "core/verdict.py": "VERDICT = 1\n",
-        "engines/qwen.py": "MODEL = 'qwen3-vl:30b-a3b-instruct'\n",
-        "tables/second_reader.py": "STRICT = True\n",
-        "pipeline/orchestrator.py": "ORCH = 1\n",
-        "pipeline/refinalize_own_text.py": "REFIN = 1\n",
-        "benchmark/runner.py": "BENCH = 1\n",
-        "refinalize/offline.py": "OFFLINE = 1\n",
-        "ui/dashboard.py": "UI = 1\n",
-        "devtools/regen.py": "DEV = 1\n",
-    }
-    for rel, content in files.items():
-        p = pkg / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
-    (pkg / "__init__.py").write_text("__version__ = '0.0.0'\n")
-
-    def _live_digest() -> str:
-        orch._SOURCE_DIGEST_CACHE = None
-        with patch.object(socr, "__file__", str(pkg / "__init__.py")):
-            return orch._socr_source_digest()
-
-    try:
-        baseline = _live_digest()
-
-        # Editing ANY non-reading package/module must NOT invalidate the digest.
-        for non_reading in (
-            "benchmark/runner.py",
-            "refinalize/offline.py",
-            "ui/dashboard.py",
-            "devtools/regen.py",
-            "pipeline/refinalize_own_text.py",
-        ):
-            (pkg / non_reading).write_text("# edited non-reading file\nX = 999\n")
-            assert _live_digest() == baseline, f"{non_reading} must not change _socr_source_digest"
-
-        # Editing a reading-path module MUST change the digest.
-        for reading in (
-            "core/verdict.py",
-            "engines/qwen.py",
-            "tables/second_reader.py",
-            "pipeline/orchestrator.py",
-        ):
-            before = _live_digest()
-            (pkg / reading).write_text((pkg / reading).read_text() + "# reading edit\n")
-            after = _live_digest()
-            assert after != before, (
-                f"reading-path edit to {reading} must change _socr_source_digest"
-            )
-    finally:
-        orch._SOURCE_DIGEST_CACHE = None

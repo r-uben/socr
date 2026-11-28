@@ -24,6 +24,7 @@ from pathlib import Path
 import httpx
 
 from socr.core.ollama_utils import (
+    call_with_total_deadline,
     host_reachable,
     ollama_endpoint,
     raise_for_status_redacted,
@@ -115,7 +116,16 @@ def _encode_image_bytes(image: Path | str | bytes) -> tuple[str, str]:
     """Return ``(base64_ascii, mime_type)`` for a path or raw image bytes."""
     if isinstance(image, (bytes, bytearray)):
         raw = bytes(image)
-        mime = "image/jpeg" if raw[:2] == b"\xff\xd8" else "image/png"
+        if raw[:2] == b"\xff\xd8":
+            mime = "image/jpeg"
+        elif raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            mime = "image/png"
+        elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+            mime = "image/webp"
+        elif raw[:6] in (b"GIF87a", b"GIF89a"):
+            mime = "image/gif"
+        else:
+            raise ValueError("Unsupported raw image format")
     else:
         path = Path(image)
         raw = path.read_bytes()
@@ -124,6 +134,8 @@ def _encode_image_bytes(image: Path | str | bytes) -> tuple[str, str]:
             mime = "image/jpeg"
         elif suffix == ".webp":
             mime = "image/webp"
+        elif suffix == ".gif":
+            mime = "image/gif"
         else:
             mime = "image/png"
     return base64.b64encode(raw).decode("ascii"), mime
@@ -194,7 +206,14 @@ class OCRiaEngine:
                     headers=headers,
                     timeout=timeout,
                 )
-                return resp.status_code == 200
+                if resp.status_code != 200:
+                    return False
+                data = resp.json()
+                models = data.get("data") or []
+                return any(
+                    isinstance(model, dict) and model.get("id") == self.config.model
+                    for model in models
+                )
             except Exception:
                 return False
 
@@ -249,7 +268,11 @@ class OCRiaEngine:
                 {"role": "user", "content": "", "images": [image_b64]},
             ],
         }
-        resp = httpx.post(url, **extra, json=payload, timeout=self.config.timeout)
+        resp = call_with_total_deadline(
+            lambda: httpx.post(url, **extra, json=payload, timeout=self.config.timeout),
+            self.config.timeout,
+            label=f"ocria:ollama:{self.config.model}",
+        )
         raise_for_status_redacted(resp)
         data = resp.json()
         msg = data.get("message") or {}
@@ -281,7 +304,11 @@ class OCRiaEngine:
                 },
             ],
         }
-        resp = httpx.post(url, headers=headers, json=payload, timeout=self.config.timeout)
+        resp = call_with_total_deadline(
+            lambda: httpx.post(url, headers=headers, json=payload, timeout=self.config.timeout),
+            self.config.timeout,
+            label=f"ocria:vllm:{self.config.model}",
+        )
         raise_for_status_redacted(resp)
         data = resp.json()
         choices = data.get("choices") or []

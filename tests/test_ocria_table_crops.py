@@ -27,10 +27,13 @@ import pytest
 import socr
 from socr.engines.ocria import (
     DEFAULT_OCRIA_MODEL,
+    OCRIA_API_KEY_ENV,
     OCRIA_BASE_URL_ENV,
+    OCRIA_MODEL_ENV,
     OCRIA_TABLE_NO_CHART_PROMPT,
     OCRiaConfig,
     OCRiaEngine,
+    _encode_image_bytes,
 )
 from socr.tables.crop_ocr import (
     CropAgreementResult,
@@ -38,6 +41,7 @@ from socr.tables.crop_ocr import (
     normalize_html_table_for_comparison,
     verify_table_crop_two_readers,
 )
+from socr.tables.second_reader import row_numbers
 
 # Minimal valid 1x1 PNG bytes for hermetic image tests.
 _TINY_PNG = (
@@ -45,6 +49,13 @@ _TINY_PNG = (
     b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0"
     b"\x00\x00\x03\x01\x01\x00\x18\xdd\x8d\xb0\x00\x00\x00\x00IEND\xaeB`\x82"
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_ocria_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tests hermetic even when OCRIA_* vars are set in the caller shell."""
+    for env_var in (OCRIA_MODEL_ENV, OCRIA_BASE_URL_ENV, OCRIA_API_KEY_ENV):
+        monkeypatch.delenv(env_var, raising=False)
 
 
 def test_loaded_socr_is_this_checkout() -> None:
@@ -182,10 +193,69 @@ def test_ocria_is_available_checks_ollama_tags_and_vllm_models(
     assert OCRiaEngine().is_available() is False
 
     vllm_engine = OCRiaEngine(OCRiaConfig(base_url="http://h200-node:8000/v1"))
-    monkeypatch.setattr(httpx, "get", lambda url, **kw: _FakeResponse({"data": []}, 200))
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda url, **kw: _FakeResponse({"data": [{"id": DEFAULT_OCRIA_MODEL}]}, 200),
+    )
     assert vllm_engine.is_available() is True
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: _FakeResponse({"data": []}, 200))
+    assert vllm_engine.is_available() is False
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda url, **kw: _FakeResponse({"data": [{"id": "different-model"}]}, 200),
+    )
+    assert vllm_engine.is_available() is False
     monkeypatch.setattr(httpx, "get", lambda url, **kw: _FakeResponse({}, 503))
     assert vllm_engine.is_available() is False
+
+
+def test_ocria_encode_image_bytes_detects_magic_types_and_rejects_unknown() -> None:
+    assert _encode_image_bytes(_TINY_PNG)[1] == "image/png"
+    assert _encode_image_bytes(b"\xff\xd8\xff\xe0dummy")[1] == "image/jpeg"
+    assert _encode_image_bytes(b"RIFF\x00\x00\x00\x00WEBPdummy")[1] == "image/webp"
+    assert _encode_image_bytes(b"GIF89adummy")[1] == "image/gif"
+    with pytest.raises(ValueError, match="Unsupported raw image format"):
+        _encode_image_bytes(b"not-an-image")
+
+
+def test_ocria_posts_enforce_total_wall_clock_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both Ollama and vLLM POSTs must run through ``call_with_total_deadline``."""
+    from socr.engines import ocria as ocria_mod
+
+    crop = tmp_path / "crop.png"
+    crop.write_bytes(_TINY_PNG)
+    deadlines: list[tuple[float, str]] = []
+
+    def _spy_deadline(fn, timeout: float, *, label: str = ""):
+        deadlines.append((timeout, label))
+        return fn()
+
+    monkeypatch.setattr(ocria_mod, "call_with_total_deadline", _spy_deadline)
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda url, **kw: _FakeResponse(
+            {
+                "message": {"content": "<table><tr><td>1.0</td></tr></table>"},
+                "done_reason": "stop",
+                "choices": [
+                    {
+                        "message": {"content": "<table><tr><td>1.0</td></tr></table>"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ),
+    )
+    OCRiaEngine(timeout=42.0).read_image(crop)
+    OCRiaEngine(base_url="http://h200-node:8000/v1", timeout=55.0).read_image(crop)
+    assert len(deadlines) == 2
+    assert deadlines[0][0] == 42.0 and "ollama" in deadlines[0][1]
+    assert deadlines[1][0] == 55.0 and "vllm" in deadlines[1][1]
 
 
 # ---------------------------------------------------------------------------
@@ -337,20 +407,45 @@ def test_normalize_preserves_non_consecutive_year_groups_in_headers() -> None:
     assert header.count("2000") == 2
 
 
-def test_normalize_does_not_deduplicate_first_data_row_with_year_like_integers() -> None:
-    """P0 silent-data-loss guard: a named data row right after ``| --- |`` whose
-    integer values happen to fall in 1800-2099 (e.g. dollar amounts 1950, 2005)
-    must NEVER be mistaken for a repeated-year header tier."""
-    html_text = """\
+def test_normalize_does_not_deduplicate_data_rows_or_continuation_tables_with_year_like_integers() -> (
+    None
+):
+    """P0 silent-data-loss guard: ``<td>`` data rows — including first-row data
+    in a headerless continuation table and empty-stub continuation rows — must
+    NEVER have repeated 1800-2099 integers deduplicated."""
+    # 1. Named data row directly under a <th> header.
+    named_data_html = """\
 <table>
   <tr><th>Category</th><th>A</th><th>B</th><th>C</th><th>D</th></tr>
   <tr><td>Total loans</td><td>1950</td><td>1950</td><td>2005</td><td>2005</td></tr>
   <tr><td>Real GDP</td><td>1.6</td><td>2.1</td><td>3.2</td><td>4.0</td></tr>
 </table>"""
-    norm = normalize_html_table_for_comparison(html_text)
+    norm = normalize_html_table_for_comparison(named_data_html)
     lines = norm.splitlines()
     assert lines[2] == "| Total loans | 1950 | 1950 | 2005 | 2005 |"
     assert lines[3] == "| Real GDP | 1.6 | 2.1 | 3.2 | 4.0 |"
+
+    # 2. Headerless continuation table whose first row is <td> data (even 1-row).
+    first_row_data_html = """\
+<table>
+  <tr><td>Total loans</td><td>1950</td><td>1950</td><td>2005</td><td>2005</td></tr>
+</table>"""
+    norm_first = normalize_html_table_for_comparison(first_row_data_html)
+    assert norm_first.splitlines()[0] == "| Total loans | 1950 | 1950 | 2005 | 2005 |"
+
+    # 3. Empty-stub <td> continuation row under a <thead> header.
+    empty_stub_html = """\
+<table>
+  <thead><tr><th>Item</th><th>Banks</th><th>Thrifts</th><th>CUs</th></tr></thead>
+  <tbody>
+    <tr><td></td><td>1950</td><td>1950</td><td>2000</td></tr>
+    <tr><td>Total</td><td>2000</td><td>2000</td><td>2000</td></tr>
+  </tbody>
+</table>"""
+    norm_stub = normalize_html_table_for_comparison(empty_stub_html)
+    stub_lines = norm_stub.splitlines()
+    assert stub_lines[2] == "|  | 1950 | 1950 | 2000 |"
+    assert stub_lines[3] == "| Total | 2000 | 2000 | 2000 |"
 
 
 def test_normalize_leaves_unclosed_table_intact_to_fail_closed() -> None:
@@ -380,16 +475,18 @@ class _StubReader:
 
 
 _TABLE_A_HTML = """\
-<page_header>-11-</page_header>
+Table 1. Staff Forecast (percent change, annual rate)
 <table>
   <tr><th>Category</th><th colspan="2">2000</th><th colspan="2">2001</th></tr>
   <tr><th></th><th>Q3</th><th>Q4</th><th>Q1</th><th>Q2</th></tr>
   <tr><td>PCE inflation</td><td>1.6</td><td>-0.1</td><td>2.3</td><td>0.4</td></tr>
   <tr><td>Core PCE</td><td>1.2</td><td>-0.3</td><td>1.9</td><td>0.2</td></tr>
 </table>
+Note: Seasonally adjusted.
 """
 
 _TABLE_B_EXPANDED_HEADER_HTML = """\
+<page_header>-11-</page_header>
 <table>
   <tr><th>Category</th><th>2000</th><th>2000</th><th>2001</th><th>2001</th></tr>
   <tr><th></th><th>Q3</th><th>Q4</th><th>Q1</th><th>Q2</th></tr>
@@ -414,7 +511,29 @@ def test_two_readers_agree_when_only_furniture_and_spanned_headers_differ(tmp_pa
     assert res.reader_a_model == "llamaindex/ocria-1:bf16"
     assert res.reader_b_model == "lighton-ocr-2"
     assert "| PCE inflation | 1.6 | -0.1 | 2.3 | 0.4 |" in res.markdown
-    assert "-11-" not in res.markdown
+    # Shipped markdown preserves title/units/notes and full token multiset from reader A.
+    assert "Table 1. Staff Forecast (percent change, annual rate)" in res.markdown
+    assert "Note: Seasonally adjusted." in res.markdown
+    # Comparison markdown strips furniture from reader B.
+    assert "-11-" not in res.reader_b_markdown
+
+    # When reader A has explicit repeated <th>2000</th> headers, verified markdown
+    # returns the UN-DEDUPED converted reading preserving reader A's full numeric multiset.
+    res_rev = verify_table_crop_two_readers(
+        crop,
+        reader_a=_StubReader("lighton-ocr-2", _TABLE_B_EXPANDED_HEADER_HTML),
+        reader_b=_StubReader("llamaindex/ocria-1:bf16", _TABLE_A_HTML),
+    )
+    assert res_rev.agreed is True
+    assert sorted(row_numbers(res_rev.markdown)) == sorted(
+        row_numbers(
+            "| Category | 2000 | 2000 | 2001 | 2001 |\n"
+            "|  | Q3 | Q4 | Q1 | Q2 |\n"
+            "| PCE inflation | 1.6 | -0.1 | 2.3 | 0.4 |\n"
+            "| Core PCE | 1.2 | -0.3 | 1.9 | 0.2 |\n"
+            "<page_header>-11-</page_header>"
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -481,6 +600,17 @@ def test_two_readers_fail_closed_on_truncation_unclosed_empty_or_error(tmp_path:
     assert res_both_unclosed.agreed is False
     assert res_both_unclosed.markdown == ""
     assert "both_unclosed_markup" in res_both_unclosed.unknown_reason
+
+    # 2b. Unclosed page-furniture / watermark tag must fail closed even when table is closed.
+    unclosed_furniture = "<page_header>II-14\n" + _TABLE_A_HTML
+    res_unclosed_furn = verify_table_crop_two_readers(
+        crop,
+        reader_a=_StubReader("ocria-1", unclosed_furniture),
+        reader_b=_StubReader("glm-ocr", _TABLE_B_EXPANDED_HEADER_HTML),
+    )
+    assert res_unclosed_furn.agreed is False
+    assert res_unclosed_furn.markdown == ""
+    assert "reader_a_unclosed_markup" in res_unclosed_furn.unknown_reason
 
     # 3. Empty output
     res_empty = verify_table_crop_two_readers(

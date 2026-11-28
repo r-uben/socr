@@ -1172,45 +1172,8 @@ def _socr_version() -> str:
     return str(getattr(socr, "__version__", ""))
 
 
-#: Non-reading top-level packages excluded from ``_socr_source_digest``.
-#: Editing benchmarks, developer tooling, UI renderers, or offline refinalizers
-#: cannot alter how a page is OCR'd or verified, so edits there must not
-#: invalidate cached page OCR readings across a corpus.
-_SOURCE_DIGEST_EXCLUDED_PACKAGES: frozenset[str] = frozenset(
-    {"benchmark", "devtools", "refinalize", "ui"}
-)
-
-
-def _is_source_digest_excluded(rel_path: Path) -> bool:
-    """True when *rel_path* (relative to the ``socr`` package root) is non-reading code."""
-    parts = rel_path.parts
-    if "__pycache__" in parts:
-        return True
-    if parts and parts[0] in _SOURCE_DIGEST_EXCLUDED_PACKAGES:
-        return True
-    if len(parts) >= 2 and parts[0] == "pipeline" and rel_path.name.startswith("refinalize_"):
-        return True
-    return False
-
-
-def _compute_source_digest(root: Path) -> str:
-    """Compute the deterministic SHA-256 digest of reading-path ``.py`` files under *root*."""
-    import hashlib
-
-    digest = hashlib.sha256()
-    for path in sorted(root.rglob("*.py")):
-        rel = path.relative_to(root)
-        if _is_source_digest_excluded(rel):
-            continue
-        digest.update(str(rel).encode("utf-8"))
-        digest.update(b"\x00")
-        digest.update(path.read_bytes())
-        digest.update(b"\x00")
-    return digest.hexdigest()
-
-
 def _socr_source_digest() -> str:
-    """SHA-256 over every reading-path ``socr`` ``.py`` file, computed once per process.
+    """SHA-256 over every shipped ``socr`` ``.py`` file, computed once per process.
 
     GH-214. ``_run_fingerprint`` records the run *configuration*, never socr's own
     code, so fixing an extraction bug without touching config leaves the fingerprint
@@ -1218,11 +1181,12 @@ def _socr_source_digest() -> str:
     code never reaches them. The document then reports SUCCESS carrying output the
     fix was supposed to replace.
 
-    Non-reading packages (``benchmark/``, ``devtools/``, ``refinalize/``, ``ui/``,
-    and offline ``pipeline/refinalize_*.py`` scripts) are excluded so refactoring
-    analysis harnesses or UI code does not invalidate cached page OCR readings;
-    every reading, verification, judging, routing, and assembly module stays
-    hashed automatically (fail-safe: any new runtime package is included by default).
+    Hashing the whole package rather than a curated module list is deliberate. A
+    curated list has to be maintained, and a module someone forgets to register
+    fails DANGEROUS — it silently reuses stale output, which is the very bug this
+    closes. Hashing everything can only fail SAFE: an output-neutral edit (a
+    comment, a docstring) costs one needless reprocess. Re-OCR is cheap; a stale
+    number in a citation corpus is not.
 
     ``normalizer_version`` / ``assembly_version`` (issue #38) are the narrow,
     hand-maintained form of this idea and stay where they are — they cover two
@@ -1237,13 +1201,22 @@ def _socr_source_digest() -> str:
     if _SOURCE_DIGEST_CACHE is not None:
         return _SOURCE_DIGEST_CACHE
 
+    import hashlib
     from pathlib import Path as _Path
 
     import socr
 
     root = _Path(socr.__file__).resolve().parent
+    digest = hashlib.sha256()
     try:
-        _SOURCE_DIGEST_CACHE = _compute_source_digest(root)
+        for path in sorted(root.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            digest.update(str(path.relative_to(root)).encode("utf-8"))
+            digest.update(b"\x00")
+            digest.update(path.read_bytes())
+            digest.update(b"\x00")
+        _SOURCE_DIGEST_CACHE = digest.hexdigest()
     except OSError:
         # An unreadable tree must not silently degrade into "no code identity",
         # which would re-open GH-214. A FIXED sentinel is not enough: two runs from
@@ -8400,31 +8373,33 @@ class UnifiedPipeline:
                     return False, bo
 
                 # #1394 / cost audit: never double-call a paid engine on a page
-                # where ``route_page`` already ran a paid attempt (measured 0/61
-                # yield after Gemini won). Keep the incumbent cleanly without
-                # firing a second paid call or attaching a false distrust event.
-                if is_paid_profile(profile) and self._page_had_paid_attempt(ps):
+                # where ``route_page`` already ran a real paid call (measured
+                # 0/61 yield after Gemini won). Keep the incumbent, record
+                # ``table_escalation_refused`` (in ``TABLE_DISTRUST_KINDS``) and
+                # mark escalation not received so the suspect table stays
+                # untrusted in ``tables_trust.json`` rather than silently
+                # going trusted. Skipped $0 paid stubs (judge breaker open,
+                # paid escalation blocked, quota non-run) do NOT count as a
+                # paid call that ran, so the table lane still fires for them.
+                if is_paid_profile(profile) and self._page_had_real_paid_attempt(ps):
                     logger.info(
                         "p%d: skipping redundant paid table escalation (%s); "
-                        "page already had a paid attempt",
+                        "page already had a paid reading",
                         page_num,
                         profile.engine.value,
                     )
-                    return False, bo
-
-                # Never launch or bill a Gemini escalation once the quota/402
-                # circuit is already open (avoids phantom page_cost_usd).
-                if profile.engine == EngineType.GEMINI and getattr(
-                    self, "_gemini_quota_circuit_open", False
-                ):
-                    self._gemini_circuit_skips = getattr(self, "_gemini_circuit_skips", 0) + 1
-                    if state.paid_disabled is not None:
-                        state.paid_disabled["pages_skipped"] = self._gemini_circuit_skips
-                    logger.info(
-                        "p%d: skipping table escalation (%s); Gemini quota circuit is open",
-                        page_num,
-                        profile.engine.value,
+                    state.events.append(
+                        AuditEvent(
+                            page_num=page_num,
+                            kind="table_escalation_refused",
+                            engine=profile.engine.value,
+                            detail=(
+                                "paid reading already taken on this page; "
+                                "skipping redundant paid table escalation"
+                            ),
+                        )
                     )
+                    self._mark_escalation_not_received(ps)
                     return False, bo
 
                 # GH-851: evidence of a wedge, not of one slow page. An earlier
@@ -8572,7 +8547,13 @@ class UnifiedPipeline:
                             ),
                         )
                     )
-                    if out is None or not _provider_call_never_ran(out):
+                    if out is None or (
+                        not _provider_call_never_ran(out)
+                        and not (
+                            out.engine == "native"
+                            and out.failure_mode == FailureMode.MODEL_UNAVAILABLE
+                        )
+                    ):
                         _record_attempt_cost()
                     return False, bo
                 if out.status is not PageStatus.SUCCESS or not (out.text or "").strip():
@@ -8680,6 +8661,44 @@ class UnifiedPipeline:
         except Exception as exc:  # a failed escalation must never lose a page
             logger.warning("table escalation failed on p%d (%s); keeping text", page_num, exc)
             return False, bo
+
+    def _page_had_real_paid_attempt(self, ps) -> bool:
+        """Whether a paid reader ACTUALLY RAN (or billed) on this page.
+
+        Narrower than :meth:`_page_had_paid_attempt`: ignores $0 skip stubs from
+        ``route_page`` (judge circuit open, budget exceeded, paid escalation
+        blocked) and ``_provider_call_never_ran`` / native ``MODEL_UNAVAILABLE``
+        non-runs, so pages where no paid call ever executed still get their
+        table-escalation lane. Unknown spend (``None``) still fails closed.
+        """
+        from socr.pipeline.agentic import _provider_call_never_ran
+
+        cost = getattr(ps, "page_cost_usd", 0.0)
+        if cost is None or cost > 0.0:
+            return True
+        for att in ps.attempts:
+            prof = profile_by_id(getattr(att, "provider_id", "") or "")
+            if prof is None or not is_paid_profile(prof):
+                continue
+            if _provider_call_never_ran(att):
+                continue
+            if att.engine == "native" and att.failure_mode == FailureMode.MODEL_UNAVAILABLE:
+                continue
+            # route_page skip stubs are ERROR + FailureMode.NONE + empty text + empty engine.
+            if (
+                att.status == PageStatus.ERROR
+                and att.failure_mode == FailureMode.NONE
+                and not (att.text or "").strip()
+                and not (att.engine or "").strip()
+            ):
+                continue
+            if (
+                getattr(att, "cost_usd", 0.0) > 0.0
+                or att.status == PageStatus.SUCCESS
+                or att.engine == prof.engine.value
+            ):
+                return True
+        return False
 
     def _page_had_paid_attempt(self, ps) -> bool:
         """#1361: whether a paid reader was already tried (or billed) for this page.
