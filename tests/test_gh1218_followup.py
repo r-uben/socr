@@ -34,7 +34,7 @@ RECT = (0.0, 0.0, 612.0, 792.0)
 def test_refinalize_merges_into_an_entry_an_earlier_pass_wrote(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from socr.pipeline.refinalize_own_text import LOG_NAME, refinalize_document
+    from socr.refinalize.own_text import LOG_NAME, refinalize_document
 
     pdf = _rotated_pdf(tmp_path / "doc.pdf")
     old = tmp_path / "old"
@@ -181,7 +181,7 @@ def test_refinalize_checks_a_consensus_winner_exactly_as_a_fresh_run_does(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import test_gh1218_drops_clause as base
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     monkeypatch.setattr(base, "_Reader", _ConsensusReader)
     pdf = _rotated_pdf(tmp_path / "doc.pdf")
@@ -205,7 +205,7 @@ def test_refinalize_checks_a_consensus_winner_exactly_as_a_fresh_run_does(
 
 
 def test_refinalize_counts_a_page_that_is_no_model_reading(tmp_path: Path) -> None:
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     doc = tmp_path / "doc"
     (doc / "pages").mkdir(parents=True)

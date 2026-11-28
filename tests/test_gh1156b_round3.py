@@ -183,7 +183,7 @@ def test_a_judge_reason_longer_than_the_record_still_finds_its_reading(
 
     from socr.pipeline.agentic import AcceptDecision
     from socr.pipeline.orchestrator import ATTEMPT_SUMMARY_REASON_MAX_CHARS
-    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+    from socr.refinalize.prior_ocr import refinalize_document
 
     import test_gh1156b_masked_layer as e2e
 

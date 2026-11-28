@@ -21924,7 +21924,7 @@ class UnifiedPipeline:
         # or with another count, and an empty or mismatched list is never written for a FAIL
         # clause. ``None`` = no list could be confirmed: the event is still recorded, with
         # the reason and no list, and the gap is logged.
-        from socr.pipeline.refinalize_own_text import resolve_dropped as _resolve_dropped
+        from socr.core.verdict import resolve_dropped as _resolve_dropped
 
         numbers_dropped_by_page: dict[int, list[str] | None] = {}
         numbers_dropped_unresolved: dict[int, str] = {}

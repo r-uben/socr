@@ -437,7 +437,7 @@ def test_refinalize_turns_an_old_run_into_what_a_run_of_this_code_writes(
     import shutil
 
     from socr.core import verdict
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     pdf = _rotated_pdf(tmp_path / "doc.pdf")
     fresh, old = tmp_path / "fresh", tmp_path / "old"
@@ -472,7 +472,7 @@ def test_refinalize_writes_the_pass_record_on_a_page_that_loses_nothing(
     import shutil
 
     from socr.core import verdict
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     pdf = _rotated_pdf(tmp_path / "doc.pdf")
     fresh, old = tmp_path / "fresh", tmp_path / "old"
@@ -531,7 +531,7 @@ def test_refinalize_cli_summary_names_the_words_result(
     import shutil
 
     from socr.core import verdict
-    from socr.pipeline.refinalize_own_text import main
+    from socr.refinalize.own_text import main
 
     pdf = _rotated_pdf(tmp_path / "doc.pdf")
     old = tmp_path / "old"

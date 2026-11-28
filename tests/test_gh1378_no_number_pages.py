@@ -404,7 +404,7 @@ def test_a_cosmetic_encoding_flag_on_a_born_digital_layer_keeps_the_page_warned(
 def test_refinalize_reads_the_strict_fact_from_the_sidecar() -> None:
     from socr.core.born_digital import PageAssessment
 
-    from socr.pipeline.refinalize_own_text import _page_state
+    from socr.refinalize.own_text import _page_state
 
     sidecar = {"page_num": 1, "text_ink_fully_accounted": True, "text_coverage": "passed"}
     pa = PageAssessment(page_num=1, is_born_digital=False, native_text="", confidence=0.0)

@@ -742,7 +742,7 @@ def test_refinalize_unshipped_figures_demotes_completed_to_partial_and_recounts_
     using the pending in-memory sidecars so ``verified_text`` drops to 0 before commit."""
     from test_gh1187_unshipped_figure_pages import _CAPTION, _PROSE, _pdf_with_a_figure, _run_dir
 
-    from socr.pipeline import refinalize_unshipped_figures as tool
+    from socr.refinalize import unshipped_figures as tool
 
     pdf = _pdf_with_a_figure(tmp_path / "paper.pdf", draw_figure=False)
     table = "| A | B |\n| --- | --- |\n| 1 | 2 |"
@@ -815,7 +815,7 @@ def test_refinalize_boilerplate_preserves_unrelated_md_and_does_not_recreate_doc
     NOT recreate ``<stem>.md`` (which would defeat the resume gate)."""
     from test_boilerplate_output import JCS_P2_TEXT
 
-    from socr.pipeline.refinalize_boilerplate import refinalize_document
+    from socr.refinalize.boilerplate import refinalize_document
 
     doc_dir = tmp_path / "paper"
     pages_dir = doc_dir / "pages"
@@ -900,7 +900,7 @@ def test_refinalize_boilerplate_preserves_unrelated_md_and_does_not_recreate_doc
     dry_changes = refinalize_document(doc_dir, apply=False)
     assert [(c.page_num, c.action) for c in dry_changes] == [(2, "re_ocr")]
     caplog.clear()
-    with caplog.at_level("WARNING", logger="socr.pipeline.refinalize_boilerplate"):
+    with caplog.at_level("WARNING", logger="socr.refinalize.boilerplate"):
         apply_changes = refinalize_document(doc_dir, apply=True)
     assert [(c.page_num, c.action) for c in apply_changes] == [(2, "re_ocr")]
     assert notes_md.read_text(encoding="utf-8") == "my hand-written notes"
@@ -916,7 +916,7 @@ def test_refinalize_second_reader_recovers_after_crash_between_fragment_and_side
     from test_gh1267_row_binding_pipeline import _run
     from test_gh1409_refinalize_second_reader import MODEL, Reader, _disputing, _doc_dir
 
-    from socr.pipeline import refinalize_second_reader as tool
+    from socr.refinalize import second_reader as tool
 
     _, _, _, out, pdf = _run(tmp_path, GROUP, 0, check_runs=True, out_name="run", providers=True)
     doc_dir = _doc_dir(out)

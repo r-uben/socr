@@ -47,6 +47,8 @@ from socr.core.ollama_utils import (
 )
 from socr.core.providers import is_cloud_model, zero_cap_pinned_forbids_cloud
 from socr.engines.registry import get_engine, has_cli_engine
+from socr.judge.table_rung_gemini import gemini_rung_reachable
+from socr.judge.table_rung_ollama import ollama_rung_reachable as table_judge_ollama_rung_reachable
 from socr.tables.extract import probe_openai_server_idle, resolve_ollama_host
 from socr.tables.source_evidence import WITNESS_READING, classical_ocr_backend_state
 
@@ -316,6 +318,30 @@ def table_judge_routes(config) -> str:
     return f"rung 1: {model} via {via}; rung 2: {config.table_judge_rung2_binary} CLI"
 
 
+def any_table_judge_reader_reachable(config) -> bool:
+    """Whether either table-judge READER rung can be reached right now, probed once each.
+
+    Reader-only on purpose. The blind-cell adjudicator is a different role: it
+    answers "what token is in this cell", never "is this table faithful", so
+    its being reachable says nothing about whether any table can be judged.
+
+    Best effort -- a probe that raises means that rung is not attemptable, and
+    never a failed startup.
+    """
+    for probe in (
+        lambda: table_judge_ollama_rung_reachable(
+            config.table_judge_rung1_model, config.table_judge_rung1_host
+        ),
+        lambda: gemini_rung_reachable(config.table_judge_rung2_binary),
+    ):
+        try:
+            if probe():
+                return True
+        except Exception:  # noqa: BLE001 - a broken probe is "not reachable"
+            continue
+    return False
+
+
 def check_table_judge(config) -> Check:
     """A table-judge reader rung is reachable (folds the P1 startup notices).
 
@@ -336,8 +362,6 @@ def check_table_judge(config) -> Check:
             "cloud services, so every table page will be TABLE_UNVERIFIED "
             f"(drop {policy} or pass --no-table-judge-ladder)",
         )
-    from socr.cli import any_table_judge_reader_reachable
-
     if any_table_judge_reader_reachable(config):
         return Check(
             CHECK_TABLE_JUDGE, True, True, f"a judge rung answers ({table_judge_routes(config)})"

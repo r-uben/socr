@@ -158,7 +158,7 @@ def _confirmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def test_refinalize_needs_the_runs_ink_fact(tmp_path: Path, monkeypatch) -> None:
-    from socr.pipeline.refinalize_own_text import refinalize_page
+    from socr.refinalize.own_text import refinalize_page
 
     sidecar, pa = _confirmed(tmp_path, monkeypatch)
     assert refinalize_page(sidecar, pa) is None
@@ -168,7 +168,7 @@ def test_refinalize_needs_the_runs_ink_fact(tmp_path: Path, monkeypatch) -> None
 
 @pytest.mark.parametrize("flag", ["prior_ocr_layer_scan_failed", "invisible_text_scan_failed"])
 def test_refinalize_restores_the_failed_scan_flags(tmp_path: Path, monkeypatch, flag: str) -> None:
-    from socr.pipeline.refinalize_own_text import refinalize_page
+    from socr.refinalize.own_text import refinalize_page
 
     sidecar, pa = _confirmed(tmp_path, monkeypatch)
     assert refinalize_page(sidecar, pa) is None

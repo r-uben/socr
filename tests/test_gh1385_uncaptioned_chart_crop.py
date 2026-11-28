@@ -44,7 +44,7 @@ from socr.figures.unshipped_figures import (
     figure_captions,
     tick_run,
 )
-from socr.pipeline import refinalize_unshipped_figures as tool
+from socr.refinalize import unshipped_figures as tool
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 

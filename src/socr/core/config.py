@@ -382,7 +382,7 @@ class PipelineConfig:
     agentic: bool = True  # per-page: try cheapest provider, judge escalates
     strict_local: bool = False  # if True, agentic ladder uses only local/free rungs
     judge_backend: str = "auto"  # "auto" | "vlm" | "heuristic"
-    judge_model: str = ""  # VLM model for the judge (e.g. qwen2-vl:7b); "" = default
+    judge_model: str = ""  # VLM model for the judge (e.g. qwen3.8:27b); "" = default
     # GH-873: the judge's own vLLM pair, mirroring qwen_vllm_url/qwen_vllm_model.
     # Without these the ONLY VLM judge is Ollama-backed, so a box serving the
     # vision model through vLLM and running no Ollama daemon (the HPC nodes)

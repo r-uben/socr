@@ -33,7 +33,7 @@ from socr.core.verdict import (
     page_text_digest,
     with_judge_only_clause,
 )
-from socr.pipeline.refinalize_own_text import refinalize_document
+from socr.refinalize.own_text import refinalize_document
 
 
 def _rows_only_pdf(path: Path) -> Path:

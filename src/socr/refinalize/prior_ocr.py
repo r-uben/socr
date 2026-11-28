@@ -29,16 +29,35 @@ Run it as ``socr-refinalize-prior-ocr <out_dir> [--dry-run]``.
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from socr.core.page_files import page_sidecar_paths
+from socr.core.page_files import (
+    page_blob_key as _page_blob_key,
+)
+from socr.core.page_files import (
+    page_sidecar_paths,
+)
+from socr.core.page_files import (
+    socr_source_digest as _socr_source_digest,
+)
+from socr.core.page_files import (
+    socr_version as _socr_version,
+)
 from socr.core.pass_trace import trace_to_dicts
 from socr.core.verdict import published_audit_passed
+from socr.refinalize import (
+    read_json as _read_json,
+)
+from socr.refinalize import (
+    write_json as _write_json,
+)
+from socr.refinalize import (
+    write_text as _write_text,
+)
 
 #: The floors this tool may replace. Both are reachable only on a POSITIVE prior-OCR
 #: finding, so the recorded ending is itself the evidence the page qualifies.
@@ -343,9 +362,6 @@ def _updated_sidecar(sidecar: dict, record) -> dict:
     from socr.pipeline.orchestrator import (
         NATIVE_FALLBACK_EVENT_DETAIL,
         PRIOR_OCR_RETAINED_EVENT_DETAIL,
-        _page_blob_key,
-        _socr_source_digest,
-        _socr_version,
     )
 
     winning = record.output.to_dict()
@@ -432,25 +448,6 @@ def _drop_from_error(error: str | None, pages: set[int]) -> str | None:
         head = f"page(s) {', '.join(str(n) for n in remaining)} {match.group('note')}"
         return head + sep + tail
     return tail or None
-
-
-def _read_json(path: Path):
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _write_text(path: Path, text: str) -> None:
-    """Atomically, UTF-8 whatever the platform's default: the layers carry "−", "½"
-    and accented names (Fable P2-3)."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
-
-
-def _write_json(path: Path, data) -> None:
-    """Atomically, in the writers' own format: two-space indent, UTF-8, and the trailing
-    newline exactly when the file being replaced had one (``manifest.json`` does)."""
-    newline = "\n" if path.is_file() and path.read_bytes().endswith(b"\n") else ""
-    _write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + newline)
 
 
 def _swap_once(haystack: str, old: str, new: str, where: Path) -> str:

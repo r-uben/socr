@@ -645,7 +645,7 @@ def test_a_malformed_old_trace_is_dropped_from_a_rewritten_sidecar() -> None:
 def test_refinalize_boilerplate_marks_kept_passes_not_run(tmp_path: Path) -> None:
     from test_boilerplate_output import _PREAMBLE_LINE
 
-    from socr.pipeline.refinalize_boilerplate import refinalize_document
+    from socr.refinalize.boilerplate import refinalize_document
 
     doc = tmp_path / "doc"
     pages = doc / "pages"
@@ -671,7 +671,7 @@ def test_refinalize_boilerplate_marks_kept_passes_not_run(tmp_path: Path) -> Non
 
 
 def test_refinalize_prior_ocr_takes_the_records_own_trace() -> None:
-    from socr.pipeline import refinalize_prior_ocr as tool
+    from socr.refinalize import prior_ocr as tool
 
     out = PageOutput(
         page_num=1, text="recovered prose 1.0", status=PageStatus.WARNING, engine="native"
@@ -702,7 +702,7 @@ def test_refinalize_prior_ocr_takes_the_records_own_trace() -> None:
 
 
 def test_refinalize_own_text_states_the_words_check_it_wrote() -> None:
-    from socr.pipeline.refinalize_own_text import _updated_sidecar
+    from socr.refinalize.own_text import _updated_sidecar
 
     out = _out(LAYER, "native")
     sidecar = {

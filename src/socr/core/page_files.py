@@ -28,3 +28,54 @@ def is_page_sidecar_name(name: str) -> bool:
 def page_sidecar_paths(pages_dir: Path, pattern: str = "*.json") -> list[Path]:
     """The page sidecars of *pages_dir* matching *pattern*, sorted, companions excluded."""
     return sorted(p for p in pages_dir.glob(pattern) if is_page_sidecar_name(p.name))
+
+
+# Process-lifetime cache for the package source digest (matches orchestrator._socr_source_digest).
+_SOURCE_DIGEST_CACHE: str | None = None
+
+
+def page_blob_key(page_output_dict: dict) -> str:
+    """Content-addressed ``page_fingerprint`` for a serialised PageOutput dict."""
+    from socr.core.cache import blob_hash
+
+    return "sha256:" + blob_hash(page_output_dict)
+
+
+def socr_version() -> str:
+    """socr's declared package version, read at call time."""
+    import socr
+
+    return str(getattr(socr, "__version__", ""))
+
+
+def socr_source_digest() -> str:
+    """SHA-256 over every shipped ``socr`` ``.py`` file, computed once per process.
+
+    Matches ``socr.pipeline.orchestrator._socr_source_digest`` byte-for-byte so
+    refinalized sidecars carry the identical code identity without cross-package
+    private imports.
+    """
+    global _SOURCE_DIGEST_CACHE
+    if _SOURCE_DIGEST_CACHE is not None:
+        return _SOURCE_DIGEST_CACHE
+
+    import hashlib
+
+    import socr
+
+    root = Path(socr.__file__).resolve().parent
+    digest = hashlib.sha256()
+    try:
+        for path in sorted(root.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            digest.update(str(path.relative_to(root)).encode("utf-8"))
+            digest.update(b"\x00")
+            digest.update(path.read_bytes())
+            digest.update(b"\x00")
+        _SOURCE_DIGEST_CACHE = digest.hexdigest()
+    except OSError:
+        import uuid
+
+        _SOURCE_DIGEST_CACHE = f"unreadable-source-tree:{uuid.uuid4().hex}"
+    return _SOURCE_DIGEST_CACHE

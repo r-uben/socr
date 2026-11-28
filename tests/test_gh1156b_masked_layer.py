@@ -483,7 +483,7 @@ _RECORD_KEYS = (
 def test_refinalizing_a_floored_run_equals_a_fresh_run(tmp_path: Path, monkeypatch) -> None:
     """The finished Fed run was made before Part B. Re-finalising it must give exactly
     what running Part B fresh gives: page, document, sidecar, manifest, metadata, audit."""
-    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+    from socr.refinalize.prior_ocr import refinalize_document
 
     fresh = _read(_run(tmp_path, monkeypatch, "fresh"))
     old_dir = _run(tmp_path, monkeypatch, "old", masked=False)
@@ -604,7 +604,7 @@ def test_the_tool_masks_only_a_page_whose_table_standing_is_known(
     tmp_path: Path, monkeypatch, edit: dict, masks: bool
 ) -> None:
     """Argon P0-1: the table findings were never persisted, and the tool cannot infer them."""
-    from socr.pipeline.refinalize_prior_ocr import _TABLE_STANDING_KEYS, refinalize_document
+    from socr.refinalize.prior_ocr import _TABLE_STANDING_KEYS, refinalize_document
 
     doc = _floor_run(tmp_path, monkeypatch)
     path = doc / "pages" / "00001.json"
@@ -627,7 +627,7 @@ def test_an_old_sidecar_whose_page_analysis_finds_a_table_keeps_its_floor(
     which only the page analysis of the PDF can show for a sidecar written before it was
     persisted."""
     from socr.core.born_digital import BornDigitalDetector
-    from socr.pipeline.refinalize_prior_ocr import _TABLE_STANDING_KEYS, refinalize_document
+    from socr.refinalize.prior_ocr import _TABLE_STANDING_KEYS, refinalize_document
 
     def old_style(doc: Path) -> Path:
         path = doc / "pages" / "00001.json"
@@ -659,7 +659,7 @@ def test_an_old_sidecar_whose_page_analysis_finds_a_table_keeps_its_floor(
 def test_the_tool_restores_the_ladder_disposition_as_the_enum(tmp_path: Path, monkeypatch) -> None:
     """Argon P1-1: restored as a plain string, the ladder guard never matched it."""
     from socr.core.result import FailureMode
-    from socr.pipeline.refinalize_prior_ocr import _rebuild_state
+    from socr.refinalize.prior_ocr import _rebuild_state
 
     doc = _floor_run(tmp_path, monkeypatch)
     side = json.loads((doc / "pages" / "00001.json").read_text())
@@ -670,7 +670,7 @@ def test_the_tool_restores_the_ladder_disposition_as_the_enum(tmp_path: Path, mo
 
 def test_one_bad_document_does_not_stop_the_sweep(tmp_path: Path, monkeypatch, capsys) -> None:
     """Argon P1-1 / Fable P2-3: reported per document; the others are still done."""
-    from socr.pipeline.refinalize_prior_ocr import main
+    from socr.refinalize.prior_ocr import main
 
     good = _floor_run(tmp_path, monkeypatch, "good")
     bad = _floor_run(tmp_path, monkeypatch, "bad")
@@ -690,7 +690,7 @@ def test_an_interrupted_run_is_completed_by_running_again(
     """Fable P2-4: the sidecars are written last and every step is repeatable, so a crash
     anywhere before them leaves a page the next run redoes -- to the same bytes as a run
     that was never interrupted."""
-    from socr.pipeline import refinalize_prior_ocr as tool
+    from socr.refinalize import prior_ocr as tool
 
     clean = _floor_run(tmp_path, monkeypatch, "clean")
     crashed = _floor_run(tmp_path, monkeypatch, "crashed")
@@ -736,7 +736,7 @@ def test_an_interrupted_run_is_completed_by_running_again(
 
 def test_the_tool_replaces_an_older_copy_of_its_own_event(tmp_path: Path, monkeypatch) -> None:
     """One event of each kind per page, as a fresh run writes it (Argon, round 2)."""
-    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+    from socr.refinalize.prior_ocr import refinalize_document
 
     doc = _floor_run(tmp_path, monkeypatch)
     path = doc / "pages" / "00001.json"
@@ -768,7 +768,7 @@ def test_the_tool_replaces_an_older_copy_of_its_own_event(tmp_path: Path, monkey
 def _pre_part_b(doc: Path) -> Path:
     """Strip a floor page's sidecar back to what socr 6ebb603e (the Fed run) wrote: no
     table findings, no gate answer, no per-reading table record."""
-    from socr.pipeline.refinalize_prior_ocr import _TABLE_STANDING_KEYS
+    from socr.refinalize.prior_ocr import _TABLE_STANDING_KEYS
 
     path = doc / "pages" / "00001.json"
     side = json.loads(path.read_text())
@@ -803,7 +803,7 @@ def test_the_tool_judges_the_rejected_reading_from_the_runs_cache(
     """Fable P1-2 / Argon P0-1, measured: 23 of the calibration run's 390 floor pages hold
     a rejected reading with a table, and the tool masked such pages (1964 Greenbook
     supplement p36). The cache keeps each attempt's whole output; the sidecar does not."""
-    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+    from socr.refinalize.prior_ocr import refinalize_document
 
     doc = _pre_part_b(_floor_run(tmp_path, monkeypatch))
     blob = _cached_reading(doc)
@@ -823,7 +823,7 @@ def test_a_reading_missing_from_the_cache_leaves_the_page_on_its_floor(
 ) -> None:
     from collections import Counter
 
-    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+    from socr.refinalize.prior_ocr import refinalize_document
 
     doc = _pre_part_b(_floor_run(tmp_path, monkeypatch))
     _cached_reading(doc).unlink()
@@ -840,7 +840,7 @@ def test_the_pdf_must_be_the_runs_own_input(tmp_path: Path, monkeypatch, case: s
     Each refusal is counted under its own reason (Fable P2-2)."""
     from collections import Counter
 
-    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+    from socr.refinalize.prior_ocr import refinalize_document
 
     doc = _pre_part_b(_floor_run(tmp_path, monkeypatch))
     pdf_dir = tmp_path / "pdfs"
@@ -885,7 +885,7 @@ def test_the_tool_recomputes_the_gate_rather_than_trust_its_memo(
 ) -> None:
     """Argon round 2 P1-1: a restored ``prior_ocr_table_seen: False`` answered the gate
     before any signal was read. The memo is the live run's; the tool asks again."""
-    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+    from socr.refinalize.prior_ocr import refinalize_document
 
     doc = _floor_run(tmp_path, monkeypatch)
     path = doc / "pages" / "00001.json"
@@ -905,7 +905,7 @@ def test_a_retried_page_is_left_on_its_floor(tmp_path: Path, monkeypatch) -> Non
     """Argon round 3 P1-1: the first attempt of a retried page is not in its record."""
     from collections import Counter
 
-    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+    from socr.refinalize.prior_ocr import refinalize_document
 
     doc = _pre_part_b(_floor_run(tmp_path, monkeypatch))
     path = doc / "pages" / "00001.json"
@@ -925,7 +925,7 @@ def test_the_cached_reading_is_bound_to_the_recorded_attempt(
     import hashlib
     from collections import Counter
 
-    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+    from socr.refinalize.prior_ocr import refinalize_document
 
     doc = _pre_part_b(_floor_run(tmp_path, monkeypatch))
     blob = _cached_reading(doc)
@@ -958,7 +958,7 @@ def test_the_cached_reading_is_bound_to_the_recorded_attempt(
 
 def test_a_redone_page_keeps_its_events_in_place(tmp_path: Path, monkeypatch) -> None:
     """Fable round 3 P2-3: an older copy is replaced where it stands, not moved to the end."""
-    from socr.pipeline.refinalize_prior_ocr import refinalize_document
+    from socr.refinalize.prior_ocr import refinalize_document
 
     doc = _floor_run(tmp_path, monkeypatch)
     audit_path = doc / "audit_log.json"

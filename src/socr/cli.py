@@ -6,14 +6,9 @@ import click
 from rich.console import Console
 
 from socr import __version__
-from socr.core.config import DEFAULT_GEMINI_MODEL, EngineType, PipelineConfig
-
-# Imported under the exact names the reachability diagnostic patches, so a
-# test can stub the probe without a live daemon or a live binary on PATH.
-from socr.judge.table_rung_gemini import gemini_rung_reachable
-from socr.judge.table_rung_ollama import ollama_rung_reachable as table_judge_ollama_rung_reachable
 from socr import preflight as preflight_checks
-from socr.preflight import CHECK_NAMES
+from socr.core.config import DEFAULT_GEMINI_MODEL, EngineType, PipelineConfig
+from socr.preflight import CHECK_NAMES, any_table_judge_reader_reachable
 from socr.review import html as review_html
 
 console = Console()
@@ -340,7 +335,7 @@ def common_options(f):
         "--judge-model",
         type=str,
         default="",
-        help="VLM model for the judge (e.g. qwen2-vl:7b)",
+        help="VLM model for the judge (e.g. qwen3.8:27b)",
     )(f)
     f = click.option(
         "--judge-vllm-url",
@@ -782,36 +777,6 @@ def _report_strict_local_ladder_diagnostic(config: PipelineConfig) -> None:
         )
 
 
-def _any_table_judge_reader_reachable(config: PipelineConfig) -> bool:
-    """Whether either READER rung can be reached right now, probed once each.
-
-    Reader-only on purpose. The blind-cell adjudicator is a different role: it
-    answers "what token is in this cell", never "is this table faithful", so
-    its being reachable says nothing about whether any table can be judged and
-    must not suppress the warning below.
-
-    Best effort -- a probe that raises means that rung is not attemptable, and
-    never a failed startup.
-    """
-    for probe in (
-        lambda: table_judge_ollama_rung_reachable(
-            config.table_judge_rung1_model, config.table_judge_rung1_host
-        ),
-        lambda: gemini_rung_reachable(config.table_judge_rung2_binary),
-    ):
-        try:
-            if probe():
-                return True
-        except Exception:  # noqa: BLE001 - a broken probe is "not reachable"
-            continue
-    return False
-
-
-#: Public name for the layering rule (no private import across packages): the
-#: preflight's ``table-judge`` check asks the same question this module's notice did.
-any_table_judge_reader_reachable = _any_table_judge_reader_reachable
-
-
 def _report_no_reader_ladder_diagnostic(config: PipelineConfig) -> None:
     """P1 (owner ruling Q3): say so when the ladder is on and nobody can judge.
 
@@ -831,7 +796,7 @@ def _report_no_reader_ladder_diagnostic(config: PipelineConfig) -> None:
         return
     if config.strict_local:
         return
-    if _any_table_judge_reader_reachable(config):
+    if any_table_judge_reader_reachable(config):
         return
     console.print(
         "[yellow]Notice:[/yellow] the table-judge ladder is on (default) but no judge rung is "
@@ -1551,7 +1516,7 @@ def cascade_replay(
 
 @cli.command("judge-benchmark")
 @click.argument("dataset_dir", type=click.Path(exists=True, path_type=Path))
-@click.option("--model", default="qwen2-vl:7b", help="Ollama vision model for the judge")
+@click.option("--model", default="qwen3.8:27b", help="Ollama vision model for the judge")
 @click.option("--host", default="http://localhost:11434", help="Ollama host")
 def judge_benchmark(dataset_dir: Path, model: str, host: str) -> None:
     """Measure the OCR-faithfulness judge against a labeled page set.

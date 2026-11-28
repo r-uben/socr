@@ -31,7 +31,7 @@ from socr.core.marks import (  # noqa: E402
     parse_canonical_mark,
 )
 from socr.core.result import FailureMode  # noqa: E402
-from socr.pipeline import refinalize_second_reader as tool  # noqa: E402
+from socr.refinalize import second_reader as tool  # noqa: E402
 
 MODEL = "second-reader-under-test"
 
@@ -655,7 +655,7 @@ def test_the_command_is_installed_under_its_name():
     import tomllib
 
     scripts = tomllib.loads(Path("pyproject.toml").read_text())["project"]["scripts"]
-    assert scripts[tool.TOOL] == "socr.pipeline.refinalize_second_reader:main"
+    assert scripts[tool.TOOL] == "socr.refinalize.second_reader:main"
 
 
 # --- the grammar ------------------------------------------------------------------------

@@ -162,15 +162,3 @@ def render_gemma_crops(
             img.save(path)
             stems.append((stem, path))
         return stems, plan.full_page_unverified
-
-
-def render_page_half_crops(
-    pdf_path: Path,
-    page_num: int,
-    dest_dir: Path,
-    *,
-    dpi: int,
-) -> list[tuple[str, Path]]:
-    """Backward-compatible entry: layout-aware crops (not always left/right)."""
-    stems, _ = render_gemma_crops(pdf_path, page_num, dest_dir, dpi=dpi)
-    return stems

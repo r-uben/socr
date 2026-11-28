@@ -78,7 +78,30 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from socr.core.page_files import page_sidecar_paths
+from socr.core.page_files import (
+    page_blob_key as _page_blob_key,
+)
+from socr.core.page_files import (
+    page_sidecar_paths,
+)
+from socr.core.page_files import (
+    socr_source_digest as _socr_source_digest,
+)
+from socr.core.page_files import (
+    socr_version as _socr_version,
+)
+from socr.refinalize import (
+    read_json as _read_json,
+)
+from socr.refinalize import (
+    recount_tables as _recount_tables,
+)
+from socr.refinalize import (
+    write_json as _write_json,
+)
+from socr.refinalize import (
+    write_text as _write_text,
+)
 from socr.tables.second_reader import (
     UNKNOWN_EMPTY,
     UNKNOWN_NO_NUMBERS,
@@ -299,7 +322,7 @@ def chart_label_text(page, boxes: list[list[float]]) -> str:
 
 def _has_own_layer(sidecar: dict, pa, page) -> bool:
     """Does the page have words of its own (not an earlier OCR run's) in its text layer?"""
-    from socr.pipeline.refinalize_own_text import _analysis_finds_prior_ocr
+    from socr.refinalize.own_text import _analysis_finds_prior_ocr
 
     if sidecar.get("prior_ocr_layer_suspect") or _analysis_finds_prior_ocr(pa):
         return False
@@ -352,8 +375,7 @@ def compare_page(
         rerun_text_dependent_checks,
         write_reconciled_trace,
     )
-    from socr.pipeline.orchestrator import _page_blob_key, _socr_source_digest, _socr_version
-    from socr.pipeline.refinalize_own_text import _page_state
+    from socr.refinalize.own_text import _page_state
 
     page_num = int(sidecar["page_num"])
     output = PageOutput.from_dict(sidecar.get("winning_output") or {})
@@ -475,8 +497,6 @@ def _reading_for(
 ):
     """``(reading, it must be stored in the document)`` from the document's own readings,
     then *readings_dir*; ``(None, False)`` when neither holds a usable one."""
-    from socr.pipeline.refinalize_own_text import _read_json
-
     own = doc_dir / READINGS_DIR / path.name
     sources = [(own, False)]
     if readings_dir is not None:
@@ -510,12 +530,9 @@ def refinalize_document(
     page of the document has been decided, so an inconsistency leaves the document as it was.
     A reading just MADE is stored at once (it cost a model call and changes nothing else)."""
     from socr.core.pdf import open_pdf
-    from socr.pipeline.refinalize_own_text import (
+    from socr.refinalize.own_text import (
         _analyse_pdf,
-        _read_json,
         _swap_once,
-        _write_json,
-        _write_text,
     )
 
     skipped = Counter() if skipped is None else skipped
@@ -654,7 +671,7 @@ def refinalize_document(
 
 def _fail_pages(sidecar_paths: list[Path]) -> list[tuple[int, dict]]:
     from socr.core.marks import Check
-    from socr.pipeline.refinalize_own_text import _has_fail, _read_json
+    from socr.refinalize.own_text import _has_fail
 
     return [
         (int(sc["page_num"]), sc)
@@ -672,12 +689,7 @@ def _record_document(doc_dir: Path, meta_path: Path, meta: dict, sidecar_paths: 
     from ocr_output_contract import Status
 
     from socr.core.marks import Check
-    from socr.pipeline.refinalize_own_text import (
-        _read_json,
-        _record_unfinished_pages,
-        _recount_tables,
-        _write_json,
-    )
+    from socr.refinalize.own_text import _record_unfinished_pages
 
     failing = _fail_pages(sidecar_paths)
     marked = failing or any(

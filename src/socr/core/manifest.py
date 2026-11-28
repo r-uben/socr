@@ -7287,7 +7287,7 @@ def apply_verdict_marks(
     event_kinds: frozenset[str] = frozenset(),
 ) -> tuple[PageOutput, PageVerdict]:
     """The verdict seam, for a tool outside ``core`` that re-finalizes a finished page
-    (``pipeline/refinalize_own_text.py``, #1185): the SAME function a run uses, so the
+    (``refinalize/own_text.py``, #1185): the SAME function a run uses, so the
     page's mark, status and failure mode are what a run of this code writes."""
     return _apply_verdict_marks(output, p, page_num, published, provenance, event_kinds)
 
