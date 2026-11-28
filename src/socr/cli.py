@@ -1253,7 +1253,9 @@ def library(
     def failed(result) -> bool:
         from socr.core.result import DocumentStatus
 
-        return result.status is not DocumentStatus.SKIPPED and not result.success
+        if result.status is DocumentStatus.SKIPPED:
+            return bool(getattr(result, "error", None))
+        return not result.success
 
     failures: list[str] = []
     processed: set[str] = set()

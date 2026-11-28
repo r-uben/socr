@@ -924,6 +924,8 @@ class DocumentState:
     gemini_run_stats: dict | None = None
     #: Set once when the Gemini quota/spending-cap circuit opens mid-run.
     paid_disabled: dict | None = None
+    #: 1-indexed page numbers restored from terminal sidecars on this run (PP-5).
+    resumed_pages: set[int] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         for i in range(1, self.handle.page_count + 1):

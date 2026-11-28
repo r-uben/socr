@@ -552,14 +552,20 @@ def _swap_once(haystack: str, old: str, new: str, where: Path) -> str:
     raise RuntimeError(f"{where}: the page's section is not exactly once in it")
 
 
-def _recount_tables(doc_dir: Path, meta_path: Path, meta: dict) -> None:
+def _recount_tables(
+    doc_dir: Path,
+    meta_path: Path,
+    meta: dict,
+    *,
+    sidecar_overrides: dict[int, dict] | None = None,
+) -> None:
     """``metadata.json``'s ``tables`` block, recomputed from the sidecars as they now are,
     in the document's record and in the run's root index."""
     from socr.core.table_counts import count_from_sidecars
 
     if "tables" not in meta:
         return
-    counts = count_from_sidecars(doc_dir)
+    counts = count_from_sidecars(doc_dir, sidecar_overrides=sidecar_overrides)
     if counts is None:
         return
     tables = counts.to_dict()

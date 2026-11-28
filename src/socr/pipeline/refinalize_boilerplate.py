@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -32,6 +33,8 @@ from pathlib import Path
 
 from socr.core.page_files import page_sidecar_paths
 from socr.core.verdict import PageVerdict, write_reconciled_trace
+
+logger = logging.getLogger(__name__)
 
 LOG_NAME = "refinalized_boilerplate.json"
 
@@ -58,16 +61,63 @@ def _write_json(path: Path, data) -> None:
     _write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + newline)
 
 
-def _invalidate_doc_resume_gate(doc_dir: Path) -> None:
+def _canonical_doc_markdown(doc_dir: Path) -> Path | None:
+    """Resolve ONLY the canonical assembled document markdown inside ``doc_dir``.
+
+    Never globs and unlinks arbitrary ``*.md`` files (user notes, READMEs) that
+    happen to sit beside the document output. Only returns a path explicitly
+    named by ``metadata.json``'s ``output_path`` inside ``doc_dir`` or the
+    canonical ``<doc_dir.name>.md`` stem file.
+    """
+    meta_path = doc_dir / "metadata.json"
+    if meta_path.is_file():
+        try:
+            meta = _read_json(meta_path)
+        except (ValueError, OSError):
+            meta = None
+        if isinstance(meta, dict):
+            output_path = meta.get("output_path")
+            if isinstance(output_path, str) and output_path:
+                candidate = Path(output_path)
+                if not candidate.is_absolute():
+                    candidate = doc_dir / candidate
+                try:
+                    if (
+                        candidate.resolve().parent == doc_dir.resolve()
+                        and candidate.suffix == ".md"
+                    ):
+                        return candidate if candidate.is_file() else None
+                except OSError:
+                    pass
+    stem_md = doc_dir / f"{doc_dir.name}.md"
+    return stem_md if stem_md.is_file() else None
+
+
+def _invalidate_doc_resume_gate(doc_dir: Path, canonical_md: Path | None = None) -> None:
     """Drop assembled document markdown and mark the doc partial so ``process()`` re-enters."""
     from ocr_output_contract import Status
 
-    for md_path in doc_dir.glob("*.md"):
-        md_path.unlink()
+    target_md = canonical_md if canonical_md is not None else _canonical_doc_markdown(doc_dir)
+    if target_md is not None and target_md.is_file():
+        target_md.unlink()
     meta_path = doc_dir / "metadata.json"
     if not meta_path.is_file():
         return
-    meta = _read_json(meta_path)
+    try:
+        meta = _read_json(meta_path)
+    except (ValueError, OSError) as exc:
+        logger.warning(
+            "cannot demote %s during boilerplate refinalize (%s); manual review required",
+            meta_path,
+            exc,
+        )
+        return
+    if not isinstance(meta, dict):
+        logger.warning(
+            "cannot demote %s during boilerplate refinalize (metadata is not a JSON object)",
+            meta_path,
+        )
+        return
 
     def _demote(record: dict) -> None:
         if record.get("status") == Status.COMPLETED.value:
@@ -77,11 +127,20 @@ def _invalidate_doc_resume_gate(doc_dir: Path) -> None:
     _write_json(meta_path, meta)
     root_path = doc_dir.parent / "metadata.json"
     if root_path.is_file():
-        root = _read_json(root_path)
-        entry = (root.get("files") or {}).get(meta.get("key"))
-        if isinstance(entry, dict):
-            _demote(entry)
-            _write_json(root_path, root)
+        try:
+            root = _read_json(root_path)
+        except (ValueError, OSError) as exc:
+            logger.warning(
+                "cannot demote root index %s during boilerplate refinalize (%s)",
+                root_path,
+                exc,
+            )
+            return
+        if isinstance(root, dict):
+            entry = (root.get("files") or {}).get(meta.get("key"))
+            if isinstance(entry, dict):
+                _demote(entry)
+                _write_json(root_path, root)
 
 
 def _swap_once(doc_md: str, old: str, new: str, md_path: Path) -> str:
@@ -130,8 +189,8 @@ def refinalize_document(doc_dir: Path, *, apply: bool = False) -> list[PageChang
     pages_dir = doc_dir / "pages"
     if not pages_dir.is_dir():
         return []
-    md_paths = sorted(doc_dir.glob("*.md"))
-    doc_md = md_paths[0].read_text(encoding="utf-8") if len(md_paths) == 1 else ""
+    canonical_md = _canonical_doc_markdown(doc_dir)
+    doc_md = canonical_md.read_text(encoding="utf-8") if canonical_md is not None else ""
     changes: list[PageChange] = []
     strip_writes: list[tuple[Path, Path, dict, str]] = []
     reocr_writes: list[tuple[Path, dict]] = []
@@ -154,9 +213,9 @@ def refinalize_document(doc_dir: Path, *, apply: bool = False) -> list[PageChang
             old_fragment = fragment_path.read_text(encoding="utf-8")
             if old_fragment not in (old_text, new_text):
                 raise RuntimeError(f"{fragment_path}: fragment is not its sidecar's text")
-            if len(md_paths) == 1:
+            if canonical_md is not None:
                 heading = f"## Page {page_num}\n\n"
-                doc_md = _swap_once(doc_md, heading + old_text, heading + new_text, md_paths[0])
+                doc_md = _swap_once(doc_md, heading + old_text, heading + new_text, canonical_md)
             new_sidecar = dict(sidecar)
             winning = dict(new_sidecar.get("winning_output") or {})
             winning["text"] = new_text
@@ -187,9 +246,9 @@ def refinalize_document(doc_dir: Path, *, apply: bool = False) -> list[PageChang
     for sidecar_path, sidecar in reocr_writes:
         _write_json(sidecar_path, sidecar)
     if reocr_writes:
-        _invalidate_doc_resume_gate(doc_dir)
-    if strip_writes and len(md_paths) == 1:
-        _write_text(md_paths[0], doc_md)
+        _invalidate_doc_resume_gate(doc_dir, canonical_md=canonical_md)
+    elif strip_writes and canonical_md is not None:
+        _write_text(canonical_md, doc_md)
     if changes:
         log_path = doc_dir / LOG_NAME
         log = (
