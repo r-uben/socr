@@ -574,8 +574,8 @@ class TestP1NoReaderStartupDiagnostic:
         runner = CliRunner()
         with (
             patch("socr.pipeline.orchestrator.UnifiedPipeline", side_effect=_StubPipeline),
-            patch("socr.cli.table_judge_ollama_rung_reachable", return_value=False),
-            patch("socr.cli.gemini_rung_reachable", return_value=False),
+            patch("socr.preflight.table_judge_ollama_rung_reachable", return_value=False),
+            patch("socr.preflight.gemini_rung_reachable", return_value=False),
         ):
             result = runner.invoke(
                 cli,
@@ -594,8 +594,8 @@ class TestP1NoReaderStartupDiagnostic:
         runner = CliRunner()
         with (
             patch("socr.pipeline.orchestrator.UnifiedPipeline", side_effect=_StubPipeline),
-            patch("socr.cli.table_judge_ollama_rung_reachable", return_value=False),
-            patch("socr.cli.gemini_rung_reachable", return_value=False),
+            patch("socr.preflight.table_judge_ollama_rung_reachable", return_value=False),
+            patch("socr.preflight.gemini_rung_reachable", return_value=False),
             patch(
                 "socr.pipeline.orchestrator.table_judge_adjudicator_reachable", return_value=True
             ),
@@ -611,8 +611,8 @@ class TestP1NoReaderStartupDiagnostic:
         runner = CliRunner()
         with (
             patch("socr.pipeline.orchestrator.UnifiedPipeline", side_effect=_StubPipeline),
-            patch("socr.cli.table_judge_ollama_rung_reachable", return_value=True),
-            patch("socr.cli.gemini_rung_reachable", return_value=False),
+            patch("socr.preflight.table_judge_ollama_rung_reachable", return_value=True),
+            patch("socr.preflight.gemini_rung_reachable", return_value=False),
         ):
             result = runner.invoke(
                 cli,
@@ -625,8 +625,8 @@ class TestP1NoReaderStartupDiagnostic:
         runner = CliRunner()
         with (
             patch("socr.pipeline.orchestrator.UnifiedPipeline", side_effect=_StubPipeline),
-            patch("socr.cli.table_judge_ollama_rung_reachable", return_value=False),
-            patch("socr.cli.gemini_rung_reachable", return_value=False),
+            patch("socr.preflight.table_judge_ollama_rung_reachable", return_value=False),
+            patch("socr.preflight.gemini_rung_reachable", return_value=False),
         ):
             result = runner.invoke(
                 cli,
@@ -652,8 +652,8 @@ class TestP1NoReaderStartupDiagnostic:
         runner = CliRunner()
         with (
             patch("socr.pipeline.orchestrator.UnifiedPipeline", side_effect=_StubPipeline),
-            patch("socr.cli.table_judge_ollama_rung_reachable", return_value=False),
-            patch("socr.cli.gemini_rung_reachable", return_value=False),
+            patch("socr.preflight.table_judge_ollama_rung_reachable", return_value=False),
+            patch("socr.preflight.gemini_rung_reachable", return_value=False),
         ):
             result = runner.invoke(
                 cli,
@@ -684,8 +684,8 @@ class TestP1NoReaderStartupDiagnostic:
         runner = CliRunner()
         with (
             patch("socr.pipeline.orchestrator.UnifiedPipeline", side_effect=_StubPipeline),
-            patch("socr.cli.table_judge_ollama_rung_reachable", side_effect=_spy_ollama),
-            patch("socr.cli.gemini_rung_reachable", side_effect=_spy_gemini),
+            patch("socr.preflight.table_judge_ollama_rung_reachable", side_effect=_spy_ollama),
+            patch("socr.preflight.gemini_rung_reachable", side_effect=_spy_gemini),
         ):
             runner.invoke(
                 cli,

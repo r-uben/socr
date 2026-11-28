@@ -1417,7 +1417,7 @@ def test_refinalize_words_a_partly_lost_chart_page_as_the_live_note_does() -> No
     from socr.core.audit_log import AuditEvent
     from socr.core.document import DocumentHandle
     from socr.core.state import DocumentState
-    from socr.pipeline.refinalize_unshipped_figures import answered_document_note
+    from socr.refinalize.unshipped_figures import answered_document_note
 
     state = DocumentState(handle=DocumentHandle(path=Path("x.pdf"), page_count=4))
     sidecars = []

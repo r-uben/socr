@@ -2,7 +2,7 @@
 
 Realizes the "near-zero marginal cost, headless, no ToS risk" path from the
 design review: the judge runs as a local vision model on the same machine as the
-OCR (e.g. Qwen2-VL on the Bocconi A100/H100 nodes), reachable via the Ollama
+OCR (e.g. ``qwen3.8:27b`` via Ollama), reachable via the Ollama
 HTTP API. No subscription CLI, no metered tokens.
 
 Kept separate from ``judge.py`` so the verdict parsing / scoring logic stays
@@ -35,7 +35,7 @@ from socr.judge.judge import (
     parse_verdict,
 )
 
-DEFAULT_MODEL = "qwen2-vl:7b"
+DEFAULT_MODEL = "qwen3.8:27b"
 DEFAULT_HOST = "http://localhost:11434"
 
 #: The judge call's own wall-clock budget (``OllamaVisionJudge.timeout``, and

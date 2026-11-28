@@ -546,8 +546,8 @@ def _only_table_judge_is_real(monkeypatch):
             "check_" + name.replace("-", "_"),
             lambda *a, _c=name, **k: preflight.Check(_c, True, True, "faked present"),
         )
-    monkeypatch.setattr("socr.cli.table_judge_ollama_rung_reachable", lambda *a, **k: True)
-    monkeypatch.setattr("socr.cli.gemini_rung_reachable", lambda *a, **k: True)
+    monkeypatch.setattr("socr.preflight.table_judge_ollama_rung_reachable", lambda *a, **k: True)
+    monkeypatch.setattr("socr.preflight.gemini_rung_reachable", lambda *a, **k: True)
 
 
 @pytest.fixture(autouse=True)

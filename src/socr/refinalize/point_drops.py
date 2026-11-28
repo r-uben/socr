@@ -6,7 +6,7 @@ A model that reads ``-.7`` as ``-7`` ships a wrong number under a mark.  Since #
 restores such a point before it finalizes the page (``UnifiedPipeline._repair_dropped_points``).
 This tool does the same to a run made before, with NO new OCR and no model: the page's own
 characters come from the run's input PDF, accepted only for the very file the run read (same
-checksum, same page count; ``refinalize_own_text._analyse_pdf``).
+checksum, same page count; ``socr.refinalize.own_text._analyse_pdf``).
 
 DRY-RUN BY DEFAULT: without ``--apply`` it prints exactly what ``--apply`` would change and writes
 nothing.  The rule is ``tables.row_binding_check.propose_page_point_repairs`` (a cell is changed
@@ -16,7 +16,7 @@ dropped points only), under the same page predicate as the row-binding check
 
 A page is repaired through the seam a run uses (``core.manifest.apply_verdict_marks``): the
 repaired text replaces the reading's, the ``text_layer_numbers`` and ``text_layer_drops`` clauses
-are RECOMPUTED on it (unlike ``refinalize_own_text``, which leaves a page that already carries
+are RECOMPUTED on it (unlike ``socr.refinalize.own_text``, which leaves a page that already carries
 one alone), the stale text-layer marks are removed and the new ones written, and the page's
 ``row_binding`` record and events are rewritten from the check on the repaired text.  Then:
 ``pages/NNN.md`` and the document ``.md`` section, the manifest ``blob_ref`` and cache, the
@@ -49,12 +49,35 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from socr.core.page_files import page_sidecar_paths
+from socr.core.page_files import (
+    page_blob_key as _page_blob_key,
+)
+from socr.core.page_files import (
+    page_sidecar_paths,
+)
+from socr.core.page_files import (
+    socr_source_digest as _socr_source_digest,
+)
+from socr.core.page_files import (
+    socr_version as _socr_version,
+)
 from socr.core.verdict import (
     published_audit_passed,
     rerun_text_dependent_checks,
     table_block_digest,
     write_reconciled_trace,
+)
+from socr.refinalize import (
+    read_json as _read_json,
+)
+from socr.refinalize import (
+    recount_tables as _recount_tables,
+)
+from socr.refinalize import (
+    write_json as _write_json,
+)
+from socr.refinalize import (
+    write_text as _write_text,
 )
 
 #: The per-document record of what this tool changed.
@@ -101,7 +124,7 @@ def without_text_layer_marks(text: str, page_num: int) -> str:
 
 
 def _page_state_for(sidecar: dict, pa):
-    from socr.pipeline.refinalize_own_text import _page_state
+    from socr.refinalize.own_text import _page_state
 
     p = _page_state(sidecar, pa)
     p.refused_for_spacing_alone = bool(getattr(pa, "refused_for_spacing_alone", False))
@@ -132,8 +155,7 @@ def repair_page(
         with_text_layer_numbers_clause,
     )
     from socr.judge.table_verdict import TABLE_POINT_REPAIRED_KIND
-    from socr.pipeline.orchestrator import _page_blob_key, _socr_source_digest, _socr_version
-    from socr.pipeline.refinalize_own_text import slot_reference_state
+    from socr.refinalize.own_text import slot_reference_state
     from socr.tables.locate import locate_tables
     from socr.tables.row_binding_check import (
         check_page_row_binding,
@@ -242,7 +264,7 @@ def repair_page(
         return None
     final, verdict = apply_verdict_marks(output2, p, page_num, published=extended)
 
-    # The sidecar: record-derived keys, as ``refinalize_own_text._updated_sidecar``.
+    # The sidecar: record-derived keys, as ``socr.refinalize.own_text._updated_sidecar``.
     winning = final.to_dict()
     new_sidecar = dict(sidecar)
     new_sidecar["status"] = winning.get("status", "missing")
@@ -366,7 +388,7 @@ def _replace_note(error: str, old: str | None, new: str | None) -> str:
 
 
 def _text_layer_pages(sidecar_paths, check) -> list[int]:
-    from socr.pipeline.refinalize_own_text import _has_fail, _read_json
+    from socr.refinalize.own_text import _has_fail
 
     return [int(sc["page_num"]) for sc in map(_read_json, sidecar_paths) if _has_fail(sc, check)]
 
@@ -378,14 +400,10 @@ def refinalize_document(
     document has been decided, so an inconsistency leaves the document untouched."""
     from socr.core.pdf import open_pdf
     from socr.core.verdict import engine_is_model_reading
-    from socr.pipeline.refinalize_own_text import (
+    from socr.refinalize.own_text import (
         _analyse_pdf,
         _page_event_kinds,
-        _read_json,
-        _recount_tables,
         _swap_once,
-        _write_json,
-        _write_text,
     )
 
     skipped = Counter() if skipped is None else skipped
@@ -514,8 +532,6 @@ def refinalize_document(
 
 def _record_left_alone(doc_dir: Path, named: dict[int, str]) -> None:
     """The pages a repair was proposed for and not applied, in the document's log."""
-    from socr.pipeline.refinalize_own_text import _read_json, _write_json
-
     log_path = doc_dir / LOG_NAME
     log = _read_json(log_path) if log_path.is_file() else {"tool": "socr-refinalize-point-drops"}
     log["left_alone"] = {str(n): why for n, why in sorted(named.items())}
@@ -527,7 +543,6 @@ def _rewrite_document_audit_log(doc_dir: Path, done: list[tuple[Path, _Done]]) -
     had no events, and a repair here only adds ``table_point_repaired`` ones, so it gets the log a
     run of this code writes)."""
     from socr.core.marks import Check
-    from socr.pipeline.refinalize_own_text import _read_json, _write_json
 
     path = doc_dir / "audit_log.json"
     audit = (
@@ -572,7 +587,6 @@ def _rewrite_document_notes(
     still fail are named, a clause no page fails any more loses its note.  ``status`` is not
     touched (see the module docstring)."""
     from socr.core.verdict import numbers_disagree_note, numbers_dropped_note
-    from socr.pipeline.refinalize_own_text import _read_json, _write_json
 
     def rewritten(record: dict) -> bool:
         error = record.get("error") or ""

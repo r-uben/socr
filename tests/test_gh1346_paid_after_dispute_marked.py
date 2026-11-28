@@ -454,7 +454,7 @@ def test_the_scoreboard_counts_the_banner_as_a_mark() -> None:
 
 
 def test_refinalize_tool_leaves_a_marked_page_alone(arms, tmp_path: Path) -> None:
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     pdf, disputed, _control = arms
     pdf_dir = tmp_path / "pdfs"

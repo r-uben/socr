@@ -516,7 +516,7 @@ def test_process_refinalize_keeps_a_confirmed_page_confirmed(
 ) -> None:
     """``socr-refinalize-own-text`` reaches the verdict a fresh run reached."""
     from socr.core.born_digital import BornDigitalDetector
-    from socr.pipeline.refinalize_own_text import refinalize_page
+    from socr.refinalize.own_text import refinalize_page
 
     pdf = _scan(tmp_path / "scan.pdf", SCAN_LINES, SCAN_LINES)
     agree = _run(tmp_path / "agree", pdf, _layer_of(pdf), monkeypatch)

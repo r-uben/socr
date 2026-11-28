@@ -23,7 +23,7 @@ from socr.core.result import PageOutput, PageStatus
 from socr.core.state import DocumentState
 from socr.pipeline.agentic import HeuristicPageJudge, route_page
 from socr.pipeline.orchestrator import UnifiedPipeline
-from socr.pipeline.refinalize_boilerplate import classify_winning_text, refinalize_document
+from socr.refinalize.boilerplate import classify_winning_text, refinalize_document
 
 # Real JCT corpus sidecars (JCS-10-59 p2, JCX-16-81 p14), pinned verbatim.
 JCS_P2_TEXT = (

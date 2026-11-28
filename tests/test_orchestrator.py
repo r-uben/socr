@@ -1192,62 +1192,6 @@ class TestPhantomImageStrippingInAssemble:
 
 
 # ---------------------------------------------------------------------------
-# Native-first pipeline
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Tier-2 per-page escalation
-# ---------------------------------------------------------------------------
-
-
-class TestTieredEscalation:
-    """Per-page audit scoring inside _backbone_native_first.
-
-    When local (Tier 2) outputs fail the per-page heuristic audit, those
-    pages should be removed from local results and re-routed to the cloud
-    engine (Tier 3).
-    """
-
-    def _setup(
-        self,
-        page_count: int = 5,
-        scanned_pages: set[int] | None = None,
-    ) -> tuple["UnifiedPipeline", "DocumentState"]:
-        """Tiered pipeline with all-scanned or custom pages."""
-        from socr.core.config import EngineType
-
-        config = _make_config(
-            quiet=True,
-            native_first=True,
-            tiered=True,
-            primary_engine=EngineType.GEMINI,
-            local_engine=EngineType.GLM,
-        )
-        pipeline = UnifiedPipeline(config)
-        # All pages are scanned (not born-digital) so they all go to OCR
-        scanned = scanned_pages or set(range(1, page_count + 1))
-        assessment = _make_bd_assessment(page_count, born_digital_pages=set())
-        state = DocumentState(handle=_make_handle(page_count))
-        state.apply_born_digital(assessment)
-        pipeline._last_assessment = assessment
-        return pipeline, state
-
-    def _mock_classify_pages(self, easy: set[int], hard: set[int]):
-        """Return a side_effect for classify_pages that splits pages."""
-        from socr.core.difficulty import DifficultyAssessment, PageDifficulty
-
-        def _classify(pdf_path, page_nums, page_hints=None):
-            result = {}
-            for pn in page_nums:
-                diff = PageDifficulty.EASY if pn in easy else PageDifficulty.HARD
-                result[pn] = DifficultyAssessment(page_num=pn, difficulty=diff, reasons=[])
-            return result
-
-        return _classify
-
-
-# ---------------------------------------------------------------------------
 # Default-path parity (TICKET-12): characterize UnifiedPipeline as the CLI
 # default before StandardPipeline is deleted. Pins the behaviors codex flagged:
 # scanned docs OCR + write output, prose-only docs do ZERO OCR, and an

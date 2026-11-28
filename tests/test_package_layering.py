@@ -8,6 +8,10 @@ DAG encoded here:
   ``socr.devtools``: it is a developer-only regeneration tool that ships in the
   package only so ``[project.scripts]`` can name an entry point, and no runtime
   path may come to depend on it.
+* NOTHING under ``socr`` except ``socr.refinalize`` itself may import
+  ``socr.refinalize``: offline re-finalization tools sit above the runtime
+  pipeline and may consume shared core/pipeline helpers, never the reverse.
+* ``socr.preflight`` MUST NOT import ``socr.cli``.
 * A private (``_``-prefixed) name MUST NOT be imported across first-level
   ``socr.*`` packages.
 
@@ -160,6 +164,22 @@ def _devtools_offenders(rel: str, imports: list[tuple[int, str, tuple[str, ...]]
     ]
 
 
+def _targets_refinalize(mod: str, names: tuple[str, ...]) -> bool:
+    if mod == "socr.refinalize" or mod.startswith("socr.refinalize."):
+        return True
+    return mod == "socr" and "refinalize" in names
+
+
+def _refinalize_offenders(rel: str, imports: list[tuple[int, str, tuple[str, ...]]]) -> list[str]:
+    if _file_package(rel) == "refinalize":
+        return []
+    return [
+        f"{rel}:{lineno} imports {mod}"
+        for lineno, mod, names in imports
+        if _targets_refinalize(mod, names)
+    ]
+
+
 def _private_name_keys(
     rel: str, imports: list[tuple[int, str, tuple[str, ...]]]
 ) -> list[tuple[int, str, str]]:
@@ -210,6 +230,34 @@ def test_no_socr_module_imports_devtools() -> None:
         "no socr module outside socr.devtools may import socr.devtools:\n  "
         + "\n  ".join(offenders)
     )
+
+
+def test_no_socr_module_imports_refinalize() -> None:
+    """``socr.refinalize`` holds offline re-finalization CLIs, not runtime dependencies.
+
+    Shared helpers used by both the live pipeline and offline tools belong in
+    ``socr.core`` (e.g. ``socr.core.verdict.resolve_dropped``), so the runtime
+    package tree never depends on ``socr.refinalize``.
+    """
+    offenders: list[str] = []
+    for path in SRC.rglob("*.py"):
+        rel = path.relative_to(SRC).as_posix()
+        offenders.extend(_refinalize_offenders(rel, _collect_imports(path.read_text(), rel)))
+    assert not offenders, (
+        "no socr module outside socr.refinalize may import socr.refinalize:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_preflight_does_not_import_cli() -> None:
+    """``socr.preflight`` is invoked by ``socr.cli``, never the reverse."""
+    path = SRC / "preflight.py"
+    offenders = [
+        f"preflight.py:{lineno} imports {mod}"
+        for lineno, mod, names in _collect_imports(path.read_text(), "preflight.py")
+        if mod == "socr.cli" or mod.startswith("socr.cli.") or (mod == "socr" and "cli" in names)
+    ]
+    assert not offenders, "socr.preflight must not import socr.cli:\n  " + "\n  ".join(offenders)
 
 
 def test_devtools_imports_only_the_standard_library() -> None:
@@ -331,6 +379,32 @@ def test_devtools_may_import_itself() -> None:
     assert _devtools_offenders("devtools/__init__.py", _collect_imports(source, "devtools")) == []
 
 
+@pytest.mark.parametrize(
+    "rel, source",
+    [
+        ("pipeline/orchestrator.py", "from socr.refinalize.own_text import resolve_dropped\n"),
+        ("pipeline/orchestrator.py", "from ..refinalize import read_json\n"),
+        ("core/verdict.py", "from .. import refinalize\n"),
+        ("cli.py", "import socr.refinalize.boilerplate\n"),
+        ("core/foo.py", "__import__('socr.refinalize')\n"),
+    ],
+)
+def test_import_of_refinalize_is_caught(rel: str, source: str) -> None:
+    hits = _refinalize_offenders(rel, _collect_imports(source, rel))
+    assert hits, f"import of refinalize slipped through:\n{source}"
+
+
+def test_refinalize_may_import_itself() -> None:
+    """The rule is about crossing INTO refinalize, not about its internals."""
+    source = "from socr.refinalize.own_text import _page_state\n"
+    assert (
+        _refinalize_offenders(
+            "refinalize/point_drops.py", _collect_imports(source, "refinalize/point_drops.py")
+        )
+        == []
+    )
+
+
 def test_dynamic_import_nonliteral_is_out_of_scope() -> None:
     source = "import importlib\nname = 'socr.benchmark'\nimportlib.import_module(name)\n"
     hits = _benchmark_offenders("tables/foo.py", _collect_imports(source, "tables/foo.py"))
@@ -390,3 +464,11 @@ def test_the_benchmark_does_not_import_the_private_math_font_regex() -> None:
     src = (SRC / "benchmark" / "trigger_rates.py").read_text()
     assert "_MATH_FONT_RE" not in src
     assert "math_font_char_count" in src
+
+
+def test_public_page_files_source_digest_matches_orchestrator() -> None:
+    """Refinalize tools and the live pipeline must stamp identical code digests."""
+    from socr.core.page_files import socr_source_digest
+    from socr.pipeline.orchestrator import _socr_source_digest
+
+    assert socr_source_digest() == _socr_source_digest()

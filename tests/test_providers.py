@@ -294,3 +294,11 @@ def test_process_forwards_gemini_model_to_config(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli_mod.cli, ["process", str(pdf), "--gemini-model", "gemini-x"])
     assert isinstance(result.exception, _StopError)
     assert seen["config"].gemini_model == "gemini-x"
+
+
+def test_glm_profile_provenance_matches_glm_engine_model():
+    """PROFILE_GLM.model must match the Ollama tag that GLMEngine actually runs."""
+    from socr.core.providers import PROFILE_GLM, resolved_provenance
+    from socr.engines import glm
+
+    assert resolved_provenance(PROFILE_GLM, PipelineConfig()) == ("ollama", glm.OLLAMA_MODEL)

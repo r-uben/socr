@@ -24,7 +24,6 @@ Resume after ``re_ocr`` demotions uses two gates:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from collections import Counter
@@ -33,6 +32,15 @@ from pathlib import Path
 
 from socr.core.page_files import page_sidecar_paths
 from socr.core.verdict import PageVerdict, write_reconciled_trace
+from socr.refinalize import (
+    read_json as _read_json,
+)
+from socr.refinalize import (
+    write_json as _write_json,
+)
+from socr.refinalize import (
+    write_text as _write_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,21 +52,6 @@ class PageChange:
     doc: str
     page_num: int
     action: str  # "re_ocr" | "strip_preamble"
-
-
-def _read_json(path: Path):
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _write_text(path: Path, text: str) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
-
-
-def _write_json(path: Path, data) -> None:
-    newline = "\n" if path.is_file() and path.read_bytes().endswith(b"\n") else ""
-    _write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + newline)
 
 
 def _canonical_doc_markdown(doc_dir: Path) -> Path | None:

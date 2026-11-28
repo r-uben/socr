@@ -51,13 +51,40 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from socr.core.page_files import page_sidecar_paths
+from socr.core.page_files import (
+    page_blob_key as _page_blob_key,
+)
+from socr.core.page_files import (
+    page_sidecar_paths,
+)
+from socr.core.page_files import (
+    socr_source_digest as _socr_source_digest,
+)
+from socr.core.page_files import (
+    socr_version as _socr_version,
+)
 from socr.core.verdict import (
     PageVerdict,
     published_audit_passed,
     rerun_text_dependent_checks,
+    resolve_dropped,
     text_layer_words_outcome,
     write_reconciled_trace,
+)
+from socr.core.verdict import (
+    persisted_dropped_numbers as _persisted_dropped,
+)
+from socr.refinalize import (
+    read_json as _read_json,
+)
+from socr.refinalize import (
+    recount_tables as _recount_tables,
+)
+from socr.refinalize import (
+    write_json as _write_json,
+)
+from socr.refinalize import (
+    write_text as _write_text,
 )
 
 #: The per-document record of what this tool changed and what the run had shipped.
@@ -105,23 +132,6 @@ class PageChange:
     drops: str = ""
     #: #1294: the ``text_layer_words`` result this pass added ("" when it added none).
     words: str = ""
-
-
-def _read_json(path: Path):
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _write_text(path: Path, text: str) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
-
-
-def _write_json(path: Path, data) -> None:
-    """In the writers' own format: two-space indent, UTF-8, and the trailing newline
-    exactly when the file being replaced had one."""
-    newline = "\n" if path.is_file() and path.read_bytes().endswith(b"\n") else ""
-    _write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + newline)
 
 
 def _analyse_pdf(pdf_dir: Path, meta: dict):
@@ -324,56 +334,6 @@ def _insert_event(events: list[dict], event: dict, follows) -> list[dict]:
     return [*events[:at], event, *events[at:]]
 
 
-def _persisted_dropped(events: list[dict]) -> list[str] | None:
-    """The numbers of the first ``numbers_dropped`` event that lists any, else ``None``."""
-    from socr.core.verdict import NUMBERS_DROPPED_KIND
-
-    for e in events:
-        dropped = (e.get("data") or {}).get("dropped")
-        if e.get("kind") == NUMBERS_DROPPED_KIND and isinstance(dropped, list) and dropped:
-            return list(dropped)
-    return None
-
-
-def _drops_clause_count(sidecar: dict) -> int | None:
-    from socr.core.marks import Check
-    from socr.core.verdict import drops_count_from_reason
-
-    for c in (sidecar.get("verdict") or {}).get("clauses") or []:
-        if c.get("check") == Check.TEXT_LAYER_DROPS.value:
-            return drops_count_from_reason(c.get("reason") or "")
-    return None
-
-
-def resolve_dropped(sidecar: dict, recomputed, document_data: dict | None = None):
-    """``(numbers, "")`` for the page's ``numbers_dropped`` event, or ``(None, why not)``.
-
-    A persisted list is NEVER replaced: the first of (1) the sidecar's own event, (2) the
-    document's audit event for the page, (3) a recomputation from the analysis. (2) and (3)
-    are accepted only when their count equals the count the page's own clause states, so a
-    reassessment that failed (an empty reference reads as ``()``) or came out different can
-    neither erase nor rewrite evidence. Otherwise nothing is written and the reason is
-    returned, for the caller to surface."""
-    persisted = _persisted_dropped(list(sidecar.get("audit_events") or []))
-    if persisted is not None:
-        return persisted, ""
-    stated = _drops_clause_count(sidecar)
-    if stated is None:
-        return None, "the page's clause states no count to hold a list to"
-    doc = (document_data or {}).get("dropped")
-    if isinstance(doc, list) and len(doc) == stated:
-        return list(doc), ""
-    recomputed = list(recomputed or ())
-    if not recomputed:
-        return None, f"the clause states {stated} number(s) and the reassessment found none"
-    if len(recomputed) != stated:
-        return (
-            None,
-            f"the clause states {stated} number(s), the reassessment found {len(recomputed)}",
-        )
-    return recomputed, ""
-
-
 def _reposition(events: list[dict], kind: str, make, follows) -> list[dict]:
     """*events* with the one event of *kind* at the position a run gives it: the existing
     event itself when there is one (its data untouched), else ``make()`` (``None``: none)."""
@@ -498,7 +458,6 @@ def _updated_sidecar(
     page_state=None,
 ) -> dict:
     from socr.core.manifest import is_page_failed_marker
-    from socr.pipeline.orchestrator import _page_blob_key, _socr_source_digest, _socr_version
 
     winning = output.to_dict()
     out = dict(sidecar)
@@ -550,35 +509,6 @@ def _swap_once(haystack: str, old: str, new: str, where: Path) -> str:
     if haystack.count(old) == 1:
         return haystack.replace(old, new)
     raise RuntimeError(f"{where}: the page's section is not exactly once in it")
-
-
-def _recount_tables(
-    doc_dir: Path,
-    meta_path: Path,
-    meta: dict,
-    *,
-    sidecar_overrides: dict[int, dict] | None = None,
-) -> None:
-    """``metadata.json``'s ``tables`` block, recomputed from the sidecars as they now are,
-    in the document's record and in the run's root index."""
-    from socr.core.table_counts import count_from_sidecars
-
-    if "tables" not in meta:
-        return
-    counts = count_from_sidecars(doc_dir, sidecar_overrides=sidecar_overrides)
-    if counts is None:
-        return
-    tables = counts.to_dict()
-    if meta.get("tables") != tables:
-        meta["tables"] = tables
-        _write_json(meta_path, meta)
-    root_path = doc_dir.parent / "metadata.json"
-    if root_path.is_file():
-        root = _read_json(root_path)
-        entry = (root.get("files") or {}).get(meta.get("key"))
-        if isinstance(entry, dict) and "tables" in entry and entry["tables"] != tables:
-            entry["tables"] = tables
-            _write_json(root_path, root)
 
 
 def _has_fail(sidecar: dict, check) -> bool:

@@ -200,7 +200,7 @@ class PageState:
     withheld_table_text: str = ""
     #: #1218 merge gate: the page's ``numbers_dropped_from_reading`` audit events as its
     #: sidecar recorded them, restored on resume. Assembly holds a recomputed list to these
-    #: (``refinalize_own_text.resolve_dropped``) so a failed reassessment cannot erase the
+    #: (``core.verdict.resolve_dropped``) so a failed reassessment cannot erase the
     #: original list of a page whose restored verdict still carries the FAIL clause.
     persisted_numbers_dropped_events: list[dict] = field(default_factory=list)
     #: #1294: the page's ``words_missing_from_page`` audit events and its ``text_layer_words``

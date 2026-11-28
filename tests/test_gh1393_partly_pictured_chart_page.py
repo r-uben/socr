@@ -32,7 +32,7 @@ from socr.figures.unshipped_figures import (
     plots_a_series,
     uncovered_charts,
 )
-from socr.pipeline import refinalize_unshipped_figures as tool
+from socr.refinalize import unshipped_figures as tool
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 #: A reading that names no figure and carries no tick list the #1225 / #1389 rules read.

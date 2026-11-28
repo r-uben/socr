@@ -19,7 +19,7 @@ import socr
 from socr.core import verdict as verdict_module
 from socr.core.manifest import apply_verdict_marks
 from socr.core.result import FailureMode, PageOutput, PageStatus
-from socr.pipeline import refinalize_own_text as tool
+from socr.refinalize import own_text as tool
 
 _LAYER = "Korea 4.0 2.6 5.7 -.8 4.0"
 _READING = "Korea 4.0 2.6 5.7 -8 4.0"

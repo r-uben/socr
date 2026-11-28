@@ -63,8 +63,6 @@ test_*.md
 .env.*
 !.env.example
 
-# Lock files (keep poetry.lock, ignore uv.lock)
-uv.lock
 .envrc
 test_run/
 docs/log/*-findings.json

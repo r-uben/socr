@@ -1117,24 +1117,18 @@ def _warn_inert_config(cfg) -> list[str]:
 def _page_blob_key(page_output_dict: dict) -> str:
     """Content-addressed key for a serialised PageOutput dict.
 
-    Used in per-page sidecars as a lightweight ``page_fingerprint`` that
-    changes whenever the winning page text changes.  Delegates to the
-    BlobStore's own ``blob_hash`` so the canonicalisation is identical BY
-    CONSTRUCTION and PP-5 can cross-reference with the manifest without
-    opening the manifest file.  A re-implementation here diverged on
-    ``ensure_ascii`` and disagreed with the store for every non-ASCII page
-    (#235) — hence the delegation rather than a copied helper.
-
-    The ``sha256:`` prefix is part of the sidecar's value shape and is NOT
-    part of the store's key; only the digest below it is shared.
+    Delegates to :func:`socr.core.page_files.page_blob_key` so live runs and
+    ``socr.refinalize`` tools share one canonical implementation.
     """
-    from socr.core.cache import blob_hash
+    from socr.core.page_files import page_blob_key
 
-    return "sha256:" + blob_hash(page_output_dict)
+    return page_blob_key(page_output_dict)
 
 
-# GH-214: process-lifetime cache for the source digest. Computed once, not per page.
-_SOURCE_DIGEST_CACHE: str | None = None
+# GH-214: process-lifetime cache sync handle for tests that reset ``_SOURCE_DIGEST_CACHE = None``.
+# The canonical digest implementation and cache live in ``socr.core.page_files``.
+_CACHE_UNSYNCED = object()
+_SOURCE_DIGEST_CACHE: object = _CACHE_UNSYNCED
 
 #: The audit detail of a page that needed OCR and shipped its native text flagged. A
 #: constant for the same reason as the one below.
@@ -1167,65 +1161,27 @@ def _manifest_versions() -> tuple[str, str]:
 
 def _socr_version() -> str:
     """socr's declared package version, read at call time (monkeypatchable in tests)."""
-    import socr
+    from socr.core.page_files import socr_version
 
-    return str(getattr(socr, "__version__", ""))
+    return socr_version()
 
 
 def _socr_source_digest() -> str:
     """SHA-256 over every shipped ``socr`` ``.py`` file, computed once per process.
 
-    GH-214. ``_run_fingerprint`` records the run *configuration*, never socr's own
-    code, so fixing an extraction bug without touching config leaves the fingerprint
-    byte-identical: already-terminal pages pass the resume gate and the corrected
-    code never reaches them. The document then reports SUCCESS carrying output the
-    fix was supposed to replace.
-
-    Hashing the whole package rather than a curated module list is deliberate. A
-    curated list has to be maintained, and a module someone forgets to register
-    fails DANGEROUS — it silently reuses stale output, which is the very bug this
-    closes. Hashing everything can only fail SAFE: an output-neutral edit (a
-    comment, a docstring) costs one needless reprocess. Re-OCR is cheap; a stale
-    number in a citation corpus is not.
-
-    ``normalizer_version`` / ``assembly_version`` (issue #38) are the narrow,
-    hand-maintained form of this idea and stay where they are — they cover two
-    modules, this covers the rest, and a stale hand-bumped constant is exactly the
-    failure mode above.
-
-    Determinism matters more than speed here: paths are sorted and recorded
-    package-relative (so two checkouts of the same code agree), and generated
-    artefacts are excluded.
+    Delegates to :func:`socr.core.page_files.socr_source_digest` so the live
+    pipeline and ``socr.refinalize`` tools always share one implementation and
+    one cache. Tests that assign ``orchestrator._SOURCE_DIGEST_CACHE = None``
+    clear the shared cache transparently.
     """
+    from socr.core.page_files import reset_source_digest_cache, socr_source_digest
+
     global _SOURCE_DIGEST_CACHE
-    if _SOURCE_DIGEST_CACHE is not None:
+    if _SOURCE_DIGEST_CACHE is None:
+        reset_source_digest_cache()
+    elif isinstance(_SOURCE_DIGEST_CACHE, str):
         return _SOURCE_DIGEST_CACHE
-
-    import hashlib
-    from pathlib import Path as _Path
-
-    import socr
-
-    root = _Path(socr.__file__).resolve().parent
-    digest = hashlib.sha256()
-    try:
-        for path in sorted(root.rglob("*.py")):
-            if "__pycache__" in path.parts:
-                continue
-            digest.update(str(path.relative_to(root)).encode("utf-8"))
-            digest.update(b"\x00")
-            digest.update(path.read_bytes())
-            digest.update(b"\x00")
-        _SOURCE_DIGEST_CACHE = digest.hexdigest()
-    except OSError:
-        # An unreadable tree must not silently degrade into "no code identity",
-        # which would re-open GH-214. A FIXED sentinel is not enough: two runs from
-        # different unreadable checkouts would share it and resume each other's
-        # pages. Tagging it with a per-process value keeps one run internally
-        # consistent while guaranteeing the next process reprocesses.
-        import uuid
-
-        _SOURCE_DIGEST_CACHE = f"unreadable-source-tree:{uuid.uuid4().hex}"
+    _SOURCE_DIGEST_CACHE = socr_source_digest()
     return _SOURCE_DIGEST_CACHE
 
 
@@ -21924,7 +21880,7 @@ class UnifiedPipeline:
         # or with another count, and an empty or mismatched list is never written for a FAIL
         # clause. ``None`` = no list could be confirmed: the event is still recorded, with
         # the reason and no list, and the gap is logged.
-        from socr.pipeline.refinalize_own_text import resolve_dropped as _resolve_dropped
+        from socr.core.verdict import resolve_dropped as _resolve_dropped
 
         numbers_dropped_by_page: dict[int, list[str] | None] = {}
         numbers_dropped_unresolved: dict[int, str] = {}

@@ -6,18 +6,16 @@ pages, audits quality, and falls back. One control loop: the
 
 ## Build / test / lint (use these exact tools)
 
-- **Python:** `uv run …` or the direct binaries `~/venvs/socr/bin/{python,pytest,ruff,socr}`.
-  Never `python script.py`. The editable install resolves `import socr` to **this repo's
-  `src/socr`**, so edits are picked up — but that means a *separate git worktree* would test
-  the **main** tree's source, not its own. Do code work in the main checkout, one branch at a time.
-- **Tests:** `~/venvs/socr/bin/pytest <paths> -q`. Full suite is ~1070 tests.
+- **Python:** `uv run …` or the direct binaries `~/venvs/socr/bin/{python,pytest,socr}`.
+  Never `python script.py`. The editable install in `~/venvs/socr` resolves `import socr`
+  to the main checkout's `src/socr`; when working in a separate git worktree, always pass
+  `PYTHONPATH=<worktree>/src` (and verify `socr.__file__` points inside the worktree).
+- **Tests:** `~/venvs/socr/bin/pytest <paths> -q` (with `PYTHONPATH=<worktree>/src` in a
+  worktree). Full suite is ~11,500+ tests.
 - **Lint (BLOCKING CI gate):** run it the way CI does — `uvx ruff@0.16.0 format --check .`
   Only the **format** step blocks; `ruff check` runs with `continue-on-error`.
-  **Do NOT use `~/venvs/socr/bin/ruff` for the format gate.** That venv has an older
-  ruff which refuses to format Python code blocks inside Markdown ("experimental,
-  enable preview mode"), so it reports clean on files CI rejects — this exact gap
-  turned `main` red and blocked four PRs (#102, #107). Ruff is pinned exactly in
-  `pyproject.toml`; bump it in a deliberate commit that fixes any new findings.
+  Ruff is pinned exactly in `pyproject.toml`; bump it in a deliberate commit that fixes
+  any new findings.
 - **CI has NO ollama / no provider.** Any test that drives `_phase_agentic` / `process()` in
   agentic mode **must patch `_available_engines_for_agentic`** (e.g. return `[PROFILE_QWEN_LOCAL]`
   from `socr.core.providers`) or it passes locally (ollama installed) and **fails in CI** (the
@@ -82,6 +80,12 @@ pages, audits quality, and falls back. One control loop: the
 - **Tables** verified per-page (`_reread_page_tables`); **figures** embedded inline per page;
   **chart pages** routed to image assets (`has_chart_marks` / `_is_chart_asset_page`); **equations**
   behind `--detect-equations` / `--recover-clean-equations` (default off).
+- **Offline re-finalizers (`src/socr/refinalize/`):** standalone CLI tools (`socr-refinalize-*`
+  in `pyproject.toml`) that update finished run directories without re-running OCR:
+  `own_text.py`, `point_drops.py`, `prior_ocr.py`, `unshipped_figures.py`, `boilerplate.py`,
+  and `second_reader.py`, sharing atomic I/O and table-recount helpers in
+  `src/socr/refinalize/__init__.py`. Runtime packages under `src/socr/` must never import
+  `socr.refinalize` (enforced by `tests/test_package_layering.py`).
 - Non-agentic paths (single-engine / multi-engine / consensus / repair) stay phase-major.
 
 ## Conventions / gotchas

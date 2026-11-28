@@ -33,7 +33,7 @@ from test_gh1282_point_repair_pipeline import (  # noqa: E402
     _noop,
 )
 
-from socr.pipeline import refinalize_point_drops as tool  # noqa: E402
+from socr.refinalize import point_drops as tool  # noqa: E402
 from socr.pipeline.orchestrator import UnifiedPipeline  # noqa: E402
 
 

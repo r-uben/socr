@@ -29,14 +29,24 @@ Run it as ``socr-refinalize-unshipped-figures <out_dir> --pdf-dir <dir> [--dry-r
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from socr.core.page_files import page_sidecar_paths
+from socr.core.page_files import (
+    page_blob_key as _page_blob_key,
+)
+from socr.core.page_files import (
+    page_sidecar_paths,
+)
+from socr.core.page_files import (
+    socr_source_digest as _socr_source_digest,
+)
+from socr.core.page_files import (
+    socr_version as _socr_version,
+)
 from socr.core.verdict import (
     in_fresh_run_order,
     published_audit_passed,
@@ -60,6 +70,18 @@ from socr.figures.unshipped_figures import (
     document_note,
     locate_figure_regions,
     whole_page_box,
+)
+from socr.refinalize import (
+    read_json as _read_json,
+)
+from socr.refinalize import (
+    recount_tables as _recount_tables,
+)
+from socr.refinalize import (
+    write_json as _write_json,
+)
+from socr.refinalize import (
+    write_text as _write_text,
 )
 
 #: Sidecar keys this lane writes. A page carrying ANY of them has been answered, whatever the
@@ -112,25 +134,6 @@ class PageChange:
     @property
     def marked(self) -> bool:
         return self.kind in MARKED_KINDS
-
-
-def _read_json(path: Path):
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _write_text(path: Path, text: str) -> None:
-    """Atomically, UTF-8 whatever the platform's default: captions carry "−", "½" and accented
-    names."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
-
-
-def _write_json(path: Path, data) -> None:
-    """Atomically, in the writers' own format: two-space indent, UTF-8, and the trailing newline
-    exactly when the file being replaced had one (``manifest.json`` does)."""
-    newline = "\n" if path.is_file() and path.read_bytes().endswith(b"\n") else ""
-    _write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + newline)
 
 
 def _swap_once(haystack: str, old: str, new: str, where: Path) -> str:
@@ -379,7 +382,6 @@ def refinalize_page(
 
 def _updated_sidecar(sidecar: dict, output, verdict, decision) -> dict:
     from socr.core.manifest import is_page_failed_marker
-    from socr.pipeline.orchestrator import _page_blob_key, _socr_source_digest, _socr_version
 
     winning = output.to_dict()
     out = dict(sidecar)
@@ -429,23 +431,6 @@ def _event_for(page_num: int, decision) -> dict:
         "detail": decision.detail,
         "data": {**decision.event_data(), "refinalized": True},
     }
-
-
-def _recount_tables(
-    doc_dir: Path,
-    meta_path: Path,
-    meta: dict,
-    *,
-    sidecar_overrides: dict[int, dict] | None = None,
-) -> None:
-    """``metadata.json``'s ``tables`` block, recomputed from the sidecars as they now are.
-
-    A pure re-export of ``socr-refinalize-own-text``'s helper so the two tools cannot drift
-    about what a demoted page does to ``verified_text``.
-    """
-    from socr.pipeline.refinalize_own_text import _recount_tables as _shared
-
-    _shared(doc_dir, meta_path, meta, sidecar_overrides=sidecar_overrides)
 
 
 def _answered_sidecars(pages_dir: Path, pending: dict[int, dict]) -> list[dict]:

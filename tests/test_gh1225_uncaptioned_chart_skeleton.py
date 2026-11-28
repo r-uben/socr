@@ -44,7 +44,7 @@ from socr.figures.unshipped_figures import (
     document_note,
     tick_run,
 )
-from socr.pipeline import refinalize_unshipped_figures as tool
+from socr.refinalize import unshipped_figures as tool
 from socr.pipeline.orchestrator import UnifiedPipeline
 
 #: Shipped text of Fed greenbook-part2 2004-09 p52, first panel, as qwen read it: the title,

@@ -44,7 +44,7 @@ from socr.figures.unshipped_figures import (
     figure_block,
     figure_captions,
 )
-from socr.pipeline import refinalize_unshipped_figures as tool
+from socr.refinalize import unshipped_figures as tool
 from socr.pipeline.orchestrator import UNSHIPPED_FIGURE_EVENT_KINDS, UnifiedPipeline
 
 
@@ -1288,7 +1288,7 @@ def test_the_other_lanes_tool_counts_this_lanes_clauses() -> None:
 
     # Behavioural, not a grep: the stand-in the other lane's tool builds must produce the
     # same count as the page state a live run had.
-    from socr.pipeline.refinalize_own_text import slot_reference_state
+    from socr.refinalize.own_text import slot_reference_state
 
     stand_in = slot_reference_state(
         {"unshipped_figure_unlocated": ["Figure 7"], "unshipped_figure_kind": UNLOCATED_KIND}, 1

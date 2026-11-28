@@ -3334,3 +3334,51 @@ def marks_to_write(
     ]
     ordered = sorted(wanted, key=lambda c: (c.check.value, c.scope))
     return [c.mark(verdict.page_num) for c in ordered]
+
+
+def persisted_dropped_numbers(events: list[dict]) -> list[str] | None:
+    """The numbers of the first ``numbers_dropped`` event that lists any, else ``None``."""
+    for e in events:
+        dropped = (e.get("data") or {}).get("dropped")
+        if e.get("kind") == NUMBERS_DROPPED_KIND and isinstance(dropped, list) and dropped:
+            return list(dropped)
+    return None
+
+
+def _drops_clause_count(sidecar: dict) -> int | None:
+    for c in (sidecar.get("verdict") or {}).get("clauses") or []:
+        if c.get("check") == Check.TEXT_LAYER_DROPS.value:
+            return drops_count_from_reason(c.get("reason") or "")
+    return None
+
+
+def resolve_dropped(
+    sidecar: dict, recomputed: Any, document_data: dict | None = None
+) -> tuple[list[str] | None, str]:
+    """``(numbers, "")`` for the page's ``numbers_dropped`` event, or ``(None, why not)``.
+
+    A persisted list is NEVER replaced: the first of (1) the sidecar's own event, (2) the
+    document's audit event for the page, (3) a recomputation from the analysis. (2) and (3)
+    are accepted only when their count equals the count the page's own clause states, so a
+    reassessment that failed (an empty reference reads as ``()``) or came out different can
+    neither erase nor rewrite evidence. Otherwise nothing is written and the reason is
+    returned, for the caller to surface.
+    """
+    persisted = persisted_dropped_numbers(list(sidecar.get("audit_events") or []))
+    if persisted is not None:
+        return persisted, ""
+    stated = _drops_clause_count(sidecar)
+    if stated is None:
+        return None, "the page's clause states no count to hold a list to"
+    doc = (document_data or {}).get("dropped")
+    if isinstance(doc, list) and len(doc) == stated:
+        return list(doc), ""
+    recomputed = list(recomputed or ())
+    if not recomputed:
+        return None, f"the clause states {stated} number(s) and the reassessment found none"
+    if len(recomputed) != stated:
+        return (
+            None,
+            f"the clause states {stated} number(s), the reassessment found {len(recomputed)}",
+        )
+    return recomputed, ""

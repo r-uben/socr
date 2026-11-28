@@ -528,7 +528,7 @@ def test_the_refinalize_page_state_carries_the_shape_fact() -> None:
     from dataclasses import asdict
 
     from socr.core.born_digital import PageAssessment
-    from socr.pipeline.refinalize_own_text import _page_state
+    from socr.refinalize.own_text import _page_state
 
     sidecar = {"page_num": 1}
     base = dict(page_num=1, is_born_digital=False, native_text="", confidence=0.0)

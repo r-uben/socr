@@ -118,15 +118,13 @@ document budget cannot cover it.
   - `state.py`: `DocumentState` blackboard — per-page `PageState` with `attempts`
     and `best_output`. All routing branches mutate this shared state.
   - `providers.py`: provider cost registry + `provider_ladder()` (cheapest-first).
+  - `born_digital.py`: analyses PDF pages (text-layer quality, tables, equations,
+    prior-OCR detection, native-text extraction) during `UnifiedPipeline._phase_analyze`.
   - `manifest.py` + `cache.py`: content-addressed blob store + per-document
     manifest. `build_manifest()` freezes the winning output per page; `replay()`
     reconstructs the document from cache with **no engine calls**.
-  - `difficulty.py`: classifies tables, equations, multi-column layouts,
-    drawings, and image density during `UnifiedPipeline._phase_analyze`; every
-    routing branch consumes that analysis. `born_digital.py` handles native-text
-    extraction.
 - `engines/`: one adapter per CLI engine implementing `BaseEngine`
-  (`qwen`, `gemini`, `deepseek`, `marker`, `glm`, `nougat`, `mistral`) + HPC vLLM
+  (`qwen`, `gemma`, `gemini`, `deepseek`, `marker`, `glm`, `nougat`, `mistral`) + HPC vLLM
   engines. `qwen` is listed first because it is the primary local workhorse --
   `qwen3-vl:30b-a3b-instruct`, the model `CLAUDE.md` names as *the* local OCR model,
   and the engine most runs actually use. `registry.py` resolves/probes engines.
@@ -136,14 +134,19 @@ document budget cannot cover it.
 - `audit/`: heuristic checks (`HeuristicsChecker`) + failure-mode scoring.
 - `pipeline/`:
   - `orchestrator.py`: `UnifiedPipeline` — the shared orchestrator. Every run
-    analyzes first, then dispatches to the default agentic branch, the
-    multi-engine branch, or the deprecated deterministic branch before
+    analyzes first, then dispatches to the default agentic branch before
     assembly. Writes the manifest.
   - `agentic.py`: `route_page()` (Python-owned per-page loop) + `PageJudge`
     adapters (`VLMPageJudge`, `HeuristicPageJudge`).
   - `reconciler.py`, `hpc_pipeline.py`: reconciliation and the HPC/vLLM path.
-- `figures/`: `FigureExtractor` (PyMuPDF embedded-image extraction + VLM captions).
-- `ui/`: Rich console/progress/panels.
+- `refinalize/`: offline post-processing CLIs (`socr-refinalize-*`) that re-finalize
+  finished runs without re-running the original OCR pipeline (the optional
+  `second_reader.py` tool can still make model calls): `own_text.py`, `point_drops.py`,
+  `prior_ocr.py`, `unshipped_figures.py`, `boilerplate.py`, and `second_reader.py`,
+  sharing atomic JSON/text I/O and table-recount helpers in `refinalize/__init__.py`.
+- `figures/`: `FigureExtractor` (PyMuPDF embedded-image extraction + VLM captions)
+  and chart-region / unshipped-figure lanes.
+- `routing/`: layout-aware crops (`gemma_crops.py`) and cascade routing policy.
 
 ## Reproducibility
 The judge / VLM OCR is non-deterministic, so reproducibility is **not** "re-run

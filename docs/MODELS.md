@@ -9,8 +9,8 @@
 
 ## The policy in one line
 
-**Native text first (free) → local VLM → paid cloud (Gemini) only for edge cases.**
-(The Ollama-Cloud Qwen rung was removed from the default ladder in #905; see below.)
+**Native text first (free) → local VLM (`qwen3-vl:30b-a3b-instruct`) → free cloud (`gemma4:31b-cloud`) → paid cloud (`gemini-4-hydrogen`) only for edge cases.**
+(The Ollama-Cloud Qwen rung `qwen3.5:cloud` was retired 2026-09-25 and removed from the default ladder in #905; see below.)
 
 Best *cheap* combination, not best absolute quality. The workload is overwhelmingly
 **born-digital academic PDFs**, where PyMuPDF native-text extraction already handles
@@ -24,24 +24,30 @@ not generic leaderboard scores. See [Checking for newer models](#checking-for-ne
 for the external leaderboard, and the design logs under `docs/log/` for the raw data.
 
 > **`qwen3.5:cloud` was retired by Ollama Cloud on 2026-09-25.** Every call now returns
-> `410 Gone`, but `ollama list` still shows it. Its rows below are historical until a
-> replacement is measured (#903). #905 removed it from the default provider ladder
-> (now local qwen → marker → gemini) and moved the equation-crop `math_model` default
-> to the local `qwen3-vl:30b-a3b-instruct`. No cloud replacement is chosen: none is measured.
+> `410 Gone`, but `ollama list` still shows it. Its row below is historical (#903). #905
+> removed it from the default provider ladder and moved the equation-crop `math_model`
+> default to the local `qwen3-vl:30b-a3b-instruct`. `gemma4:31b-cloud` was later added as
+> a distinct Ollama-Cloud rung ahead of paid Gemini (`gemini-4-hydrogen`, #1343).
 
 | Model | Where | Quality | Speed | Cost | Verdict |
 |-------|-------|--------:|-------|------|---------|
 | **native (PyMuPDF)** | local | exact text | instant | free | Default for born-digital prose + table *values* |
-| ~~`qwen3.5:cloud`~~ (retired 2026-09-25) | Ollama Cloud | ~0.57 | ~49s/pg | free* | **HISTORICAL.** Was the workhorse VLM (cleared all 3 hard page types). Every call now 410s |
-| `qwen3-vl:8b` | local Ollama | ~0.47 | ~135s/pg | free | Offline / simple-page fallback. **Times out (>300s) on dense pages** |
-| **Gemini 3.x** | cloud API | 0.60–0.64 | fast | ~$0.0002/pg | **Edge-case escalation.** Best quality on the board; occasionally returns empty |
-| Mistral OCR | cloud API | 0.45 | fast | ~$0.001/pg | **Manual only.** Worse *and* ~5x pricier than Gemini → strictly dominated |
-| GLM-OCR | local Ollama | 0.37 | ~10s/pg | free | Fast local emergency fallback |
+| **`qwen3-vl:30b-a3b-instruct`** | local Ollama | frontier local | ~1–2 min/pg | free | **Workhorse local VLM.** Exact digits on dense tables; instruct (non-thinking) build only |
+| **`gemma4:31b-cloud`** | Ollama Cloud | strong | fast | free* | **Cloud vision rung** (`EngineType.GEMMA`, layout-aware crops via `routing/gemma_crops.py`) ahead of paid Gemini |
+| **`gemini-4-hydrogen`** | cloud API | best on board | fast | ~$0.0207/pg | **Edge-case escalation** (#1343, measured across 100 hard Fed pages: 391 missing numbers vs 919 on Gemini 3.8 Flash and 1781 on local Qwen) |
+| ~~`qwen3.5:cloud`~~ (retired 2026-09-25) | Ollama Cloud | ~0.57 | ~49s/pg | free* | **HISTORICAL.** Was the workhorse VLM; every call now 410s |
+| ~~`qwen3-vl:8b`~~ (not for local OCR) | local Ollama | ~0.47 | ~135s/pg | free | **Not for local OCR tier.** Collapses dense tables and times out (>300s); retained as a judge fallback |
+| Mistral OCR | cloud API | 0.45 | fast | ~$0.001/pg | **Manual only** (`--primary mistral`); lower quality than local Qwen / Gemini |
+| GLM-OCR (`glm-ocr`) | local Ollama | 0.37 | ~10s/pg | free | Fast local emergency fallback |
 | DeepSeek-OCR | local Ollama | 0.085 | — | free | **Dead weight.** Dropped from auto/local ladders; reach via `--primary deepseek` only |
-| `minicpm-v:8b` | local Ollama | — | ~27s/pg | free | Coarse offline captions only; **collapses table sub-columns** |
+| `minicpm-v:8b` | local Ollama | — | ~27s/pg | free | Coarse offline captions / judge fallback only; **collapses table sub-columns** |
 
-\* (Historical) `qwen3.5:cloud` ran on the Ollama Cloud account — no extra API key, billed as
-part of the Ollama subscription, treated as the cheap "cloud" rung.
+\* Ollama Cloud models (`gemma4:31b-cloud`, and historically `qwen3.5:cloud`) run on the
+Ollama Cloud account — no extra API key, billed under the Ollama subscription ($0.00
+marginal per-page cost in the cost registry, still refused under `--strict-local` or
+explicit `--max-cost-per-page 0`). Gemini's ~$0.0207/page (`GEMINI_COST_PER_PAGE_USD` in
+`core/providers.py`) is measured from 100 hard Fed pages (118,042 input + 252,503
+output/thinking tokens at $1.50/1M input, $7.50/1M output).
 
 ## Routing per sub-task
 
@@ -75,7 +81,11 @@ The thinking build never terminates — the timeout guard is its only defence.
   model is reached only by an explicit `--qwen-model <tag>:cloud` pin, which is treated as
   cloud egress: refused (console line plus a `qwen_cloud_pin_refused` audit event) under
   `--strict-local` or an explicit `--max-cost-per-page 0`.
-- **Escalation:** Gemini when Qwen is unavailable or returns empty.
+- **Escalation:** `marker` (local layout OCR), then `gemma4:31b-cloud` (Ollama Cloud),
+  then `gemini-4-hydrogen` (~$0.0207/page) when local Qwen is unavailable or rejected.
+- **Offline verification (`src/socr/refinalize/`):** finished runs can be audited and
+  re-finalized without re-running OCR (`socr-refinalize-own-text`, `-point-drops`,
+  `-prior-ocr`, `-unshipped-figures`, `-boilerplate`, and `-second-reader`).
 - **Font-corrupted equations** (`recover_corrupt_math`): `config.math_model` =
   `qwen3-vl:30b-a3b-instruct` (`DEFAULT_MATH_MODEL`, local, free; changed from the retired
   `qwen3.5:cloud` in #905). Override with `--math-model`; a name containing `cloud` is
@@ -115,7 +125,7 @@ The thinking build never terminates — the timeout guard is its only defence.
 
 ```python
 # config.py — deterministic auto-probe (default mode), best-cheap-first
-AUTO_ENGINE_ORDER = [QWEN, GEMINI, MARKER, GLM, NOUGAT]  # DeepSeek + Mistral dropped
+AUTO_ENGINE_ORDER = [QWEN, MARKER, GEMMA, GEMINI, GLM]  # DeepSeek + Mistral + Nougat dropped
 
 # registry.py — local-only tier for tiered routing
 _LOCAL_ENGINE_ORDER = [QWEN, GLM, NOUGAT, MARKER]  # DeepSeek dropped

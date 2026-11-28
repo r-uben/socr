@@ -105,25 +105,27 @@ the full design.
 
 ## Engines
 
-Routing is **native text → local qwen → marker → gemini (paid cloud edge case)**. See
+Routing is **native text → local qwen (`qwen3-vl:30b-a3b-instruct`) → marker → gemma (`gemma4:31b-cloud`) → gemini (`gemini-4-hydrogen`, paid cloud edge case)**. See
 `docs/MODELS.md` for the full per-sub-task policy and the measured data behind it.
 
 | Engine | Package | Type | Routing role |
 |--------|---------|------|------|
 | Qwen | `qwen-ocr-cli` | Local (Ollama) | **Workhorse VLM** (`qwen3-vl:30b-a3b-instruct`; the former `qwen3.5:cloud` was retired 2026-09-25) |
-| Gemini | `gemini-ocr-cli` | Cloud | Edge-case escalation, ~$0.0002/page |
 | Marker | `marker-ocr-cli` | Local | Layout-aware fallback (Surya + Texify) |
-| GLM | `glm-ocr-cli` | Local | Fast local emergency fallback |
-| Nougat | `nougat-ocr-cli` | Local | Academic papers, Python <3.13 |
-| Mistral | `mistral-ocr-cli` | Cloud | Manual only (`--primary mistral`); dominated by Gemini |
+| Gemma | Ollama Cloud | Cloud (free tier) | Cloud vision rung (`gemma4:31b-cloud`) before paid Gemini |
+| Gemini | `gemini-ocr-cli` | Cloud | Edge-case escalation (`gemini-4-hydrogen`), ~$0.0207/page |
+| GLM | `glm-ocr-cli` | Local | Fast local emergency fallback (`glm-ocr`) |
+| Nougat | `nougat-ocr-cli` | Local | Manual only (`--primary nougat`); academic papers, Python <3.13 |
+| Mistral | `mistral-ocr-cli` | Cloud | Manual only (`--primary mistral`); lower quality than Gemini |
 | DeepSeek | `deepseek-ocr-cli` | Local | Manual only (`--primary deepseek`); low quality |
 
 Check availability:
 ```
 $ socr engines
 
-  [+] gemini       cloud, ~$0.0002/page
+  [+] qwen         local via Ollama (qwen3-vl:30b-a3b-instruct)
   [+] marker       local, layout-aware (Surya + Texify)
+  [+] gemini       cloud (gemini-4-hydrogen), ~$0.0207/page
   [+] mistral      cloud, ~$0.001/page
   [+] deepseek     local via Ollama
   [x] nougat       local, academic papers
@@ -161,7 +163,7 @@ socr process <PDF> [OPTIONS]
                                maths-readers | table-judge; repeatable; recorded as
                                ran_without in metadata.json, manifest.json, the summary)
   --judge-backend MODE         auto | vlm | heuristic (default: auto)
-  --judge-model NAME           VLM model for the judge (e.g. qwen2-vl:7b)
+  --judge-model NAME           VLM model for the judge (e.g. qwen3.8:27b)
   --max-cost-per-page USD      Skip providers above this price (0 = no cap)
   --cost-budget USD            Stop escalating once doc spend hits this (0 = ∞)
   --write-manifest             Write a replayable manifest + blob cache
@@ -184,6 +186,14 @@ socr judge-benchmark <DATASET>   Score the judge against labeled good/mangled pa
 socr engines                     Show available engines
 socr library [--config PATH] [--dry-run] [--rerun STEM | --promote STEM]
                                  Process the papers library from its own config
+
+# Offline re-finalization tools (src/socr/refinalize/, no new full-page OCR)
+socr-refinalize-own-text         Check finished runs against their PDFs' own text layers
+socr-refinalize-point-drops      Restore dropped decimal points from born-digital layers
+socr-refinalize-prior-ocr        Re-finalize earlier-OCR floor pages from sidecars
+socr-refinalize-unshipped-figures Render/mark unshipped figures on finished runs
+socr-refinalize-boilerplate      Strip model preambles or flag boilerplate-only pages
+socr-refinalize-second-reader    Mark unmarked pages whose numbers a second reader disputes
 ```
 
 ### Papers library (`socr library`)

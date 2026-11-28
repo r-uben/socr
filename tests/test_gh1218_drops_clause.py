@@ -478,7 +478,7 @@ def _without_the_clause(m: pytest.MonkeyPatch) -> None:
 def test_refinalize_equals_a_run_of_this_code_and_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     pdf = _rotated_pdf(tmp_path / "doc.pdf")
     fresh, old = tmp_path / "fresh", tmp_path / "old"
@@ -518,7 +518,7 @@ def test_refinalize_equals_a_run_of_this_code_and_is_idempotent(
 def test_refinalize_on_a_run_of_this_code_changes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     pdf = _rotated_pdf(tmp_path / "doc.pdf")
     for drop in (True, False):
@@ -537,7 +537,7 @@ def test_refinalize_adds_the_clause_to_a_page_that_already_has_the_numbers_claus
 ) -> None:
     """A run finished with #1185 and before #1218 must still receive the drop clause
     (Fable A4): keyed on its own check, not on ``text_layer_numbers``."""
-    from socr.pipeline.refinalize_own_text import refinalize_page
+    from socr.refinalize.own_text import refinalize_page
 
     p = _p()
     with mock.patch.object(verdict_module, "text_layer_drops_clause", lambda o, p: None):
@@ -640,7 +640,7 @@ def test_the_fixture_has_a_competing_late_event_and_a_second_note(
 def test_refinalize_matches_a_fresh_run_event_for_event_and_note_for_note(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     pdf = _rotated_pdf(tmp_path / "doc.pdf")
     fresh = tmp_path / "fresh"
@@ -659,7 +659,7 @@ def test_an_interrupted_pass_is_repaired_on_the_next_one(
 ) -> None:
     """The sidecar carries the clause and lost its event; the document's event has no data.
     The next pass restores both from the analysis, and the result is a fresh run's."""
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     pdf = _rotated_pdf(tmp_path / "doc.pdf")
     fresh = tmp_path / "fresh"
@@ -862,7 +862,7 @@ def _reassessment(monkeypatch, how: str) -> None:
 def test_a_persisted_list_survives_a_reassessment_that_cannot_confirm_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str
 ) -> None:
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     fresh, pdf_dir = _fresh_and_pdf_dir(tmp_path, monkeypatch, drop=True)
     before = _tree(fresh)
@@ -877,7 +877,7 @@ def test_a_persisted_list_survives_a_reassessment_that_cannot_confirm_it(
 def test_a_list_that_cannot_be_confirmed_is_not_written_and_is_surfaced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str
 ) -> None:
-    from socr.pipeline.refinalize_own_text import LOG_NAME, refinalize_document
+    from socr.refinalize.own_text import LOG_NAME, refinalize_document
 
     fresh, pdf_dir = _fresh_and_pdf_dir(tmp_path, monkeypatch, drop=True)
     doc = _doc_dir(fresh)
@@ -916,7 +916,7 @@ def test_an_artifact_in_the_earlier_tools_order_converges_to_a_fresh_runs(
     """A page with a #1185 dispute, no drops, and a final-body event: the earlier tool put
     its event after that one and its note after the final-emission note, in the sidecar, the
     document's audit log and both metadata files. The tool puts all four back."""
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     fresh, pdf_dir = _fresh_and_pdf_dir(
         tmp_path, monkeypatch, drop=False, late_defect=True, extra="Total 999.5"
@@ -969,7 +969,7 @@ def test_an_artifact_in_the_earlier_tools_order_converges_to_a_fresh_runs(
 def test_a_page_with_no_drops_is_untouched_by_the_drop_repair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     fresh, pdf_dir = _fresh_and_pdf_dir(tmp_path, monkeypatch, drop=False)
     before = _tree(fresh)
@@ -983,7 +983,7 @@ def test_a_faithful_page_with_a_number_dispute_is_byte_preserved_by_refinalize(
 ) -> None:
     """Astra's guard: no drops (the reading holds every row), but a #1185 dispute from a
     number the layer lacks. The drop machinery must leave the run exactly as it wrote it."""
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     fresh, pdf_dir = _fresh_and_pdf_dir(
         tmp_path, monkeypatch, drop=False, late_defect=late_defect, extra="Total 999.5"

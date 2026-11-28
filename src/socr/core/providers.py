@@ -149,7 +149,7 @@ PROFILE_GLM = ProviderProfile(
     cost_per_page_usd=0.0,
     id="glm",
     backend="ollama",
-    model="glm-4v",
+    model="glm-ocr",
 )
 
 PROFILE_NOUGAT = ProviderProfile(

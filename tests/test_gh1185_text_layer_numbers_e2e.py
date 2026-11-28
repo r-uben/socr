@@ -212,7 +212,7 @@ def test_refinalize_then_resume_equals_a_run_of_this_code(
 ) -> None:
     """A finished run made without the check, re-finalized with no OCR, must be what a run
     of this code writes; and a resume of it must keep it byte for byte."""
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     pdf = _rotated_pdf(tmp_path / "doc.pdf")
     fresh = tmp_path / "fresh"
@@ -313,7 +313,7 @@ def test_refinalize_carries_a_disagreement_to_the_document_and_the_root_index(
 ) -> None:
     """The tool's half of P1-A: a re-finalized FAIL turns the document's recorded status and
     the root index's into what a run of this code records, with no OCR."""
-    from socr.pipeline.refinalize_own_text import refinalize_document
+    from socr.refinalize.own_text import refinalize_document
 
     pdf = _rotated_pdf(tmp_path / "doc.pdf")
     fresh, old = tmp_path / "fresh", tmp_path / "old"
